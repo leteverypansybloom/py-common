@@ -2,7 +2,6 @@
 
 import pytest
 
-from py_common.contract import Column, Contract, Worksheet
 from py_common.errors import ContractError, ValidationError
 from py_common.fixtures import make_fixtures
 

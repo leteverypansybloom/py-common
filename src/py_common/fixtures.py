@@ -13,8 +13,6 @@ Nine fixtures cover all validation scenarios:
 """
 
 import json
-from datetime import datetime
-from io import BytesIO
 from pathlib import Path
 from typing import Any
 

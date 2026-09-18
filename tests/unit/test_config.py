@@ -91,6 +91,7 @@ def test_require_keys_all_present():
 
     # Should not raise
     from py_common.config import require_keys
+
     require_keys(config, ["a", "b"])
 
 
@@ -100,4 +101,5 @@ def test_require_keys_missing():
 
     with pytest.raises(ConfigError, match="Missing configuration keys"):
         from py_common.config import require_keys
+
         require_keys(config, ["a", "b", "c"])

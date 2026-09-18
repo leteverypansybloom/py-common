@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from hashlib import sha256
-from typing import Optional
 
 
 class Outcome(str, Enum):

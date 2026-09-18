@@ -96,6 +96,4 @@ def require_keys(config: dict[str, Any], keys: list[str]) -> None:
     """
     missing = [k for k in keys if k not in config]
     if missing:
-        raise ConfigError(
-            f"Missing configuration keys: {', '.join(missing)}"
-        )
+        raise ConfigError(f"Missing configuration keys: {', '.join(missing)}")

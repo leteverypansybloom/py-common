@@ -17,7 +17,6 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from io import BytesIO
 from time import perf_counter
-from typing import Optional
 
 import pandas as pd
 from openpyxl import load_workbook
@@ -178,7 +177,9 @@ class Pipeline:
                     rows=rows_processed,
                 )
             except IndeterminateCommitError:
-                logger.error("Cannot confirm warehouse commit for %s", item.name)
+                logger.error(
+                    "Cannot confirm warehouse commit for %s", item.name
+                )
                 outcome = Outcome.FAILED
                 errors.append("Warehouse commit indeterminate")
                 raise
@@ -235,7 +236,10 @@ class Pipeline:
             default=str,
             sort_keys=True,
         )
-        audit_key = f"audit/records/{record.timestamp.isoformat()}_{result.item.identity}.json"
+        audit_key = (
+            f"audit/records/{record.timestamp.isoformat()}_"
+            f"{result.item.identity}.json"
+        )
         self.store.put(audit_key, audit_json.encode())
 
         # Also store duplicate check record if loaded

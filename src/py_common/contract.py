@@ -9,7 +9,6 @@ from io import BytesIO
 from typing import Any, Literal
 
 from openpyxl import load_workbook
-from openpyxl.worksheet.worksheet import Worksheet
 
 from py_common.errors import ContractError, ValidationError
 
@@ -36,8 +35,8 @@ class Worksheet:
     """Worksheet definition within a workbook.
 
     Attributes:
-        name: Worksheet name (must match workbook exactly).
-        columns: List of Column definitions.
+        name: Worksheet name (must match Excel sheet name).
+        columns: List of required columns.
     """
 
     name: str
@@ -131,10 +130,13 @@ class Contract:
             col.name: set() for col in ws_def.columns if col.unique
         }
 
-        for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+        for row_idx, row in enumerate(
+            ws.iter_rows(min_row=2, values_only=True), start=2
+        ):
             for col_def in ws_def.columns:
                 col_idx = [
-                    i for i, c in enumerate(ws_def.columns)
+                    i
+                    for i, c in enumerate(ws_def.columns)
                     if c.name == col_def.name
                 ][0]
                 value = row[col_idx] if col_idx < len(row) else None

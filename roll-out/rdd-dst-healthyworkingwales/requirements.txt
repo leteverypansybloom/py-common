@@ -1,3 +1,0 @@
-pre-commit
-bump-my-version
-pytest
