@@ -1,0 +1,79 @@
+{
+  "valid": {
+    "filename": "events_valid.xlsx",
+    "worksheet": "Events",
+    "headers": [
+      "event_id",
+      "employer_id",
+      "attendees"
+    ],
+    "row_count": 2,
+    "description": "Passes all validations"
+  },
+  "missing_sheet": {
+    "filename": "events_missing_sheet.xlsx",
+    "worksheet": "Wrong",
+    "headers": [
+      "event_id",
+      "employer_id",
+      "attendees"
+    ],
+    "row_count": 2,
+    "description": "Expected worksheet 'Events' not found"
+  },
+  "missing_column": {
+    "filename": "events_missing_column.xlsx",
+    "worksheet": "Events",
+    "headers": [
+      "event_id",
+      "employer_id"
+    ],
+    "row_count": 2,
+    "description": "Missing required column 'attendees'"
+  },
+  "extra_column": {
+    "filename": "events_extra_column.xlsx",
+    "worksheet": "Events",
+    "headers": [
+      "event_id",
+      "employer_id",
+      "attendees",
+      "extra"
+    ],
+    "row_count": 2,
+    "description": "Unexpected column 'extra'"
+  },
+  "invalid_type": {
+    "filename": "events_invalid_type.xlsx",
+    "worksheet": "Events",
+    "headers": [
+      "event_id",
+      "employer_id",
+      "attendees"
+    ],
+    "row_count": 1,
+    "description": "Column 'attendees' has string instead of int"
+  },
+  "missing_value": {
+    "filename": "events_missing_value.xlsx",
+    "worksheet": "Events",
+    "headers": [
+      "event_id",
+      "employer_id",
+      "attendees"
+    ],
+    "row_count": 1,
+    "description": "Required column 'attendees' is null"
+  },
+  "duplicate": {
+    "filename": "events_duplicate.xlsx",
+    "worksheet": "Events",
+    "headers": [
+      "event_id",
+      "employer_id",
+      "attendees"
+    ],
+    "row_count": 2,
+    "description": "Duplicate value in unique column 'event_id'"
+  }
+}

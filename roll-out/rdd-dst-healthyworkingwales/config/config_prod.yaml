@@ -1,0 +1,55 @@
+# Production Configuration
+# Uses SharePoint → Google Cloud Storage → BigQuery
+# All secrets are in Secret Manager; only names in config
+
+prod:
+  # Read Excel files from SharePoint
+  source:
+    type: sharepoint
+    tenant_id: ${SHAREPOINT_TENANT_ID}
+    client_id: ${SHAREPOINT_CLIENT_ID}
+    secret_name: sharepoint-credential
+    hostname: ${SHAREPOINT_HOSTNAME}
+    site_path: ${SHAREPOINT_SITE_PATH}
+    library: ${SHAREPOINT_LIBRARY}
+    folder: Uploads
+
+  # Write raw and processed to Cloud Storage
+  storage:
+    type: gcp
+    project: ${GCP_PROJECT}
+    bucket_raw: ${GCS_BUCKET_RAW}
+    bucket_processed: ${GCS_BUCKET_PROCESSED}
+
+  # Same validation rules as dev
+  # (In real projects, these might be loaded from a shared file)
+  contracts:
+    - name: events
+      worksheet: Events
+      key_columns: [event_id]
+      columns:
+        - name: event_id
+          data_type: string
+          nullable: false
+          unique: true
+        - name: employer_id
+          data_type: string
+          nullable: false
+        - name: attendees
+          data_type: integer
+          nullable: false
+
+    - name: was
+      worksheet: Results
+      key_columns: [was_id]
+      columns:
+        - name: was_id
+          data_type: string
+          nullable: false
+          unique: true
+        - name: employer_id
+          data_type: string
+          nullable: false
+        - name: score
+          data_type: integer
+          nullable: true
