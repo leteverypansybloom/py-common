@@ -128,6 +128,21 @@ print(f"Valid: {row_count} rows")
 - Handles retry logic, deduplication, error recording
 - Returns list of Result objects (one per file)
 
+### Concurrency
+
+`GCSObjectStore.lock()` is a **deliberate no-op stub**, not a bug.
+PHW's ingestion runs as a single Cloud Scheduler → Cloud Run Job
+trigger — one job at a time, never in parallel. Under that model
+there is no concurrent writer to lock out.
+
+This stub is **unsafe** if that changes: two processes racing to
+stage and merge into the same `{table}_staging` table can corrupt
+each other's load. Before enabling any concurrent or manually
+overlapping execution, replace `lock()` with real distributed
+locking — Firestore document locks are the recommended approach on
+GCP — so `store.lock()` genuinely raises `RuntimeError` when another
+process already holds it, as the `ObjectStore` protocol promises.
+
 ### Protocols vs Implementations
 
 Protocols are Python's version of interfaces:

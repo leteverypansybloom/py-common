@@ -151,9 +151,13 @@ class Pipeline:
             # Store raw file
             self.store.put(f"raw/{item.identity}", data)
 
-            # Convert to Parquet
+            # Convert to Parquet. Look up the primary worksheet by
+            # the name the contract validated, not wb.active: the
+            # workbook's active sheet has no guaranteed relation to
+            # which sheet the contract expects.
             wb = load_workbook(BytesIO(data), data_only=True)
-            ws = wb.active
+            primary_sheet_name = self.contract.worksheets[0].name
+            ws = wb[primary_sheet_name]
             headers = [cell.value for cell in ws[1]]
             rows = []
             for row in ws.iter_rows(min_row=2, values_only=True):

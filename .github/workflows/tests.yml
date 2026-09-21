@@ -24,7 +24,11 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          # Tests import google.cloud.storage and google.cloud.bigquery,
+          # which only ship in the [gcp] extra — without it, the
+          # BigQuery/GCS adapter test modules fail to collect and CI
+          # was silently not running them.
+          pip install -e ".[dev,gcp]"
 
       - name: Run tests
         run: |

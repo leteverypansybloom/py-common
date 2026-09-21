@@ -12,6 +12,8 @@ RAP Principles:
 import pytest
 from unittest.mock import Mock, MagicMock, patch
 
+from google.api_core.exceptions import PreconditionFailed
+
 from py_common.adapters.gcs import GCSObjectStore
 
 
@@ -198,12 +200,41 @@ class TestGCSObjectStorePut:
             AssertionError: If object not uploaded
         """
         blob = Mock()
-        blob.exists.return_value = False
         mock_bucket.blob.return_value = blob
 
         store.put("new-key", b"new data")
 
-        blob.upload_from_string.assert_called_once_with(b"new data")
+        blob.upload_from_string.assert_called_once_with(
+            b"new data", if_generation_match=0
+        )
+
+    def test_put_uses_generation_precondition(self, store, mock_bucket):
+        """put() uses if_generation_match=0 for atomic create-if-absent.
+
+        Fix for issue #4: the old put() called blob.exists() then
+        blob.upload_from_string() as two separate calls, so two
+        processes could both see "not exists" and both overwrite the
+        key. if_generation_match=0 makes GCS itself reject the write
+        if any generation already exists, closing that race.
+
+        Args:
+            store: GCSObjectStore fixture
+            mock_bucket: Mocked GCS bucket
+
+        Returns:
+            None
+
+        Raises:
+            AssertionError: If the precondition is not applied
+        """
+        blob = Mock()
+        mock_bucket.blob.return_value = blob
+
+        store.put("new-key", b"data")
+
+        _, kwargs = blob.upload_from_string.call_args
+        assert kwargs["if_generation_match"] == 0
+        blob.exists.assert_not_called()
 
     def test_put_idempotent_same_data(self, store, mock_bucket):
         """put() is idempotent when data matches (no re-upload).
@@ -222,7 +253,9 @@ class TestGCSObjectStorePut:
             AssertionError: If idempotency not enforced
         """
         blob = Mock()
-        blob.exists.return_value = True
+        blob.upload_from_string.side_effect = PreconditionFailed(
+            "generation exists"
+        )
         blob.download_as_bytes.return_value = b"data"
         mock_bucket.blob.return_value = blob
 
@@ -230,8 +263,9 @@ class TestGCSObjectStorePut:
         store.put("existing-key", b"data")
         store.put("existing-key", b"data")
 
-        # Should never upload (idempotent)
-        blob.upload_from_string.assert_not_called()
+        # Both calls attempted the atomic write and fell back to a
+        # content comparison; neither should raise.
+        assert blob.upload_from_string.call_count == 2
 
     def test_put_raises_on_conflict(self, store, mock_bucket):
         """put() raises ValueError when data differs (prevent corruption).
@@ -247,15 +281,14 @@ class TestGCSObjectStorePut:
             AssertionError: If ValueError not raised on conflict
         """
         blob = Mock()
-        blob.exists.return_value = True
+        blob.upload_from_string.side_effect = PreconditionFailed(
+            "generation exists"
+        )
         blob.download_as_bytes.return_value = b"old data"
         mock_bucket.blob.return_value = blob
 
         with pytest.raises(ValueError, match="different content"):
             store.put("existing-key", b"new data")
-
-        # Should never upload on conflict
-        blob.upload_from_string.assert_not_called()
 
     def test_put_logs_debug_on_write(self, store, mock_bucket):
         """put() logs debug message when writing (auditable).
@@ -271,7 +304,6 @@ class TestGCSObjectStorePut:
             AssertionError: If debug log not captured
         """
         blob = Mock()
-        blob.exists.return_value = False
         mock_bucket.blob.return_value = blob
 
         with patch("py_common.adapters.gcs.logger") as mock_logger:
@@ -284,7 +316,10 @@ class TestGCSObjectStoreLock:
     """Test GCSObjectStore.lock() context manager.
 
     Contract: lock(key) acquires and releases exclusive access.
-    For now, stub (no-op). Real strategy TBD (generations, Firestore).
+    Deliberate no-op stub for PHW's sequential (one-job-at-a-time)
+    deployment - see README "Concurrency" section. It must still warn
+    loudly every time it's used, since silently offering no real
+    protection is exactly what makes a stub dangerous to forget about.
     """
 
     @pytest.fixture
@@ -311,7 +346,7 @@ class TestGCSObjectStoreLock:
             pass  # Should not raise
 
     def test_lock_logs_debug(self, store):
-        """lock() logs debug messages (auditable).
+        """lock() logs a release debug message (auditable).
 
         Args:
             store: GCSObjectStore fixture
@@ -325,5 +360,26 @@ class TestGCSObjectStoreLock:
         with patch("py_common.adapters.gcs.logger") as mock_logger:
             with store.lock("test-lock"):
                 pass
-            # Verify debug was logged (acquire and release)
-            assert mock_logger.debug.call_count >= 2
+            assert mock_logger.debug.called
+
+    def test_lock_warns_no_concurrency_protection(self, store):
+        """lock() warns every acquisition that it offers no real lock.
+
+        Fix for issue #3: a silent no-op stub is easy to forget about
+        once concurrency assumptions change. A visible warning at
+        every acquisition keeps that risk in the logs.
+
+        Args:
+            store: GCSObjectStore fixture
+
+        Returns:
+            None
+
+        Raises:
+            AssertionError: If warning not logged
+        """
+        with patch("py_common.adapters.gcs.logger") as mock_logger:
+            with store.lock("test-lock"):
+                pass
+            mock_logger.warning.assert_called_once()
+            assert "test-lock" in mock_logger.warning.call_args[0][0]

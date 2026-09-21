@@ -6,9 +6,15 @@ Hierarchy:
   │  ├─ VersionMismatch: Source changed between discovery and download
   │  └─ NotFound: Source item disappeared
   ├─ ValidationError: Workbook structure or data invalid
-  ├─ ContractError: Workbook doesn't match agreed schema
+  │  └─ ContractError: Workbook doesn't match agreed schema
   ├─ ServiceError: Cloud service unavailable or permission denied
   └─ IndeterminateCommitError: Don't know if warehouse committed
+
+ContractError is a ValidationError, so callers that catch
+ValidationError (e.g. Pipeline.process(), which quarantines it)
+catch ContractError too. This is deliberate: the README says schema
+mismatches should always quarantine, same as data-validation
+failures.
 """
 
 

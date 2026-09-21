@@ -5,12 +5,27 @@ and business rules. Validation is deterministic and repeatable.
 """
 
 from dataclasses import dataclass, field
+from datetime import date
 from io import BytesIO
 from typing import Any, Literal
 
 from openpyxl import load_workbook
+from openpyxl.worksheet.worksheet import Worksheet as XlWorksheet
 
 from py_common.errors import ContractError, ValidationError
+
+# Maps a Column.data_type to the Python type(s) a cell value must be
+# an instance of, and the word used in error messages. bool is
+# excluded everywhere because Python's bool is a subclass of int and
+# would otherwise silently pass "integer"/"float" columns.
+_TYPE_CHECKS: dict[str, tuple[type | tuple[type, ...], str]] = {
+    "integer": (int, "integer"),
+    "float": ((int, float), "number"),
+    "string": (str, "text"),
+    # datetime.datetime is a subclass of datetime.date, so this
+    # covers both date-only and date+time cell values.
+    "date": (date, "date"),
+}
 
 
 @dataclass
@@ -63,18 +78,27 @@ class Contract:
     ) -> int:
         """Validate workbook against this contract.
 
+        Every worksheet in `self.worksheets` is validated against its
+        matching sheet, looked up by name — never the workbook's
+        active sheet, which has no relation to what the contract
+        expects and can silently differ from it.
+
         Args:
             excel_bytes: Raw Excel file bytes.
             source_name: Filename for error messages.
 
         Returns:
-            Number of rows in first worksheet if valid.
+            Row count of the first configured worksheet if valid.
 
         Raises:
-            ContractError: Worksheet structure doesn't match contract.
+            ContractError: Contract is misconfigured, or worksheet
+                structure doesn't match it.
             ValidationError: Data violates contract rules.
         """
-        errors: list[str] = []
+        if not self.worksheets:
+            raise ContractError(
+                f"{source_name}: Contract has no worksheets configured"
+            )
 
         try:
             wb = load_workbook(
@@ -88,31 +112,57 @@ class Contract:
                 f"{source_name}: Cannot parse Excel: {e}"
             ) from e
 
-        # Check worksheets exist
-        for ws_def in self.worksheets:
-            if ws_def.name not in wb.sheetnames:
-                errors.append(
-                    f"Missing worksheet '{ws_def.name}'. "
-                    f"Found: {', '.join(wb.sheetnames)}"
-                )
+        # Check every configured worksheet exists before validating
+        # any of them, so one missing sheet reports cleanly instead
+        # of a KeyError on the next lookup.
+        missing = [
+            ws_def.name
+            for ws_def in self.worksheets
+            if ws_def.name not in wb.sheetnames
+        ]
+        if missing:
+            raise ContractError(
+                f"{source_name}: Missing worksheet(s) "
+                f"{', '.join(missing)}. Found: {', '.join(wb.sheetnames)}"
+            )
 
-        if errors:
-            raise ContractError(f"{source_name}: {'; '.join(errors)}")
+        primary_rows = 0
+        for index, ws_def in enumerate(self.worksheets):
+            ws = wb[ws_def.name]
+            rows = self._validate_worksheet(ws, ws_def, source_name)
+            if index == 0:
+                primary_rows = rows
 
-        # Validate first worksheet
-        ws = wb.active
-        if not ws:
-            raise ContractError(f"{source_name}: No active worksheet")
+        return primary_rows
 
-        ws_def = self.worksheets[0]
+    def _validate_worksheet(
+        self,
+        ws: XlWorksheet,
+        ws_def: Worksheet,
+        source_name: str,
+    ) -> int:
+        """Validate one worksheet against its Worksheet definition.
 
-        # Check columns
+        Args:
+            ws: The openpyxl worksheet to validate.
+            ws_def: Contract definition for this worksheet.
+            source_name: Filename for error messages.
+
+        Returns:
+            Row count (excluding header) if valid.
+
+        Raises:
+            ContractError: Column structure doesn't match ws_def.
+            ValidationError: Data violates ws_def's column rules.
+        """
+        errors: list[str] = []
+        header = f"{source_name} [{ws_def.name}]"
+
         headers = [cell.value for cell in ws[1]]
         for col_def in ws_def.columns:
             if col_def.name not in headers:
                 errors.append(f"Missing column '{col_def.name}'")
 
-        # Check for unexpected columns
         expected = {col.name for col in ws_def.columns}
         actual = {h for h in headers if h}
         unexpected = actual - expected
@@ -122,9 +172,13 @@ class Contract:
             )
 
         if errors:
-            raise ContractError(f"{source_name}: {'; '.join(errors)}")
+            raise ContractError(f"{header}: {'; '.join(errors)}")
 
-        # Validate data rows
+        # Column position in the sheet may not match ws_def.columns'
+        # order, so look up each column's index by its header name
+        # rather than assuming the two lists are aligned.
+        header_index = {h: i for i, h in enumerate(headers) if h is not None}
+
         row_errors: list[str] = []
         seen_values: dict[str, set[Any]] = {
             col.name: set() for col in ws_def.columns if col.unique
@@ -134,12 +188,12 @@ class Contract:
             ws.iter_rows(min_row=2, values_only=True), start=2
         ):
             for col_def in ws_def.columns:
-                col_idx = [
-                    i
-                    for i, c in enumerate(ws_def.columns)
-                    if c.name == col_def.name
-                ][0]
-                value = row[col_idx] if col_idx < len(row) else None
+                col_idx = header_index.get(col_def.name)
+                value = (
+                    row[col_idx]
+                    if col_idx is not None and col_idx < len(row)
+                    else None
+                )
 
                 # Check nullable
                 if value is None and not col_def.nullable:
@@ -148,22 +202,17 @@ class Contract:
                     )
                     continue
 
-                # Check type
                 if value is not None:
-                    if col_def.data_type == "integer":
-                        if not isinstance(value, int):
-                            row_errors.append(
-                                f"Row {row_idx}: '{col_def.name}' "
-                                f"is {type(value).__name__}, "
-                                f"expected integer"
-                            )
-                    elif col_def.data_type == "float":
-                        if not isinstance(value, (int, float)):
-                            row_errors.append(
-                                f"Row {row_idx}: '{col_def.name}' "
-                                f"is {type(value).__name__}, "
-                                f"expected number"
-                            )
+                    expected_type, label = _TYPE_CHECKS[col_def.data_type]
+                    valid = isinstance(
+                        value, expected_type
+                    ) and not isinstance(value, bool)
+                    if not valid:
+                        row_errors.append(
+                            f"Row {row_idx}: '{col_def.name}' "
+                            f"is {type(value).__name__}, "
+                            f"expected {label}"
+                        )
 
                     # Check uniqueness
                     if col_def.unique:
@@ -176,7 +225,7 @@ class Contract:
 
         if row_errors:
             raise ValidationError(
-                f"{source_name}: {'; '.join(row_errors[:5])}"
+                f"{header}: {'; '.join(row_errors[:5])}"
                 + (
                     f"... and {len(row_errors) - 5} more"
                     if len(row_errors) > 5

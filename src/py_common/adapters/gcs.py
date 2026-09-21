@@ -14,6 +14,7 @@ import logging
 from contextlib import contextmanager
 from typing import Optional, Generator
 
+from google.api_core.exceptions import PreconditionFailed  # type: ignore
 from google.cloud import storage  # type: ignore
 
 logger = logging.getLogger("py_common.adapters.gcs")
@@ -106,36 +107,45 @@ class GCSObjectStore:
         """
         blob = self.bucket.blob(key)
 
-        # Check if object already exists.
-        if blob.exists():
+        try:
+            # if_generation_match=0 tells GCS "only write if no
+            # generation of this object exists yet" — an atomic
+            # create-if-absent. This closes the previous race where
+            # two processes both called exists() before either
+            # uploaded, and both then thought they held a fresh key.
+            # See: google.cloud.storage.blob.Blob#if_generation_match
+            blob.upload_from_string(data, if_generation_match=0)
+            logger.debug(f"Writing object {key} ({len(data)} bytes)")
+        except PreconditionFailed:
+            # Object already exists (created by us on a retry, or by
+            # a concurrent writer). Compare content to decide between
+            # idempotent success and a real conflict.
             existing = blob.download_as_bytes()
             if existing == data:
-                # Idempotent success: data matches.
                 logger.debug(f"Object {key} already exists (idempotent)")
                 return
-            else:
-                # Conflict: object exists with different content.
-                raise ValueError(
-                    f"Object {key} exists with different content. "
-                    f"Existing: {len(existing)} bytes, "
-                    f"New: {len(data)} bytes"
-                )
-
-        # Write new object.
-        logger.debug(f"Writing object {key} ({len(data)} bytes)")
-        blob.upload_from_string(data)
+            raise ValueError(
+                f"Object {key} exists with different content. "
+                f"Existing: {len(existing)} bytes, "
+                f"New: {len(data)} bytes"
+            ) from None
 
     @contextmanager
     def lock(self, key: str) -> Generator[None, None, None]:
         """Acquire exclusive write lock.
 
-        Stub implementation (no-op). Real locking strategy TBD:
-        - Option A: GCS object generations + optimistic concurrency
-        - Option B: Firestore for centralized locks
-        - Option C: Accept sequential-only processing (no parallelism)
+        Deliberate no-op stub: PHW runs one ingestion job at a time,
+        triggered by a single Cloud Scheduler job, so there is no
+        concurrent writer to lock out. This is a documented decision,
+        not an oversight — see README "Concurrency" section.
 
-        For now, this is a context manager that does nothing but
-        allows the protocol to be satisfied and logging to happen.
+        If PHW ever runs concurrent pipelines against the same
+        warehouse table (parallel triggers, manual re-runs overlapping
+        the schedule), this stub is UNSAFE: two processes can both
+        stage and merge into the same {table}_staging table at once.
+        Replace it with real distributed locking (Firestore document
+        locks are the recommended option on GCP) before enabling any
+        form of concurrent execution.
 
         Args:
             key (str): Lock identifier (e.g., warehouse table name).
@@ -146,7 +156,10 @@ class GCSObjectStore:
         Raises:
             None (stub; future: RuntimeError if lock unavailable)
         """
-        logger.debug(f"Acquiring lock for {key} (stub)")
+        logger.warning(
+            f"GCS lock stub for {key}: no concurrent protection. "
+            "Safe only for sequential (one-job-at-a-time) execution."
+        )
         try:
             yield
         finally:
