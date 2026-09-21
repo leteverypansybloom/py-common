@@ -17,6 +17,12 @@ resolution, curated ("GOLD") modelling and reporting are out of scope for
 this repository and are covered only briefly, in [Section 8](#8-what-sits-outside-py-common),
 so the boundary is clear.
 
+**New to this repository?** Start with
+[`GETTING_STARTED.md`](GETTING_STARTED.md) instead — a hands-on
+walkthrough that gets you running the pipeline before you need this
+level of detail. See [`README.md`](README.md) in this folder for how
+all the docs here fit together.
+
 ---
 
 ## Contents

@@ -4,6 +4,11 @@ Reusable Python library for Excel → Cloud workflows. Handles file discovery, v
 
 **Status**: Early development. Core pipeline and local testing adapters complete. Cloud adapters (SharePoint, GCS, BigQuery) planned for phase 2.
 
+**New to this repo?** See [`docs/README.md`](docs/README.md) for a
+guided path: a hands-on getting-started walkthrough, a guide to
+whether py-common fits your next ingestion source, and a full
+feature-by-feature status reference.
+
 ## What It Does
 
 ```
