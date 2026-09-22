@@ -142,3 +142,5 @@ and audited. If it raises, nothing was written.
 - Test fixtures are committed (not generated on-the-fly)
 - Code is readable and well-commented
 - Documentation is plain language, not academic
+
+**RAP Standards**: PEP 8, type hints, Google docstrings, TDD, RAP (Reproducible, Auditable, Peer-Reviewed)

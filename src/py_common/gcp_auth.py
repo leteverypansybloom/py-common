@@ -148,12 +148,12 @@ def _detect_environment() -> str:
     try:
         import urllib.request
 
-        response = urllib.request.urlopen(
+        request = urllib.request.Request(
             "http://metadata.google.internal/computeMetadata/v1/"
             "instance/id",
-            timeout=1,
             headers={"Metadata-Flavor": "Google"},
         )
+        response = urllib.request.urlopen(request, timeout=1)
         if response.status == 200:
             return "gce"
     except Exception:
