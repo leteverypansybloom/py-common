@@ -20,7 +20,7 @@ from py_common.errors import (
     ValidationError,
     VersionMismatch,
 )
-from py_common.model import Outcome, SourceItem
+from py_common.model import Outcome, Result, SourceItem
 from py_common.pipeline import Pipeline
 
 
@@ -271,3 +271,40 @@ class TestPipelineProcessWarehouseOutcomes:
         assert result.outcome == Outcome.FAILED
         assert "Warehouse commit indeterminate" in result.errors
         assert any("commit timed out" in e for e in result.errors)
+
+
+class TestPipelineAuditKey:
+    """_audit() must produce Windows-safe object store keys.
+
+    datetime.isoformat() timestamps contain colons, which are
+    invalid in Windows filenames; _audit() must strip them before
+    using the timestamp as part of an object store key.
+    """
+
+    def test_audit_key_has_no_colons(self, pipeline, item):
+        """The audit key passed to store.put() contains no colon.
+
+        Args:
+            pipeline: Pipeline fixture wired to mocks.
+            item: SourceItem fixture.
+
+        Returns:
+            None
+
+        Raises:
+            AssertionError: If the audit key contains a colon.
+        """
+        result = Result(
+            item=item,
+            outcome=Outcome.LOADED,
+            checksum="abc123",
+            rows_processed=1,
+            errors=[],
+            processing_time_seconds=0.1,
+        )
+
+        pipeline._audit(result)
+
+        put_keys = [c.args[0] for c in pipeline.store.put.call_args_list]
+        audit_key = next(k for k in put_keys if k.startswith("audit/records/"))
+        assert ":" not in audit_key

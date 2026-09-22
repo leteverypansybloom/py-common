@@ -15,6 +15,7 @@ Configuration (via environment variables):
 
 import logging
 
+from typing import Any
 logger = logging.getLogger("py_common.adapters.sharepoint")
 
 
@@ -30,7 +31,7 @@ class SharePointSource:
     3. Application to have Sites.Selected permission on library
     """
 
-    def __init__(self, **config):
+    def __init__(self, **config: Any) -> None:
         """Initialize SharePoint adapter.
 
         Args:
@@ -47,10 +48,10 @@ class SharePointSource:
             "For now, use LocalSource with test fixtures."
         )
 
-    def items(self):
+    def items(self) -> list[Any]:
         """List Excel files in SharePoint folder."""
         raise NotImplementedError()
 
-    def download(self, item):
+    def download(self, item: Any) -> bytes:
         """Download file bytes from SharePoint."""
         raise NotImplementedError()

@@ -67,10 +67,10 @@ class GCPAuthSession:
         Returns:
             None
         """
-        self.token = None
-        self.project = None
-        self.billing = None
-        self.method = None
+        self.token: Optional[google.auth.credentials.Credentials] = None
+        self.project: Optional[str] = None
+        self.billing: Optional[str] = None
+        self.method: Optional[str] = None
         self.authenticated = False
 
 
@@ -102,9 +102,9 @@ def _get_adc_path() -> str:
 
     # 2. Fallback to default ADC location (OS-aware)
     if os.name == "nt":  # Windows
+        appdata = os.getenv("APPDATA") or str(Path.home() / "AppData" / "Roaming")
         default_path = Path(
-            os.getenv("APPDATA"),
-            "gcloud",
+            appdata,
             "application_default_credentials.json",
         )
     else:  # Mac/Linux
@@ -200,7 +200,7 @@ def _auth_from_json(json_path: str) -> google.auth.credentials.Credentials:
 
     if cred_type == "service_account":
         # Service account: direct from JSON
-        creds = Credentials.from_service_account_file(json_path)
+        creds: google.auth.credentials.Credentials = Credentials.from_service_account_file(json_path)  # type: ignore[no-untyped-call]
         return creds
 
     elif cred_type == "authorized_user":
@@ -232,7 +232,7 @@ def _auth_from_json(json_path: str) -> google.auth.credentials.Credentials:
         # Build credentials from tokens
         from google.oauth2.credentials import Credentials as OAuth2Credentials
 
-        creds = OAuth2Credentials(
+        creds: google.auth.credentials.Credentials = OAuth2Credentials(  # type: ignore[no-untyped-call,no-redef]
             token=tokens.get("access_token"),
             refresh_token=cred_dict.get("refresh_token"),
             token_uri="https://oauth2.googleapis.com/token",
@@ -328,7 +328,7 @@ def gcp_auth(
 
         # Refresh credentials to ensure they're valid
         if hasattr(creds, "refresh"):
-            creds.refresh(Request())
+            creds.refresh(Request())  # type: ignore[no-untyped-call]
 
         # Store in session state
         _session.token = creds

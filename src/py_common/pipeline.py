@@ -361,9 +361,12 @@ class Pipeline:
             default=str,
             sort_keys=True,
         )
+        # isoformat()'s colons are invalid in Windows filenames, so
+        # replace them (2026-09-22T14-30-45.123456+00-00, not
+        # 14:30:45.123456+00:00) before using the timestamp as a key.
+        timestamp_key = record.timestamp.isoformat().replace(":", "-")
         audit_key = (
-            f"audit/records/{record.timestamp.isoformat()}_"
-            f"{result.item.identity}.json"
+            f"audit/records/{timestamp_key}_{result.item.identity}.json"
         )
         self.store.put(audit_key, audit_json.encode())
 
