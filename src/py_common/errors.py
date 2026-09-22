@@ -8,6 +8,7 @@ Hierarchy:
   ├─ ValidationError: Workbook structure or data invalid
   │  └─ ContractError: Workbook doesn't match agreed schema
   ├─ ServiceError: Cloud service unavailable or permission denied
+  ├─ ObjectStoreConflict: Key exists with different content
   └─ IndeterminateCommitError: Don't know if warehouse committed
 
 ContractError is a ValidationError, so callers that catch
@@ -70,6 +71,17 @@ class ServiceError(IngestionError):
     """Cloud service failed (permission denied, unavailable, quota).
 
     Caller should determine if retry is safe.
+    """
+
+    pass
+
+
+class ObjectStoreConflict(IngestionError):
+    """Object store key already exists with different content.
+
+    ObjectStore.put() is idempotent for identical bytes, but two
+    different payloads under the same key would silently corrupt
+    the immutable store if allowed.
     """
 
     pass

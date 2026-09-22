@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable
 
-from py_common.errors import NotFound, VersionMismatch
+from py_common.errors import NotFound, ObjectStoreConflict, VersionMismatch
 from py_common.model import SourceItem
 
 logger = logging.getLogger("py_common.adapters.local")
@@ -114,19 +114,31 @@ class LocalObjectStore:
         return path.read_bytes()
 
     def put(self, key: str, data: bytes) -> None:
-        """Write or overwrite file.
+        """Write file; idempotent if identical content exists.
+
+        Matches GCSObjectStore semantics: if the key already exists
+        with identical bytes, the write succeeds without touching
+        the file (idempotent). If it exists with different bytes,
+        raises rather than silently overwriting.
 
         Args:
             key: Object path (e.g., "processed/item123.parquet").
             data: Bytes to store.
+
+        Raises:
+            ObjectStoreConflict: Key exists with different content.
         """
         path = self.folder / key
         path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Idempotent: accept if identical file already exists
-        if path.exists() and path.read_bytes() == data:
-            logger.debug("Object already exists (identical): %s", key)
-            return
+        if path.exists():
+            existing = path.read_bytes()
+            if existing == data:
+                logger.debug("Object already exists (identical): %s", key)
+                return
+            raise ObjectStoreConflict(
+                f"Key {key} exists with different content"
+            )
 
         path.write_bytes(data)
         logger.debug("Wrote object: %s (%d bytes)", key, len(data))
