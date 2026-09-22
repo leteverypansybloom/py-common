@@ -15,14 +15,12 @@ import pytest
 from py_common.adapters.gcs import GCSObjectStore
 from py_common.adapters.bigquery import BigQueryWarehouse
 
-
 # Skip if no GCP credentials.
 HAS_CREDENTIALS = "GOOGLE_APPLICATION_CREDENTIALS" in os.environ
 
 
 @pytest.mark.skipif(
-    not HAS_CREDENTIALS,
-    reason="GCP credentials not available"
+    not HAS_CREDENTIALS, reason="GCP credentials not available"
 )
 class TestGCSBigQueryIntegration:
     """Integration: Upload to GCS, load to BigQuery."""

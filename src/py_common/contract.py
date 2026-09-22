@@ -164,7 +164,12 @@ class Contract:
                 errors.append(f"Missing column '{col_def.name}'")
 
         expected = {col.name for col in ws_def.columns}
-        actual = {h for h in headers if h}
+        # Header cells can hold several different types (text, a
+        # number, a date, ...), which sorted() can't compare against
+        # each other - stringify before comparing/sorting so a sheet
+        # with e.g. one text and one numeric stray header reports
+        # cleanly instead of raising TypeError from sorted().
+        actual = {str(h) for h in headers if h}
         unexpected = actual - expected
         if unexpected:
             errors.append(

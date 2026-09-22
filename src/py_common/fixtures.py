@@ -77,6 +77,10 @@ def make_fixtures(output_dir: Path) -> None:
 
         wb = Workbook()
         ws = wb.active
+        # A freshly created Workbook() always has exactly one active
+        # sheet; .active is only Optional for a workbook that's had
+        # all its sheets removed, which never happens here.
+        assert ws is not None
         ws.title = ws_name
 
         # Write headers

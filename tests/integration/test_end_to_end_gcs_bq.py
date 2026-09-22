@@ -11,7 +11,6 @@ import pyarrow.parquet as pq
 from py_common.adapters.gcs import GCSObjectStore
 from py_common.adapters.bigquery import BigQueryWarehouse
 
-
 HAS_CREDENTIALS = "GOOGLE_APPLICATION_CREDENTIALS" in os.environ
 
 

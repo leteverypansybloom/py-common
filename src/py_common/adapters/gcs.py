@@ -14,7 +14,7 @@ import logging
 from contextlib import contextmanager
 from typing import Optional, Generator
 
-from google.api_core.exceptions import PreconditionFailed  # type: ignore
+from google.api_core.exceptions import PreconditionFailed
 from google.cloud import storage  # type: ignore
 
 logger = logging.getLogger("py_common.adapters.gcs")

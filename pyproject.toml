@@ -26,6 +26,11 @@ dev = [
     "mypy>=1.5.0",
     "pre-commit>=3.7.0",
     "detect-secrets>=1.5.0",
+    # mypy --strict needs type stubs for untyped runtime deps, or it
+    # stops at the import line before checking any real code.
+    "types-PyYAML>=6.0",
+    "pandas-stubs>=2.0.0",
+    "types-openpyxl>=3.0.0",
 ]
 gcp = [
     "google-cloud-storage>=2.10.0",
@@ -50,6 +55,18 @@ select = ["E", "F", "W"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
+# numpy's own bundled type stubs use syntax that requires Python
+# 3.12+ (e.g. `type X = ...`), which mypy refuses to parse while
+# targeting 3.11. Nothing here imports numpy directly - it only
+# arrives transitively via pandas - so numpy's stubs are skipped
+# rather than raising the project's python_version target, which
+# would stop mypy enforcing 3.11 compatibility for our own code.
+follow_imports_for_stubs = true
+
+[[tool.mypy.overrides]]
+module = ["numpy", "numpy.*"]
+follow_imports = "skip"
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

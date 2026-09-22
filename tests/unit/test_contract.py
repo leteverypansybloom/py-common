@@ -93,6 +93,38 @@ def test_extra_column(temp_dir, events_contract):
         )
 
 
+def test_extra_columns_with_mixed_type_headers():
+    """Multiple unexpected columns of different cell types don't crash.
+
+    Regression test: 'unexpected' column names come straight from
+    Excel header cells, which can hold different types (text,
+    numbers, dates, ...). The old code passed those raw values
+    straight to sorted(), which raises TypeError at runtime when
+    asked to compare, e.g., a str header against an int header.
+    Column names are stringified before comparing/sorting to avoid
+    that crash and report a stable, readable error instead.
+    """
+    contract = Contract(
+        worksheets=[
+            Worksheet(
+                name="Events",
+                columns=[Column(name="event_id", data_type="string")],
+            ),
+        ]
+    )
+    excel_bytes = _build_workbook(
+        {
+            "Events": (
+                ["event_id", "notes", 42],
+                [["EVT001", "text header", "numeric header"]],
+            ),
+        }
+    )
+
+    with pytest.raises(ContractError, match="Unexpected columns"):
+        contract.validate(excel_bytes, "mixed_headers.xlsx")
+
+
 def test_invalid_data_type(temp_dir, events_contract):
     """Invalid data type raises ValidationError."""
     make_fixtures(temp_dir / "fixtures")
