@@ -1,13 +1,15 @@
 """Adapter implementations for different cloud services.
 
-Each adapter implements one or more of the ports (protocols):
-- Source: Discover and download files
-- ObjectStore: Read/write immutable storage
-- Warehouse: Load and audit data
-- SecretStore: Retrieve secrets
+Each adapter implements one of the ports (protocols):
+- Source: LocalSource, SharePointSource (stub)
+- ObjectStore: LocalObjectStore, GCSObjectStore
+- Warehouse: BigQueryWarehouse
+- SecretStore: no implementation yet
 
-Test adapters (LocalSource, LocalStore) enable full pipeline testing
-without cloud services or credentials.
+Only the local adapters are exported here, because the cloud adapters
+need optional extras; import those from their own modules (e.g.
+py_common.adapters.gcs). LocalSource and LocalObjectStore enable
+pipeline testing without cloud services or credentials.
 """
 
 from py_common.adapters.local import LocalObjectStore, LocalSource

@@ -1,6 +1,6 @@
 """Generate small synthetic Excel fixtures for testing.
 
-Nine fixtures cover all validation scenarios:
+Seven fixtures cover the contract validation scenarios:
 1. Valid workbook
 2. Missing worksheet
 3. Missing column
@@ -8,8 +8,9 @@ Nine fixtures cover all validation scenarios:
 5. Invalid data type
 6. Missing required value
 7. Duplicate in unique column
-8. Unchanged file (already processed)
-9. Changed version of previously processed file
+
+Re-run behaviour (unchanged and changed files) needs no extra
+fixtures; tests/unit/test_pipeline.py covers it.
 """
 
 import json
@@ -20,7 +21,7 @@ from openpyxl import Workbook
 
 
 def make_fixtures(output_dir: Path) -> None:
-    """Generate nine test Excel files.
+    """Generate the test Excel files, a manifest and a README.
 
     Args:
         output_dir: Directory to write .xlsx files and manifest.json.
@@ -119,9 +120,9 @@ def make_fixtures(output_dir: Path) -> None:
     # Write README for testers
     readme_path = output_dir / "README.md"
     with open(readme_path, "w") as f:
-        f.write("""# Test Fixtures
+        f.write(f"""# Test Fixtures
 
-Nine small Excel files for validating ingestion rules.
+{len(cases)} small Excel files for validating ingestion rules.
 
 ## Fixtures
 
@@ -138,9 +139,13 @@ Nine small Excel files for validating ingestion rules.
 ## Usage
 
 Copy these files to your test SharePoint folder or local test directory.
-Each fixture is small (~1 KB) and regenerable via `scripts/make_fixtures.py`.
+Each fixture is small (~1 KB). `manifest.json` records each file's
+worksheet, headers and row count.
 
 ## Regenerating Fixtures
+
+This file is written by `make_fixtures()` in
+`src/py_common/fixtures.py`; edit it there, not here, then regenerate:
 
 ```python
 from py_common.fixtures import make_fixtures

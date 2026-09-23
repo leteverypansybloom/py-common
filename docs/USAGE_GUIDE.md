@@ -34,14 +34,14 @@ ingestion" repo, for example — should mostly be a `config.yaml`, a
 
 - Your source produces **discrete files** — Excel workbooks today,
   specifically, since `Contract.validate()` calls
-  `openpyxl.load_workbook()` directly (`contract.py:80-85`).
+  `openpyxl.load_workbook()` directly (`contract.py`).
 - You need the file's **structure and data checked** before it's
   trusted anywhere downstream — required worksheets, required and
   unexpected columns, nullability, basic types, uniqueness
-  (`contract.py:92-185`).
+  (`contract.py`).
 - You need a **defensible audit trail** — who processed what, when,
   with what checksum and outcome — without extra work
-  (`model.py:75-92`, written by `pipeline.py:215-247`).
+  (`model.py`, written by `pipeline.py`).
 - You want **adding a new source to be mostly configuration**: a new
   `Contract`, a new adapter satisfying `Source`, and reuse of the
   same `Pipeline`, `ObjectStore` and `Warehouse` — see
@@ -67,14 +67,14 @@ of the code *today*, but it's an accident of what's been built so
 far, not a structural limit of the design — treat it as **not yet
 supported**, not as permanently out of scope:
 
-- `Source` (`ports.py:14-45`) only requires `items()` (list what's
+- `Source` (`ports.py`) only requires `items()` (list what's
   available) and `download()` (fetch one item's bytes). Nothing in
   the protocol assumes a file — a `DatabaseSource` that lists
   "changed since last run" query results and returns each batch as
   bytes would satisfy it structurally, the same way `LocalSource` and
   the (stubbed) `SharePointSource` do.
 - The actual blocker is one layer up: `Contract.validate()`
-  hard-codes `openpyxl.load_workbook()` (`contract.py:80`), so
+  hard-codes `openpyxl.load_workbook()` (`contract.py`), so
   today's contract only knows how to check an Excel workbook. Reading
   from a database would need either a contract variant that accepts a
   `pandas.DataFrame` or CSV/Parquet bytes instead of an Excel

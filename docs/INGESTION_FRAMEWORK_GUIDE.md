@@ -7,8 +7,9 @@ on it (e.g. the Healthy Working Wales SharePoint → GCP pipeline).
 **Purpose:** one plain-language reference that defines the vocabulary of
 data ingestion, explains what an "ingestion framework" is expected to do,
 and states exactly what `py-common` does today versus what it does not —
-with a file and line number for every claim, so nothing here has to be
-taken on trust.
+naming the file (and, where it helps, the class or function) behind
+every claim, so nothing here has to be taken on trust. Line numbers are
+deliberately left out: they go stale with every refactor.
 
 **Scope:** this guide covers *ingestion* — getting data from a source
 system into governed cloud storage, checked and loaded. It stops where
@@ -93,12 +94,12 @@ exact; where nothing exists, that's stated plainly rather than implied.
 
 **In `py-common` today:**
 
-- The `Source` protocol (`src/py_common/ports.py:14-45`) is the
+- The `Source` protocol (`src/py_common/ports.py`) is the
   connector interface: `items()` lists what's available, `download()`
   fetches one item's bytes.
-- `LocalSource` (`src/py_common/adapters/local.py:21-84`) implements it
+- `LocalSource` (`src/py_common/adapters/local.py`) implements it
   for a local folder — this is what the test suite and fixtures use.
-- `SharePointSource` (`src/py_common/adapters/sharepoint.py:21-56`)
+- `SharePointSource` (`src/py_common/adapters/sharepoint.py`)
   is the SharePoint connector **and it is not implemented**: every
   method raises `NotImplementedError`, and the constructor refuses to
   run with an explicit message pointing you at `LocalSource` instead.
@@ -113,8 +114,8 @@ exact; where nothing exists, that's stated plainly rather than implied.
   JSON key. This is **not** wired into the `Source`/`ObjectStore`/
   `Warehouse` adapters — `GCSObjectStore` and `BigQueryWarehouse`
   currently construct their own `storage.Client()` /
-  `bigquery.Client()` directly (`adapters/gcs.py:57`,
-  `adapters/bigquery.py:64`), relying on ambient Application Default
+  `bigquery.Client()` directly (`adapters/gcs.py`,
+  `adapters/bigquery.py`), relying on ambient Application Default
   Credentials rather than calling `gcp_auth()` first.
 
 ### 2.2 Capture — getting the bytes in, once, safely
@@ -137,14 +138,14 @@ exact; where nothing exists, that's stated plainly rather than implied.
 **In `py-common` today:**
 
 - Ingestion is **batch, full-listing, no cursor**. `LocalSource.items()`
-  (`adapters/local.py:35-54`) lists *every* matching file in the folder
+  (`adapters/local.py`) lists *every* matching file in the folder
   on every run — there is no "only what changed since last time" at the
-  source level. For a local test folder with nine fixtures that's fine;
+  source level. For a local test folder with seven fixtures that's fine;
   for a live SharePoint library with a real history it means listing
   the whole library on every run once `SharePointSource` exists.
 - Re-processing is prevented differently: not by a source-side cursor,
   but by a **content hash** check after download. `Pipeline.process()`
-  (`src/py_common/pipeline.py:115-131`) computes a SHA-256 of the
+  (`src/py_common/pipeline.py`) computes a SHA-256 of the
   downloaded bytes and skips the file if that exact checksum was
   already recorded as `LOADED` (`store.get(f"audit/{checksum}")`).
   This is a genuinely good property — a file that is re-saved with
@@ -153,18 +154,18 @@ exact; where nothing exists, that's stated plainly rather than implied.
   *watermark*: the pipeline still has to list and often download every
   file, every run, to find that out.
 - Version safety at download time: `SourceItem.version`
-  (`src/py_common/model.py:24-37`) is compared between discovery and
+  (`src/py_common/model.py`) is compared between discovery and
   download; if a file changed in between, `download()` raises
-  `VersionMismatch` (`adapters/local.py:76-81`) and the pipeline records
+  `VersionMismatch` (`adapters/local.py`) and the pipeline records
   the file as `SKIPPED` rather than processing a half-written file
-  (`pipeline.py:99-113`).
-- The **landing zone** is real: every downloaded file is written
-  unchanged to `raw/{item.identity}` before anything else happens
-  (`pipeline.py:152`), and a file that fails validation is *also*
-  written to `raw/` and to `quarantine/{item.identity}`
-  (`pipeline.py:140-141`) before the pipeline gives up on it. So the
-  original bytes are always recoverable, even for files that never
-  reach the warehouse.
+  (`pipeline.py`).
+- The **landing zone** is real: every file that passes the checksum
+  check is written unchanged to `raw/{item.identity}` — a valid file
+  just after validation (`Pipeline._store_raw()`), and a file that
+  fails validation to both `raw/` and `quarantine/{item.identity}`
+  (`Pipeline._quarantine_invalid()`) before the pipeline gives up on
+  it. So the original bytes are always recoverable, even for files
+  that never reach the warehouse.
 - There is no backfill or replay command. Re-loading old data today
   means manually clearing the `audit/{checksum}` marker for those files
   so the checksum check doesn't skip them again.
@@ -192,30 +193,34 @@ exact; where nothing exists, that's stated plainly rather than implied.
 **In `py-common` today:**
 
 - The **contract** is the schema registry, in miniature. `Contract`,
-  `Worksheet` and `Column` (`src/py_common/contract.py:16-57`) are
+  `Worksheet` and `Column` (`src/py_common/contract.py`) are
   plain Python dataclasses — no YAML layer yet, so a contract is
   written *in* the calling code, not alongside it as data. Each
   `Column` declares `data_type`, `nullable` and `unique`
-  (`contract.py:17-30`).
-- `Contract.validate()` (`contract.py:59-188`) checks, in order:
+  (`contract.py`).
+- `Contract.validate()` (`contract.py`) checks, in order:
   required worksheets exist, required columns exist, no *unexpected*
   columns exist (an extra column is an error here, not a warning —
   worth confirming this is the policy PHW actually wants; see
   [Section 5](#5-feature-by-feature-status), row "Schema-drift
-  detection"), nullability, basic type matching for `integer`/`float`,
-  and uniqueness for columns marked `unique`.
+  detection"), nullability, type matching for each column's
+  `data_type` (`string`, `integer`, `float`, `date`), and uniqueness
+  for columns marked `unique`.
 - Validation failures raise (`ContractError` for structural problems,
-  `ValidationError` for data problems — `errors.py:44-60`) with up to
-  five example errors joined into one string
-  (`contract.py:177-185`). There is **no** per-row structured output
+  `ValidationError` for data problems — `errors.py`) with the errors
+  joined into one string; data errors are capped at the first five,
+  plus a count of the rest (`contract.py`). There is **no** per-row
+  structured output
   (no "row 17, column X, reason Y" table you can query) — just that one
-  string, captured in `Result.errors` (`model.py:58`).
-- `key_columns` is declared on every `Contract`
-  (`contract.py:56`) but, notably, **nothing in `contract.py` or
-  `pipeline.py` reads it**. Uniqueness checking uses each column's own
-  `unique` flag instead. If the intent was "these are the columns that
-  identify a record for merge/upsert purposes," that intent isn't
-  acted on anywhere yet — see the BigQuery gap below.
+  string, captured in `Result.errors` (`model.py`).
+- `key_columns` is declared on every `Contract` and names the columns
+  that identify a record for merge/upsert. `Pipeline` does **not**
+  pass it on automatically: the caller hands it to the warehouse when
+  constructing it — `BigQueryWarehouse(..., key_columns=contract.key_columns)`.
+  Forget that, and the warehouse appends instead of merging (see
+  [2.4](#24-publish--writing-to-the-destination-safely)). Uniqueness
+  checking *within* a workbook uses each column's own `unique` flag,
+  not `key_columns`.
 - **No minimum row count check.** A workbook with a valid header row
   and zero data rows validates successfully and reports
   `rows_processed = 0` — the pipeline has no way to notice that a daily
@@ -245,34 +250,29 @@ exact; where nothing exists, that's stated plainly rather than implied.
 
 **In `py-common` today:**
 
-- The `Warehouse` protocol (`ports.py:97-137`) promises exactly the
-  right shape: stage, verify row count, merge on key columns, record
-  audit, commit-or-roll-back-everything (`ports.py:118-125`). The
-  **implementation doesn't yet deliver that** — see below.
-- `BigQueryWarehouse.load()` (`adapters/bigquery.py:81-223`) does:
-  load Parquet into a truncated staging table, verify the row count
-  matches (`bigquery.py:141-150`), then — the docstring says "MERGE
-  into final table (upsert on key columns)" (`bigquery.py:94`) but the
-  code that actually runs is a plain
-  `INSERT INTO ... SELECT * FROM staging` (`bigquery.py:160-163`), with
-  a `TODO` comment admitting it: *"Sample: append-only for now (no
-  upsert). TODO: Update to MERGE with key columns when contract
-  available."* (`bigquery.py:155-156`). The contract *is* available —
-  `key_columns` is right there on the `Contract` object — it just isn't
-  passed through to the warehouse today. Concretely: **re-running a
-  file that already loaded, with a different checksum for any reason
-  (say, a formula recalculated), will duplicate every row in that
-  file** in the final table, because there is no upsert. This is the
-  most consequential gap in the guide, because it silently
-  contradicts both the interface's own contract and the unit tests'
-  own class docstring (`tests/unit/test_bigquery_adapter.py:135-145`
-  describes "MERGE into final table" as the behaviour under test, but
-  the test itself only asserts row-count verification and that an
-  audit `INSERT` happened — it never asserts an upsert occurred).
-- There is **no idempotency key** sent to BigQuery beyond the
-  content-hash dedup already described at the pipeline layer — which
-  guards against re-processing an *identical* file, not against a
-  changed file being loaded twice for the same logical record.
+- The `Warehouse` protocol (`ports.py`) promises: stage, verify row
+  count, merge on key columns, record audit,
+  commit-or-roll-back-everything.
+- `BigQueryWarehouse.load()` (`adapters/bigquery.py`) delivers that.
+  It loads Parquet into a truncated staging table and verifies the
+  row count, then runs the final-table write and the audit `INSERT`
+  as **one BigQuery script transaction**, so data never commits
+  without its audit record. The final-table write is a `MERGE` on the
+  `key_columns` passed to the constructor (update matching rows,
+  insert new ones — `BigQueryWarehouse._build_merge_sql()`), or a
+  plain append when no key columns are given.
+- **The one thing to get right as a caller:** pass
+  `key_columns=contract.key_columns` when you construct
+  `BigQueryWarehouse`. If you don't, re-loading a file whose checksum
+  changed (say, a formula recalculated) appends every row again
+  instead of updating them.
+- A BigQuery failure during `load()` is re-raised as `RuntimeError`;
+  `Pipeline` records that file as `FAILED` and moves on to the next.
+  `errors.py` also defines `IndeterminateCommitError` ("unknown
+  whether the warehouse committed"), and `Pipeline` records that as
+  `FAILED` too — but `BigQueryWarehouse` doesn't raise it yet, so a
+  connection dropped mid-commit looks like any other failure. Check
+  BigQuery before re-running a `FAILED` file.
 - **No delete handling policy** exists or is documented — if a row
   disappears from a source export, nothing in `py-common` decides
   whether that should be propagated, ignored, or flagged.
@@ -310,9 +310,9 @@ exact; where nothing exists, that's stated plainly rather than implied.
 **In `py-common` today:**
 
 - **Audit trail:** every file processed produces an `AuditRecord`
-  (`model.py:75-92`) with timestamp, item identity, filename, version,
+  (`model.py`) with timestamp, item identity, filename, version,
   checksum, row count, outcome, errors and processing time, written to
-  `audit/records/{timestamp}_{identity}.json` (`pipeline.py:215-247`).
+  `audit/records/{timestamp}_{identity}.json` (`pipeline.py`).
   This is genuinely solid, append-only, and doesn't store the raw data
   itself — only the checksum — so it's safe to keep without extra
   redaction work.
@@ -321,30 +321,30 @@ exact; where nothing exists, that's stated plainly rather than implied.
   in this run" together, so answering "how did last night's run go, as
   a whole?" means scanning individual file records for one time window.
 - **Logging:** plain Python `logging` module calls throughout
-  (e.g. `pipeline.py:34`, `adapters/gcs.py:19`), text-formatted, not
+  (e.g. `pipeline.py`, `adapters/gcs.py`), text-formatted, not
   structured JSON. This will still show up in Cloud Logging on Cloud
   Run, but you can't filter or alert on a specific field the way you
   can with structured logs.
 - **Monitoring/alerting:** none. A failed run currently means an
   uncaught exception propagates out of `Pipeline.run()`
-  (`pipeline.py:75-77`); nothing emails, pages, or posts anywhere.
+  (`pipeline.py`); nothing emails, pages, or posts anywhere.
 - **Retention:** no retention policy is set or configurable anywhere —
   the landing/raw/quarantine prefixes in `GCSObjectStore` accumulate
   forever until someone sets a bucket lifecycle rule outside this code.
 - **Locking:** `ObjectStore.lock()` is meant to be a real exclusive
   lock, and the protocol docstring says so explicitly — *"Lock must
   not auto-expire or steal from long-running processes"*
-  (`ports.py:81-83`). `GCSObjectStore.lock()`
-  (`adapters/gcs.py:128-153`) is a documented **no-op stub**: it
+  (`ports.py`). `GCSObjectStore.lock()`
+  (`adapters/gcs.py`) is a documented **no-op stub**: it
   acquires nothing and will happily let two overlapping runs both
   believe they hold the warehouse lock. `LocalObjectStore.lock()`
-  (`adapters/local.py:134-148`) is the same, appropriately, for local
+  (`adapters/local.py`) is the same, appropriately, for local
   testing. This is fine as long as only one instance of the job ever
   runs at a time — but nothing currently enforces that either (no
   Cloud Run concurrency limit is configured in this repo, because no
   deployment configuration exists yet at all — the `deploy/` folder is
   present but empty).
-- **Secrets:** the `SecretStore` protocol exists (`ports.py:140-158`)
+- **Secrets:** the `SecretStore` protocol exists (`ports.py`)
   but **no adapter implements it** — there is no Secret Manager class
   anywhere in `src/py_common/adapters/`. `gcp_auth.py` handles *GCP
   authentication* (which credential to run as) but that is a different
@@ -357,13 +357,12 @@ exact; where nothing exists, that's stated plainly rather than implied.
   exists but is empty — so none of "which bucket, which dataset, which
   schedule, which service account" is written down as reviewable code
   yet.
-- **Housekeeping note, not a framework gap:** `test_auth.py` at the
-  repository root (not under `tests/`) is a manual, one-off script that
-  hardcodes a real GCP project id (`ndr-tr-phw-dp-dev`). It isn't
-  picked up by `pytest` (wrong location, no `test_` function inside),
-  but it's the kind of file worth moving into `scripts/` or deleting
-  once its job is done, so a real project identifier doesn't sit
-  loosely in the repo history.
+- **Manual scripts** live in `scripts/`, outside the library and the
+  test suite: `scripts/check_gcp_auth.py` confirms your local
+  credentials reach BigQuery and Cloud Storage, and `scripts/demo.py`
+  runs the fixtures through the real GCP adapters. Both take the
+  project and resource names from environment variables rather than
+  hardcoding them.
 
 ---
 
@@ -400,10 +399,8 @@ solution repo that depends on it?":
   event," the exact BigQuery table layout for this project.
 - **Don't add platform complexity until a real requirement demands
   it** — scale, low latency, many dependencies, high failure
-  consequences, or many users. Section 4 of the internal review already
-  applies this rule feature-by-feature for a sibling version of this
-  codebase [reference 1](#11-references); the same discipline applies
-  here.
+  consequences, or many users. [Section 7](#7-choosing-features-for-your-scenario)
+  applies this rule scenario by scenario.
 
 ---
 
@@ -425,11 +422,14 @@ scheduling, alerting, secrets, or infrastructure code anywhere in the
 repository yet.
 
 The test suite (`tests/unit/`, `tests/integration/`) confirms this shape:
-unit tests exist for `Contract`, `config.py`, `GCSObjectStore` and
-`BigQueryWarehouse` (all mocked); the two integration tests
-(`test_end_to_end_gcs_bq.py`, `test_gcs_bigquery_integration.py`) are
-marked `integration` and need real GCP credentials to run — they are not
-exercised in CI as configured.
+unit tests cover `Pipeline` (one test per outcome), `Contract`,
+`config.py`, `fixtures.py`, `gcp_auth.py`, the local adapters, and
+`GCSObjectStore` and `BigQueryWarehouse` (the last three with the
+cloud clients mocked). The integration tests
+(`test_end_to_end_gcs_bq.py`, `test_gcs_bigquery_integration.py`,
+`test_live_services.py`) need real GCP credentials and skip
+themselves without them — so CI collects them but never actually
+exercises them.
 
 ---
 
@@ -447,34 +447,34 @@ behaviour doesn't match the promise), **Missing** (nothing exists).
 | Connector catalogue | Partial | `Source`/`ObjectStore`/`Warehouse` protocols exist (`ports.py`); only local + (untested-live) GCP adapters are real. |
 | Connection testing | Missing | No pre-flight credential/permission check anywhere. |
 | Source discovery | Missing | No "list what's available at this source" helper. |
-| Raw landing storage | **Have** | `pipeline.py:152`, immutable `raw/{identity}` key per file. |
-| Standardisation layer | Partial | Excel → pandas → Parquet conversion exists (`pipeline.py:154-165`); no multi-format (CSV/JSON) reader yet. |
+| Raw landing storage | **Have** | `pipeline.py`, immutable `raw/{identity}` key per file. |
+| Standardisation layer | Partial | Excel → pandas → Parquet conversion exists (`pipeline.py`); no multi-format (CSV/JSON) reader yet. |
 | Schema registry | Partial | `Contract` dataclasses exist (`contract.py`); no external, diffable file format (e.g. YAML) yet. |
-| Schema-drift detection | **Have** (strict) | Missing *and* extra columns both raise `ContractError` (`contract.py:92-125`) — confirm this "reject on any drift" policy is actually what's wanted; some tools treat an extra column as a warning, not a failure. |
+| Schema-drift detection | **Have** (strict) | Missing *and* extra columns both raise `ContractError` (`contract.py`) — confirm this "reject on any drift" policy is actually what's wanted; some tools treat an extra column as a warning, not a failure. |
 | Data profiling | Missing | No profiling tool or script. |
 | Data quality rule catalogue | Partial | Four rule types exist per column (`nullable`, `data_type`, `unique`, worksheet/column presence); no reusable catalogue across contracts, no thresholds. |
 | Mapping/transformation templates | Missing | No mapping-specification format; any renaming/mapping is ad hoc in caller code. |
 | Reference-data management | Missing | Not built; not yet needed at this scope. |
-| Full-load support | **Have** | `LocalSource.items()` always lists everything (`adapters/local.py:35-54`). |
+| Full-load support | **Have** | `LocalSource.items()` always lists everything (`adapters/local.py`). |
 | Incremental-load support | Missing | No cursor/watermark; see [2.2](#22-capture--getting-the-bytes-in-once-safely). |
 | CDC support | N/A | No database sources exist; correctly out of scope for now. |
-| File change detection | Partial | Content-hash dedup exists (`pipeline.py:116-131`); no delta/change-token query against the source itself. |
+| File change detection | Partial | Content-hash dedup exists (`pipeline.py`); no delta/change-token query against the source itself. |
 | Scheduling and orchestration | Missing | No scheduler, no orchestrator config; `deploy/` is empty. |
 | Event triggering | Missing | Not built; batch-only today. |
 | Queueing / buffering | N/A | Not needed at current file volumes. |
 | Rate limiting / throttling | Missing | No retry or throttle handling anywhere. |
 | Retries and backoff | Missing | Every external call is a single attempt. |
-| Idempotency and deduplication | Partial | Content-hash dedup at pipeline level (**have**); warehouse-level upsert (**missing** — see [2.4](#24-publish--writing-to-the-destination-safely)). |
+| Idempotency and deduplication | **Have** | Content-hash dedup at pipeline level (`Pipeline._is_duplicate()`), plus a warehouse `MERGE` on `key_columns` (`BigQueryWarehouse`) — provided the caller passes `key_columns`; see [2.4](#24-publish--writing-to-the-destination-safely). |
 | Checkpointing | Partial | File-level: a crash loses at most one file's work (results are appended per file). No run-level checkpoint. |
 | Delivery ledger / receipts | Partial | The audit record *is* a delivery ledger for BigQuery; no equivalent receipt concept for external destination APIs (none exist yet). |
-| Quarantine / dead-letter storage | **Have** | `pipeline.py:140-141`, `quarantine/{identity}` key, with the original file also kept in `raw/`. |
+| Quarantine / dead-letter storage | **Have** | `pipeline.py`, `quarantine/{identity}` key, with the original file also kept in `raw/`. |
 | Reconciliation | Missing | No source-count vs. destination-count check after a load completes. |
 | Backfill and replay | Missing | No rebuild/replay command; manual procedure only (clear the checksum audit key). |
-| Lineage and audit trail | **Have** (file-level) | `model.py:75-92`, written by `pipeline.py:215-247`. No run-level record, no code/config version stamped per record. |
+| Lineage and audit trail | **Have** (file-level) | `model.py`, written by `pipeline.py`. No run-level record, no code/config version stamped per record. |
 | Logging, metrics, alerts | Partial | Plain-text logging exists; no metrics, no alerting. |
 | Run-status API/dashboard | Missing | Nothing queries the audit trail for a status view. |
-| Secrets and identity management | Partial | `gcp_auth.py` handles *which GCP credential to run as*; the `SecretStore` protocol (`ports.py:140`) has **no implementation** for application secrets (e.g. a SharePoint client secret). |
-| Data classification / policy controls | Missing | Not built; the audit trail's "store checksum, not content" design (`pipeline.py:234-247`) is a reasonable privacy default to build on. |
+| Secrets and identity management | Partial | `gcp_auth.py` handles *which GCP credential to run as*; the `SecretStore` protocol (`ports.py`) has **no implementation** for application secrets (e.g. a SharePoint client secret). |
+| Data classification / policy controls | Missing | Not built; the audit trail's "store checksum, not content" design (`pipeline.py`) is a reasonable privacy default to build on. |
 | Environment management | Partial | `config.py` supports named sections (e.g. `dev`/`prod`) with `${VAR}` interpolation; no enforced separation beyond that convention. |
 | Infrastructure as code | Missing | No Terraform; `deploy/` is an empty folder. |
 | Testing and release controls | **Have** | `pytest`, `pre-commit` (black/ruff/mypy/detect-secrets), GitHub Actions CI (`.github/workflows/tests.yml`). |
@@ -491,13 +491,13 @@ not a redesign.
 
 | Need | Recommended implementation | Maps to |
 |---|---|---|
-| Source (SharePoint) | A Microsoft Graph-based adapter: site/drive IDs, file metadata, and — once volumes justify it — delta queries for change tracking [reference 4](#11-references) | Implement `SharePointSource` against the existing `Source` protocol (`ports.py:14`); it currently raises `NotImplementedError` (`adapters/sharepoint.py:45`). |
-| Raw landing | Cloud Storage, immutable per-run/per-object paths | Already the shape of `GCSObjectStore` (`adapters/gcs.py`) via `pipeline.py:152`. |
-| Processing | Python, run as a Cloud Run job (batch-to-completion, not a long-lived service) | `Pipeline.run()` (`pipeline.py:53-79`) is already written as a single batch pass suitable for this. |
+| Source (SharePoint) | A Microsoft Graph-based adapter: site/drive IDs, file metadata, and — once volumes justify it — delta queries for change tracking [reference 4](#11-references) | Implement `SharePointSource` against the existing `Source` protocol (`ports.py`); it currently raises `NotImplementedError` (`adapters/sharepoint.py`). |
+| Raw landing | Cloud Storage, immutable per-run/per-object paths | Already the shape of `GCSObjectStore` (`adapters/gcs.py`) via `pipeline.py`. |
+| Processing | Python, run as a Cloud Run job (batch-to-completion, not a long-lived service) | `Pipeline.run()` (`pipeline.py`) is already written as a single batch pass suitable for this. |
 | Scheduling | Cloud Scheduler triggering the Cloud Run job directly, or via a Workflows definition if more than one step needs coordinating | Not yet built; belongs in the *solution* repo's `deploy/`, using Terraform, not in `py-common`. |
-| Operational state (locks, checkpoints) | Firestore, or another approved store — **not** the no-op `GCSObjectStore.lock()` as currently implemented | `ObjectStore.lock()` (`ports.py:77-94`) needs a real implementation before more than one Cloud Run execution can safely overlap. |
-| Warehouse | BigQuery, with a genuine `MERGE` on `Contract.key_columns`, not the current `INSERT` | `BigQueryWarehouse.load()` (`adapters/bigquery.py:81-223`) — the `TODO` at line 156 is exactly this piece of work. |
-| Secrets | Secret Manager, referenced (never inlined) from configuration | Needs a new adapter implementing `SecretStore` (`ports.py:140-158`); none exists today. |
+| Operational state (locks, checkpoints) | Firestore, or another approved store — **not** the no-op `GCSObjectStore.lock()` as currently implemented | `ObjectStore.lock()` (`ports.py`) needs a real implementation before more than one Cloud Run execution can safely overlap. |
+| Warehouse | BigQuery, with a `MERGE` on `Contract.key_columns` | Built: `BigQueryWarehouse.load()` (`adapters/bigquery.py`); the solution's `main.py` must pass `key_columns=contract.key_columns`. |
+| Secrets | Secret Manager, referenced (never inlined) from configuration | Needs a new adapter implementing `SecretStore` (`ports.py`); none exists today. |
 | Quality | Reusable checks: schema, required fields, uniqueness, valid codes, record counts, freshness | `Contract.validate()` covers the first four; row-count/freshness checks are not built (see [Section 5](#5-feature-by-feature-status)). |
 | Monitoring | Cloud Logging (already reachable via Python `logging`) plus named Cloud Monitoring alerts on failure and on staleness | Not built; needs both a structured-logging change and alert policies defined as IaC. |
 | Deployment | Terraform modules, run through the existing CI/CD pattern | `deploy/` exists as a placeholder folder only. |
@@ -505,8 +505,8 @@ not a redesign.
 **Why SharePoint should be built as a Graph-based adapter, not a
 synced-folder read:** a document library synced to a local/network path
 loses the version/eTag metadata that `SourceItem.version`
-(`model.py:24-37`) and the `VersionMismatch` safety check
-(`errors.py:27-35`, used at `adapters/local.py:76-81`) depend on.
+(`model.py`) and the `VersionMismatch` safety check
+(`errors.py`, used at `adapters/local.py`) depend on.
 Reading via the Microsoft Graph API keeps that metadata, and is also the
 only route to `listItem: delta` change tracking later
 [reference 4](#11-references) — which is the eventual answer to the
@@ -522,7 +522,7 @@ to decide what actually matters for the feed in front of you.
 
 | Scenario | Prioritise | Usually unnecessary at this stage |
 |---|---|---|
-| Small daily/weekly Excel export from SharePoint (the current HWW shape) | Real `SharePointSource`; the BigQuery `MERGE`; a minimum-row-count check; a real `ObjectStore.lock()`; a failure alert | An orchestrator (Dagster/Airflow); CDC; streaming; a connector catalogue |
+| Small daily/weekly Excel export from SharePoint (the current HWW shape) | Real `SharePointSource`; a minimum-row-count check; a real `ObjectStore.lock()`; a failure alert | An orchestrator (Dagster/Airflow); CDC; streaming; a connector catalogue |
 | A future API source (marketing/analytics, third-party) | Pagination, retries with backoff, rate-limit handling, raw-response capture, a cursor/watermark | Streaming, unless the API genuinely pushes events and low latency actually matters |
 | Writing out to a destination API (not just BigQuery) | An idempotency key, a delivery ledger with receipts, bounded retries, reconciliation | Assuming a 200 response alone proves the record arrived and was stored correctly downstream |
 | Several SharePoint libraries/providers using the same pattern | Metadata-driven onboarding (a request file + registry), a mapping-template format, shared quality rules | A bespoke pipeline per source |
@@ -575,39 +575,37 @@ downstream of ingestion" stays visible when scoping future work.
 Ordered so each step is small, independently testable, and doesn't
 require the steps after it.
 
-1. **Fix the BigQuery write to actually merge on `key_columns`**
-   (`adapters/bigquery.py:154-166`), and update
-   `tests/unit/test_bigquery_adapter.py` to assert an upsert actually
-   happened, not just that a query was issued. This is the gap most
-   likely to silently duplicate real data.
-2. **Implement `SharePointSource`** against the existing `Source`
+**Done:** the BigQuery write now `MERGE`s on `key_columns` inside one
+transaction with its audit record (2026-09-21; see `DECISIONS_en.md`).
+
+1. **Implement `SharePointSource`** against the existing `Source`
    protocol (`adapters/sharepoint.py`), using the Microsoft Graph API
-   with `Sites.Selected` permission, per the module's own docstring
-   (`sharepoint.py:1-14`). Start without delta queries (full listing is
+   with `Sites.Selected` permission, per the module's own docstring.
+   Start without delta queries (full listing is
    fine at current volumes); add `listItem: delta` later if/when
    listing the whole library each run becomes a real cost.
-3. **Add a minimum-row-count check** to `Contract` (e.g. an optional
+2. **Add a minimum-row-count check** to `Contract` (e.g. an optional
    `min_rows` field, default 1) so an empty export is caught rather than
    silently marked `LOADED` with zero rows.
-4. **Implement a real `ObjectStore.lock()`** for GCP (Firestore is the
+3. **Implement a real `ObjectStore.lock()`** for GCP (Firestore is the
    natural choice, per [Section 6](#6-the-recommended-sharepoint--gcp-architecture)) —
-   today's stub (`adapters/gcs.py:128-153`) will not stop two overlapping
+   today's stub (`adapters/gcs.py`) will not stop two overlapping
    Cloud Run executions from double-processing.
-5. **Add a `SecretStore` adapter for Secret Manager**, implementing the
-   existing protocol (`ports.py:140-158`), before any credential (a
+4. **Add a `SecretStore` adapter for Secret Manager**, implementing the
+   existing protocol (`ports.py`), before any credential (a
    SharePoint client secret, in particular) is wired into configuration.
-6. **Write the Terraform for the pieces already designed**: the landing
+5. **Write the Terraform for the pieces already designed**: the landing
    bucket (with a retention period, not a locked one, since this is
    personal data and retention rules may need to shorten), the BigQuery
    datasets, the Cloud Run job, and the Cloud Scheduler entry. This is
    also what turns `deploy/` from an empty placeholder into something
    real.
-7. **Add one failure alert and one freshness view**: a Cloud Monitoring
+6. **Add one failure alert and one freshness view**: a Cloud Monitoring
    log-based alert on any `FAILED` outcome, and a small BigQuery view
    over the audit-record table answering "when did each source last
    load successfully, and is that overdue?" Both are pure configuration
    once the audit trail exists, which it already does.
-8. **Only then**, consider incremental/delta loading, row-level
+7. **Only then**, consider incremental/delta loading, row-level
    quarantine, an orchestrator, or anything else in
    [Section 7](#7-choosing-features-for-your-scenario)'s "usually
    unnecessary at this stage" column — each has its own trigger
@@ -694,19 +692,15 @@ is for fast lookup.
 
 Numbered where cited above; not exhaustive of everything reviewed.
 
-1. `INGESTION_FRAMEWORK_REVIEW_en.md` — a 52-feature review of an
-   earlier, more complete sibling of this codebase (uses
-   `ingestion/pipeline.py`, `config/sources.yaml` — a different file
-   layout from this repository), written 2026-09-16. Reused here for
-   its verdict framework (Have / Add now / Deploy / Later / Skip) and
-   its external citations; every "Here:" fact in that document was
-   re-verified against *this* repository's actual code before being
-   restated above, since the two codebases have since diverged.
-2. Workshop material: PHW ingestion framework glossary, feature
-   catalogue and scenario tables (pasted into this session), and the
-   two Word documents `Data_Ingestion_Framework_Updated(3).docx` and
-   `Data_Ingestion_Framework_GCP (1).docx`. The former credits its
-   source as the webinar *"Scaling your data ingestion using an
+1. PHW internal ingestion framework review (2026-09-16), not held in
+   this repository: a 52-feature review of an earlier sibling of this
+   codebase with a different file layout. Its verdict framework and
+   external citations were reused here; every fact about the code was
+   re-checked against this repository rather than copied.
+2. PHW ingestion framework workshop material, not held in this
+   repository: a glossary, feature catalogue and scenario tables, and
+   two Word documents on data ingestion frameworks (general, and
+   GCP-specific). The general document credits its source as the webinar *"Scaling your data ingestion using an
    ingestion framework"* (Liz McQuish and Sai Shri Ram Swami,
    Thorogood) and *The Book of OHDSI*, Chapter 6 "Extract Transform
    Load" (Clair Blacketer and Erica Voss) for its profiling, mapping-
@@ -735,7 +729,7 @@ Numbered where cited above; not exhaustive of everything reviewed.
    yardstick for CI/CD and scheduled triggers:
    <https://nhsdigital.github.io/rap-community-of-practice/>
 
-All file:line citations elsewhere in this guide point at
-`C:\Users\eoinv\Downloads\take5\py-common` as it stood on 2026-09-20;
-re-check them against current code before relying on them, since this is
-a working repository and will keep changing.
+Citations elsewhere in this guide name files, classes and functions
+rather than line numbers, and were last checked against the code on
+2026-09-23. This is a working repository; if something here disagrees
+with the code, the code wins — fix the guide in the same pull request.

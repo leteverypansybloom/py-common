@@ -4,22 +4,9 @@ Thank you for contributing! This guide explains how to develop, test, and submit
 
 ## Getting Started
 
-### 1. Clone and Install
-
-```bash
-git clone <repository>
-cd py-common
-python -m venv .venv
-# On Mac/Linux: source .venv/bin/activate
-.venv\Scripts\activate
-pip install -e ".[all,dev]"
-python -m pre_commit install
-pytest
-```
-
-`pytest` should end with every test passing and none skipped except
-the ones marked `integration` (those need live SharePoint or GCP and
-only run when you set `RUN_INTEGRATION_TESTS=1`).
+Clone the repository, then follow
+[`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) for environment
+setup and test fixtures.
 
 ## Development Workflow
 
@@ -28,7 +15,7 @@ only run when you set `RUN_INTEGRATION_TESTS=1`).
 All new functionality requires tests. Write the test before the code:
 
 ```python
-# tests/test_myfeature.py
+# tests/unit/test_mymodule.py
 def test_my_feature():
     """Describe what should happen."""
     result = my_function(input_data)
@@ -72,8 +59,9 @@ pytest tests/ --cov=src/py_common --cov-report=html
 # Run only unit tests (skip integration)
 pytest tests/ -m "not integration"
 
-# Run specific test
-pytest tests/test_contract.py::test_valid_fixture -v
+# Run one test file, or one test class
+pytest tests/unit/test_contract.py -v
+pytest tests/unit/test_pipeline.py::TestPipelineAuditKey -v
 ```
 
 All tests must pass before submitting a pull request.
@@ -94,6 +82,34 @@ mypy src/py_common --strict
 ```
 
 All type errors must be resolved.
+
+### Quality Gates
+
+Two layers of checks run without you asking:
+
+- **On `git commit`** (`.pre-commit-config.yaml`): black, ruff, mypy,
+  detect-secrets, and YAML / large-file / whitespace / merge-conflict
+  checks. Run them all by hand with `pre-commit run --all-files`.
+- **On push and pull request** (`.github/workflows/tests.yml`):
+  pytest with coverage, ruff, black and mypy on Python 3.11.
+
+If detect-secrets flags something that is genuinely not a secret,
+update the baseline and commit it with your change:
+
+```bash
+detect-secrets scan --baseline .secrets.baseline
+```
+
+### Docker Image
+
+The `Dockerfile` builds py-common into a base image for projects
+that deploy to Cloud Run. It installs the core dependencies only; a
+child image adds its own extras (such as `gcp`) and entry point.
+
+```bash
+docker build -t py-common:latest .
+docker run py-common:latest
+```
 
 ## Commit Guidelines
 
@@ -151,9 +167,9 @@ mypy src/py_common --strict
 
 ## Pull Request Process
 
-1. **Create a branch** from `develop`:
+1. **Create a branch** from `main`:
    ```bash
-   git checkout develop
+   git checkout main
    git pull
    git checkout -b feature/my-feature
    ```
@@ -200,17 +216,8 @@ class LocalAdapter:
 
 ### Error Handling
 
-Use custom exceptions for expected errors:
-
-```python
-from py_common.errors import ValidationError
-
-try:
-    validate_data(data)
-except ValidationError as e:
-    # Handle validation issue
-    log_and_quarantine(e)
-```
+Use the custom exceptions in `py_common.errors` for expected errors —
+see the example in [`README.md`, Error Handling](README.md#error-handling).
 
 Do NOT catch and swallow errors silently.
 
@@ -222,6 +229,9 @@ Configuration should:
 - Be interpolated only when used
 - Be documented with examples
 
+For the format and a worked example, see
+[`docs/GETTING_STARTED.md`, Configuration](docs/GETTING_STARTED.md#7-configuration).
+
 ## Testing Guidelines
 
 ### Unit Tests
@@ -231,8 +241,12 @@ Test one function in isolation:
 ```python
 def test_validates_required_column():
     """Test that validation catches missing required column."""
-    contract = Contract(columns=[Column("id", nullable=False)])
-    with pytest.raises(ValidationError):
+    contract = Contract(
+        worksheets=[
+            Worksheet(name="Events", columns=[Column("id", nullable=False)])
+        ]
+    )
+    with pytest.raises(ContractError):
         contract.validate(excel_without_id, "test.xlsx")
 ```
 
@@ -277,7 +291,10 @@ Update documentation when:
 - Adding a new public API (docstring + README example)
 - Changing configuration format (update config examples)
 - Making architectural decisions (add to DECISIONS_en.md)
-- Adding a feature (update WALKTHROUGH.md if applicable)
+- Changing what works or what's stubbed (update the status tables in
+  README.md and `docs/INGESTION_FRAMEWORK_GUIDE.md`, Section 5)
+- Changing anything `docs/GETTING_STARTED.md` runs (re-run its
+  snippets and update the expected output)
 
 ## Common Tasks
 
@@ -285,16 +302,18 @@ Update documentation when:
 
 1. Create `src/py_common/adapters/myadapter.py`
 2. Implement the protocol (Source, ObjectStore, or Warehouse)
-3. Add tests in `tests/test_adapters.py`
+3. Add unit tests in `tests/unit/test_myadapter.py`, with the
+   external service mocked
 4. Add integration tests in `tests/integration/test_myadapter.py`
-5. Document in README.md
+5. Add it to the adapter status table in README.md
 
 ### Add a New Validation Rule
 
-1. Add test to `tests/test_contract.py`
+1. Add test to `tests/unit/test_contract.py`
 2. Implement in `Contract.validate()`
-3. Create fixture in `scripts/make_fixtures.py` demonstrating the rule
-4. Regenerate fixtures
+3. Add a fixture case to `make_fixtures()` in
+   `src/py_common/fixtures.py` demonstrating the rule
+4. Regenerate fixtures (see `docs/GETTING_STARTED.md`, Section 2)
 5. Update contract.py docstring
 
 ### Deprecate Something
@@ -337,7 +356,8 @@ When reviewing, check:
 This project follows:
 
 - **PEP 8**: Python style guide (79-char lines)
-- **RAP**: Reproducible, Auditable, Transparent
+- **RAP**: Reproducible Analytical Pipelines — reproducible,
+  auditable, peer-reviewed
 - **TDD**: Tests written before code
 - **Google Style**: Docstring format
 

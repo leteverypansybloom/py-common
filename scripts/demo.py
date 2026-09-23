@@ -1,13 +1,18 @@
-# In PowerShell, first confirm these are set:
-# $env:GCP_PROJECT_ID
-# $env:GCS_RAW_BUCKET
-# $env:BQ_DATASET
-#
-# Then run:
-# python -m pytest tests/unit -q
-#
-# This script writes test data to the configured development GCS bucket
-# and BigQuery dataset.
+"""Run the fixtures through the real GCS and BigQuery adapters.
+
+A manual demonstration, not part of the test suite. It writes test
+data to the configured development GCS bucket and BigQuery dataset,
+and creates a `manager-demo-input-<run id>/` folder (gitignored) in
+the current directory.
+
+In PowerShell, first confirm these are set:
+    $env:GCP_PROJECT_ID
+    $env:GCS_RAW_BUCKET
+    $env:BQ_DATASET
+
+Then, from the repository root, run:
+    python scripts/demo.py
+"""
 
 import os
 import shutil
@@ -24,10 +29,10 @@ from py_common.contract import Column, Contract, Worksheet
 from py_common.model import Outcome
 from py_common.pipeline import Pipeline
 
-
 PROJECT = os.environ["GCP_PROJECT_ID"]
 BUCKET = os.environ["GCS_RAW_BUCKET"]
 DATASET = os.environ["BQ_DATASET"]
+FIXTURES = Path(__file__).resolve().parents[1] / "tests/data/fixtures"
 
 run_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
 input_dir = Path(f"manager-demo-input-{run_id}")
@@ -37,7 +42,7 @@ valid_file = input_dir / f"demo_valid_{run_id}.xlsx"
 invalid_file = input_dir / f"demo_invalid_{run_id}.xlsx"
 
 # Create a valid workbook with unique IDs for this demonstration.
-shutil.copy2("tests/data/fixtures/events_valid.xlsx", valid_file)
+shutil.copy2(FIXTURES / "events_valid.xlsx", valid_file)
 
 workbook = load_workbook(valid_file)
 sheet = workbook["Events"]
@@ -128,7 +133,7 @@ for result in second_results:
 assert second_results[0].outcome == Outcome.SKIPPED
 
 print("\n5. Invalid Excel file")
-shutil.copy2("tests/data/fixtures/events_missing_column.xlsx", invalid_file)
+shutil.copy2(FIXTURES / "events_missing_column.xlsx", invalid_file)
 
 third_results = pipeline.run()
 
@@ -136,9 +141,7 @@ for result in third_results:
     print(result.item.name, result.outcome.value, result.rows_processed)
 
 invalid_result = next(
-    result
-    for result in third_results
-    if result.item.name == invalid_file.name
+    result for result in third_results if result.item.name == invalid_file.name
 )
 
 assert invalid_result.outcome == Outcome.QUARANTINED

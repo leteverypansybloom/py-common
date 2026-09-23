@@ -1,6 +1,6 @@
 # Test Fixtures
 
-Nine small Excel files for validating ingestion rules.
+7 small Excel files for validating ingestion rules.
 
 ## Fixtures
 
@@ -17,9 +17,13 @@ Nine small Excel files for validating ingestion rules.
 ## Usage
 
 Copy these files to your test SharePoint folder or local test directory.
-Each fixture is small (~1 KB) and regenerable via `scripts/make_fixtures.py`.
+Each fixture is small (~1 KB). `manifest.json` records each file's
+worksheet, headers and row count.
 
 ## Regenerating Fixtures
+
+This file is written by `make_fixtures()` in
+`src/py_common/fixtures.py`; edit it there, not here, then regenerate:
 
 ```python
 from py_common.fixtures import make_fixtures

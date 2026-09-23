@@ -2,7 +2,9 @@
 
 Reusable Python library for Excel → Cloud workflows. Handles file discovery, validation, storage, and warehouse loading.
 
-**Status**: Early development. Core pipeline and local testing adapters complete. Cloud adapters (SharePoint, GCS, BigQuery) planned for phase 2.
+**Status**: Early development. The core pipeline, local adapters, and
+the GCS and BigQuery adapters are built and unit-tested. The
+SharePoint adapter is a stub. See [Adapter status](#adapter-status).
 
 **New to this repo?** See [`docs/README.md`](docs/README.md) for a
 guided path: a hands-on getting-started walkthrough, a guide to
@@ -31,71 +33,11 @@ Audit (record every attempt)
 
 ## Quick Start
 
-### 1. Set Up Environment
-
-```shell
-python -m venv .venv
-# On Mac/Linux: source .venv/bin/activate
-.venv\Scripts\activate
-python -m pip install -e ".[dev,gcp]"
-python -m pre_commit install
-python -m pytest
-```
-
-### 2. Generate Test Fixtures
-
-```shell
-python -c "
-from py_common.fixtures import make_fixtures
-from pathlib import Path
-make_fixtures(Path('tests/data/fixtures'))
-"
-```
-
-Nine Excel files are created covering all validation rules:
-- `events_valid.xlsx` — passes all rules
-- `events_missing_sheet.xlsx` — wrong worksheet name
-- `events_missing_column.xlsx` — required column missing
-- `events_extra_column.xlsx` — unexpected column
-- `events_invalid_type.xlsx` — data type mismatch
-- `events_missing_value.xlsx` — null in required column
-- `events_duplicate.xlsx` — duplicate in unique column
-
-### 3. Run Tests
-
-```shell
-pytest tests/
-```
-
-All tests use local adapters; no cloud credentials needed.
-
-### 4. Define a Data Contract
-
-```python
-from pathlib import Path
-from py_common.contract import Column, Contract, Worksheet
-
-contract = Contract(
-    key_columns=["event_id"],
-    worksheets=[
-        Worksheet(
-            name="Events",
-            columns=[
-                Column("event_id", data_type="string", nullable=False),
-                Column("employer_id", data_type="string", nullable=False),
-                Column("attendees", data_type="integer", nullable=False),
-            ],
-        )
-    ],
-)
-
-# Validate an Excel file from the fixtures
-excel_bytes = Path("tests/data/fixtures/events_valid.xlsx").read_bytes()
-row_count = contract.validate(excel_bytes, "events_valid.xlsx")
-print(f"Valid: {row_count} rows")
-```
-
-**Note:** Full pipeline orchestration with cloud adapters (SharePoint, GCS, BigQuery) is phase 2.
+See [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) — the single
+place for environment setup, generating test fixtures, defining your
+first contract and wiring a pipeline. The fixtures themselves are
+described in
+[`tests/data/fixtures/README.md`](tests/data/fixtures/README.md).
 
 ## Architecture
 
@@ -114,8 +56,11 @@ print(f"Valid: {row_count} rows")
 **ObjectStore** (protocol)
 - Immutable storage for raw files, processed data, audit records
 - `get(key)` — retrieve object by path
-- `put(key, data)` — write object (idempotent)
-- `lock(key)` — acquire exclusive write lock
+- `put(key, data)` — write object; repeating an identical write
+  succeeds, but writing different bytes to an existing key raises
+  `ObjectStoreConflict`
+- `lock(key)` — acquire exclusive write lock (a no-op in the current
+  adapters; see [Concurrency](#concurrency))
 
 **Warehouse** (protocol)
 - Stages, validates, and loads data
@@ -125,7 +70,7 @@ print(f"Valid: {row_count} rows")
 
 **Pipeline**
 - Orchestrates the workflow
-- Handles retry logic, deduplication, error recording
+- Handles deduplication (by checksum) and error recording
 - Returns list of Result objects (one per file)
 
 ### Concurrency
@@ -145,137 +90,99 @@ process already holds it, as the `ObjectStore` protocol promises.
 
 ### Protocols vs Implementations
 
-Protocols are Python's version of interfaces:
-
-```python
-from py_common.ports import Source
-
-# Source is a Protocol (interface)
-class MySource:
-    def items(self):  # Required method
-        ...
-    def download(self, item):  # Required method
-        ...
-
-# MySource satisfies the protocol (structural typing)
-```
-
-This allows:
-- Multiple implementations (SharePoint, S3, local folder)
-- Swapping implementations without changing core code
-- Testing with mocks and local adapters
+Source, ObjectStore and Warehouse are Python `Protocol`s, so adapters
+can be swapped without changing core code. For why, see
+[`DECISIONS_en.md`](DECISIONS_en.md); for the technical detail, see
+[`docs/INGESTION_FRAMEWORK_GUIDE.md`](docs/INGESTION_FRAMEWORK_GUIDE.md).
 
 ## Configuration
 
-Configuration is typically YAML with environment variable interpolation:
-
-```yaml
-# config.yaml
-dev:
-  tenant_id: ${SHAREPOINT_TENANT_ID}
-  client_id: ${SHAREPOINT_CLIENT_ID}
-  project: dev-project
-  bucket: dev-bucket
-
-prod:
-  tenant_id: ${SHAREPOINT_TENANT_ID}
-  client_id: ${SHAREPOINT_CLIENT_ID}
-  project: prod-project
-  bucket: prod-bucket
-```
-
-Load and use:
-
-```python
-from py_common.config import load_config, interpolate, require_keys
-
-config = load_config("config.yaml")
-dev_cfg = config["dev"]
-
-# Interpolate environment variables only when section is used
-dev_cfg = {k: interpolate(v) if isinstance(v, str) else v 
-           for k, v in dev_cfg.items()}
-
-require_keys(dev_cfg, ["tenant_id", "client_id", "project"])
-```
+Configuration is YAML with environment variable interpolation — see
+[`docs/GETTING_STARTED.md`, Configuration](docs/GETTING_STARTED.md#7-configuration).
 
 ## Error Handling
 
 ```python
 from py_common.errors import (
-    ContractError,       # Workbook structure wrong
-    ValidationError,     # Data violates rules
-    ServiceError,        # Cloud service failed
-    VersionMismatch,     # Source changed during download
+    ValidationError,           # Workbook invalid (includes ContractError)
+    ServiceError,              # Cloud service failed
+    VersionMismatch,           # Source changed during download
+    IndeterminateCommitError,  # Unknown whether warehouse committed
 )
 
 try:
     rows = contract.validate(excel_bytes, filename)
-except ContractError as e:
-    # Schema mismatch; always quarantine
-    quarantine_file(e)
 except ValidationError as e:
-    # Data rule violation; quarantine
+    # Schema or data rule violation; always quarantine
     quarantine_file(e)
-except ServiceError as e:
-    # Cloud service unavailable; retry later
-    retry_later()
 ```
+
+`ContractError` (wrong worksheets or columns) is a subclass of
+`ValidationError`, so one `except` covers both. `Pipeline` already
+does this for you: validation failures and warehouse `ServiceError`s
+are quarantined, and any other error (including
+`IndeterminateCommitError`) marks that file `FAILED` while the run
+carries on with the next file. The full hierarchy is in
+`src/py_common/errors.py`.
 
 ## Testing
 
-### Run Unit Tests
+See [`CONTRIBUTING.md`, Run Tests Locally](CONTRIBUTING.md#run-tests-locally).
 
-```bash
-pytest tests/ -v
-```
+## Adapter status
 
-### Run with Coverage
+| Adapter | Implements | Status |
+|---|---|---|
+| `LocalSource` | Source | ✅ Built, unit-tested |
+| `LocalObjectStore` | ObjectStore | ✅ Built, unit-tested |
+| `GCSObjectStore` | ObjectStore | ✅ Built, unit-tested against mocks; `lock()` is a no-op |
+| `BigQueryWarehouse` | Warehouse | ✅ Built, unit-tested against mocks; `MERGE` on `key_columns` |
+| `SharePointSource` | Source | ⏳ Stub — every method raises `NotImplementedError` |
+| Secret Manager | SecretStore | ⏳ Not started |
 
-```bash
-pytest tests/ --cov=src/py_common --cov-report=html
-```
+Also built: contract validation, configuration with interpolation,
+fixture generation, the error hierarchy, and GCP authentication
+helpers (`gcp_auth.py`).
 
-### Run Only Integration Tests
-
-```bash
-pytest tests/ -m integration
-```
-
-(Integration tests requiring live services are skipped by default.)
-
-### Generate Fixtures (for development)
-
-```bash
-python scripts/make_fixtures.py
-```
-
-## What's Implemented
-
-✅ Core pipeline orchestration  
-✅ Contract validation  
-✅ Configuration with interpolation  
-✅ Local adapters (Source, ObjectStore) for testing  
-✅ Fixture generation  
-✅ Error hierarchy  
-✅ Unit tests  
-
-## What's Next (Phase 2)
+## What's Next
 
 ⏳ SharePoint Online adapter  
-⏳ Google Cloud Storage adapter  
-⏳ BigQuery adapter  
-⏳ Integration tests for cloud services  
-⏳ Logging and structured output  
+⏳ Real distributed `lock()` (Firestore)  
+⏳ Secret Manager adapter  
+⏳ Structured logging and alerting  
+
+The agreed order, with reasoning, is in
+[`docs/INGESTION_FRAMEWORK_GUIDE.md`, Section 9](docs/INGESTION_FRAMEWORK_GUIDE.md#9-priority-order-for-closing-the-gaps).
 
 ## Dependencies
 
-- openpyxl >= 3.0 — Read/write Excel
+Core:
+
+- openpyxl >= 3.0 — Read Excel
 - pyyaml >= 6.0 — YAML configuration
-- google-cloud-storage >= 2.10 — GCS (phase 2)
-- google-cloud-bigquery >= 3.13 — BigQuery (phase 2)
-- microsoft-graph-core >= 0.2 — Graph API (phase 2)
-- azure-identity >= 1.14 — Azure auth (phase 2)
+- pandas >= 2.0 — Excel → DataFrame conversion
+- pyarrow >= 15.0 — Parquet output
+
+Optional extras (`pip install -e ".[gcp]"` etc.):
+
+- `gcp`: google-cloud-storage >= 2.10, google-cloud-bigquery >= 3.13
+- `sharepoint`: microsoft-graph-core >= 0.2, azure-identity >= 1.14
+- `dev`: pytest, black, ruff, mypy, pre-commit, detect-secrets and
+  type stubs
+
+## Scripts
+
+`scripts/` holds manual, one-off scripts that aren't part of the
+library or the test suite:
+
+- `scripts/demo.py` — runs the fixtures through `GCSObjectStore` and
+  `BigQueryWarehouse` against a real development project. Writes to
+  real cloud resources.
+- `scripts/check_gcp_auth.py` — checks your local GCP credentials can
+  reach BigQuery and Cloud Storage.
+
+Both read their project settings from environment variables; see the
+header of each file.
 
 ## Standards
 
@@ -283,7 +190,8 @@ python scripts/make_fixtures.py
 - **Type hints**: All functions annotated
 - **Google docstrings**: Clear, concise documentation
 - **TDD**: Tests written before or alongside code
-- **RAP**: Reproducible, auditable, peer-reviewed
+- **RAP**: Reproducible Analytical Pipelines — reproducible,
+  auditable, peer-reviewed
 
 ## License
 

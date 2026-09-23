@@ -2,9 +2,9 @@
 
 LocalSource: List and download files from a folder
 LocalObjectStore: Read/write files to a folder
-LocalWarehouse: Load data into CSV files (mock)
 
-Enables full pipeline testing with just Python and local files.
+There is no local Warehouse: tests use a Mock, and
+docs/GETTING_STARTED.md shows a small in-memory fake.
 """
 
 import logging
