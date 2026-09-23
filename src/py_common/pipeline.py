@@ -95,104 +95,44 @@ class Pipeline:
         warehouse_key = ""
 
         try:
-            # Download file
-            try:
-                data = self.source.download(item)
-            except VersionMismatch:
-                logger.info(
-                    "Skipping %s: version changed during download",
-                    item.name,
-                )
-                return Result(
-                    item=item,
-                    outcome=Outcome.SKIPPED,
-                    checksum="",
-                    rows_processed=0,
-                    errors=[],
-                    processing_time_seconds=perf_counter() - start_time,
+            data = self._download(item)
+            if data is None:
+                return self._make_result(
+                    item, Outcome.SKIPPED, checksum, 0, errors, start_time
                 )
 
-            # Hash and check for duplicates
             checksum = digest(data)
-            existing = self.store.get(f"audit/{checksum}")
-            if existing:
-                logger.info(
-                    "Skipping %s: checksum %s already processed",
-                    item.name,
-                    checksum[:8],
-                )
-                return Result(
-                    item=item,
-                    outcome=Outcome.SKIPPED,
-                    checksum=checksum,
-                    rows_processed=0,
-                    errors=[],
-                    processing_time_seconds=perf_counter() - start_time,
+            if self._is_duplicate(item, checksum):
+                return self._make_result(
+                    item, Outcome.SKIPPED, checksum, 0, errors, start_time
                 )
 
-            # Validate contract
             try:
                 rows_processed = self.contract.validate(data, item.name)
             except ValidationError as e:
-                logger.warning("Validation failed for %s: %s", item.name, e)
-                errors.append(str(e))
-                outcome = Outcome.QUARANTINED
-                self.store.put(f"raw/{item.identity}", data)
-                self.store.put(f"quarantine/{item.identity}", data)
-                return Result(
-                    item=item,
-                    outcome=outcome,
-                    checksum=checksum,
-                    rows_processed=0,
-                    errors=errors,
-                    processing_time_seconds=perf_counter() - start_time,
+                errors = self._quarantine_invalid(item, data, e)
+                return self._make_result(
+                    item,
+                    Outcome.QUARANTINED,
+                    checksum,
+                    0,
+                    errors,
+                    start_time,
                 )
 
-            # Store raw file
-            self.store.put(f"raw/{item.identity}", data)
+            self._store_raw(item, data)
+            parquet_bytes = self._to_parquet(data)
+            self._store_processed(item, parquet_bytes)
 
-            # Convert to Parquet. Look up the primary worksheet by
-            # the name the contract validated, not wb.active: the
-            # workbook's active sheet has no guaranteed relation to
-            # which sheet the contract expects.
-            wb = load_workbook(BytesIO(data), data_only=True)
-            primary_sheet_name = self.contract.worksheets[0].name
-            ws = wb[primary_sheet_name]
-            headers = [cell.value for cell in ws[1]]
-            rows = []
-            for row in ws.iter_rows(min_row=2, values_only=True):
-                rows.append(dict(zip(headers, row)))
-
-            df = pd.DataFrame(rows)
-            df["_loaded_at"] = datetime.now(timezone.utc)
-            
-            parquet_buffer = BytesIO()
-            df.to_parquet(parquet_buffer, index=False)
-            parquet_bytes = parquet_buffer.getvalue()
-
-            # Store processed file
-            self.store.put(f"processed/{item.identity}.parquet", parquet_bytes)
-
-            # Load to warehouse
             warehouse_key = f"{item.identity}_{checksum[:8]}"
-            try:
-                self.warehouse.load(
-                    key=warehouse_key,
-                    checksum=checksum,
-                    data=parquet_bytes,
-                    rows=rows_processed,
-                )
-            except IndeterminateCommitError:
-                logger.error(
-                    "Cannot confirm warehouse commit for %s", item.name
-                )
-                outcome = Outcome.FAILED
-                errors.append("Warehouse commit indeterminate")
-                raise
-            except ServiceError as e:
-                logger.error("Warehouse service error: %s", e)
-                outcome = Outcome.QUARANTINED
-                errors.append(f"Warehouse error: {e}")
+            outcome = self._load_to_warehouse(
+                item,
+                warehouse_key,
+                checksum,
+                parquet_bytes,
+                rows_processed,
+                errors,
+            )
 
             logger.info(
                 "Loaded %s (%d rows, %s)",
@@ -208,6 +148,186 @@ class Pipeline:
                 errors.append(str(e))
             logger.exception("Processing error for %s: %s", item.name, e)
 
+        return self._make_result(
+            item,
+            outcome,
+            checksum,
+            rows_processed,
+            errors,
+            start_time,
+            warehouse_key,
+        )
+
+    def _download(self, item: SourceItem) -> bytes | None:
+        """Download source bytes, or None if the version moved on.
+
+        Args:
+            item: SourceItem from source discovery.
+
+        Returns:
+            File bytes, or None if the source version changed since
+            discovery (caller should treat this as a skip).
+        """
+        try:
+            return self.source.download(item)
+        except VersionMismatch:
+            logger.info(
+                "Skipping %s: version changed during download", item.name
+            )
+            return None
+
+    def _is_duplicate(self, item: SourceItem, checksum: str) -> bool:
+        """Check whether this exact content was already processed.
+
+        Args:
+            item: SourceItem being processed (for logging).
+            checksum: SHA-256 of the downloaded bytes.
+
+        Returns:
+            True if an audit record already exists for this checksum.
+        """
+        existing = self.store.get(f"audit/{checksum}")
+        if existing:
+            logger.info(
+                "Skipping %s: checksum %s already processed",
+                item.name,
+                checksum[:8],
+            )
+            return True
+        return False
+
+    def _quarantine_invalid(
+        self, item: SourceItem, data: bytes, error: ValidationError
+    ) -> list[str]:
+        """Store raw + quarantine copies after a validation failure.
+
+        Args:
+            item: SourceItem that failed validation.
+            data: Raw downloaded bytes to preserve for triage.
+            error: The validation failure.
+
+        Returns:
+            Single-element errors list describing the failure.
+        """
+        logger.warning("Validation failed for %s: %s", item.name, error)
+        self.store.put(f"raw/{item.identity}", data)
+        self.store.put(f"quarantine/{item.identity}", data)
+        return [str(error)]
+
+    def _store_raw(self, item: SourceItem, data: bytes) -> None:
+        """Store the raw downloaded bytes.
+
+        Args:
+            item: SourceItem being processed.
+            data: Raw file bytes.
+        """
+        self.store.put(f"raw/{item.identity}", data)
+
+    def _to_parquet(self, data: bytes) -> bytes:
+        """Convert the primary worksheet to Parquet bytes.
+
+        Looks up the primary worksheet by the name the contract
+        validated, not wb.active: the workbook's active sheet has no
+        guaranteed relation to which sheet the contract expects.
+
+        Args:
+            data: Raw Excel bytes.
+
+        Returns:
+            Parquet-encoded bytes of the primary worksheet.
+        """
+        wb = load_workbook(BytesIO(data), data_only=True)
+        primary_sheet_name = self.contract.worksheets[0].name
+        ws = wb[primary_sheet_name]
+        headers = [cell.value for cell in ws[1]]
+        rows = [
+            dict(zip(headers, row))
+            for row in ws.iter_rows(min_row=2, values_only=True)
+        ]
+
+        df = pd.DataFrame(rows)
+        df["_loaded_at"] = datetime.now(timezone.utc)
+        parquet_buffer = BytesIO()
+        df.to_parquet(parquet_buffer, index=False)
+        return parquet_buffer.getvalue()
+
+    def _store_processed(self, item: SourceItem, parquet_bytes: bytes) -> None:
+        """Store the converted Parquet bytes.
+
+        Args:
+            item: SourceItem being processed.
+            parquet_bytes: Parquet-encoded data to store.
+        """
+        self.store.put(f"processed/{item.identity}.parquet", parquet_bytes)
+
+    def _load_to_warehouse(
+        self,
+        item: SourceItem,
+        warehouse_key: str,
+        checksum: str,
+        parquet_bytes: bytes,
+        rows_processed: int,
+        errors: list[str],
+    ) -> Outcome:
+        """Load Parquet bytes into the warehouse.
+
+        Args:
+            item: SourceItem being processed (for logging).
+            warehouse_key: Unique identifier for this load.
+            checksum: SHA-256 of the source bytes.
+            parquet_bytes: Converted Parquet data to load.
+            rows_processed: Expected row count for verification.
+            errors: Errors list to append to on failure (mutated).
+
+        Returns:
+            Outcome.LOADED on success, Outcome.QUARANTINED if the
+            warehouse service failed.
+
+        Raises:
+            IndeterminateCommitError: Commit state could not be
+                confirmed; caller must treat this as a failure.
+        """
+        try:
+            self.warehouse.load(
+                key=warehouse_key,
+                checksum=checksum,
+                data=parquet_bytes,
+                rows=rows_processed,
+            )
+            return Outcome.LOADED
+        except IndeterminateCommitError:
+            logger.error("Cannot confirm warehouse commit for %s", item.name)
+            errors.append("Warehouse commit indeterminate")
+            raise
+        except ServiceError as e:
+            logger.error("Warehouse service error: %s", e)
+            errors.append(f"Warehouse error: {e}")
+            return Outcome.QUARANTINED
+
+    def _make_result(
+        self,
+        item: SourceItem,
+        outcome: Outcome,
+        checksum: str,
+        rows_processed: int,
+        errors: list[str],
+        start_time: float,
+        warehouse_key: str = "",
+    ) -> Result:
+        """Assemble a Result with elapsed processing time.
+
+        Args:
+            item: SourceItem processed.
+            outcome: Final outcome.
+            checksum: SHA-256 of source bytes, if computed.
+            rows_processed: Rows validated and loaded.
+            errors: Errors encountered, if any.
+            start_time: perf_counter() value at start of process().
+            warehouse_key: Reference in final table, if loaded.
+
+        Returns:
+            Populated Result.
+        """
         return Result(
             item=item,
             outcome=outcome,
@@ -242,9 +362,12 @@ class Pipeline:
             default=str,
             sort_keys=True,
         )
+        # isoformat()'s colons are invalid in Windows filenames, so
+        # replace them (2026-09-22T14-30-45.123456+00-00, not
+        # 14:30:45.123456+00:00) before using the timestamp as a key.
+        timestamp_key = record.timestamp.isoformat().replace(":", "-")
         audit_key = (
-            f"audit/records/{record.timestamp.isoformat()}_"
-            f"{result.item.identity}.json"
+            f"audit/records/{timestamp_key}_{result.item.identity}.json"
         )
         self.store.put(audit_key, audit_json.encode())
 
