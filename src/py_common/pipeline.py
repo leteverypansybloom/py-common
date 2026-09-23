@@ -164,6 +164,8 @@ class Pipeline:
                 rows.append(dict(zip(headers, row)))
 
             df = pd.DataFrame(rows)
+            df["_loaded_at"] = datetime.now(timezone.utc)
+            
             parquet_buffer = BytesIO()
             df.to_parquet(parquet_buffer, index=False)
             parquet_bytes = parquet_buffer.getvalue()

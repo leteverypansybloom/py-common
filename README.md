@@ -37,9 +37,9 @@ Audit (record every attempt)
 python -m venv .venv
 # On Mac/Linux: source .venv/bin/activate
 .venv\Scripts\activate
-pip install -e ".[all,dev]"
+python -m pip install -e ".[dev,gcp]"
 python -m pre_commit install
-pytest
+python -m pytest
 ```
 
 ### 2. Generate Test Fixtures

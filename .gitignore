@@ -71,3 +71,6 @@ vendor/
 output/
 test_files/
 *.parquet
+
+# Local smoke-test inputs
+manager-demo-input-*/
