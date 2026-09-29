@@ -1,0 +1,17 @@
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /app
+
+COPY pyproject.toml README.md ./
+COPY src/ ./src/
+COPY scripts/demo.py ./scripts/demo.py
+
+RUN python -m pip install --no-cache-dir ".[gcp]"
+
+# Generate synthetic fixtures inside the image.
+RUN python -c "from pathlib import Path; from py_common.fixtures import make_fixtures; make_fixtures(Path('tests/data/fixtures'))"
+
+CMD ["python", "scripts/demo.py"]

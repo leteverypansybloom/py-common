@@ -1,0 +1,11 @@
+**
+!Dockerfile.smoke
+!cloudbuild.smoke.yaml
+!pyproject.toml
+!README.md
+!src/
+!src/**
+!scripts/
+!scripts/demo.py
+**/__pycache__/**
+**/*.pyc
