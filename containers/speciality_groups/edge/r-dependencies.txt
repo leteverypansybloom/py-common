@@ -1,0 +1,13 @@
+DBI
+bigrquery
+yaml
+dplyr
+readr
+tidyr
+tibble
+jsonlite
+httr
+googleCloudStorageR
+janitor
+arrow
+gt

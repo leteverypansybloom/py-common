@@ -1,0 +1,10 @@
+odbc
+readxl
+splitstackshape
+config
+here
+janitor
+data.table
+tidyverse
+bigrquery
+yaml
