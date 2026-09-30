@@ -8,7 +8,7 @@ Entries are not rewritten once made. When a decision changes, add a
 new dated entry saying which earlier entry it replaces, and mark the
 earlier entry as superseded.
 
-## 2026-09-30 — Real GCS lock; SharePoint adapter; versioned storage keys
+## 2026-09-30 — Real GCS lock; SharePoint adapter; versioned storage keys; `_loaded_at` set by BigQuery
 
 ### GCSObjectStore.lock() is a real lock, not a no-op
 
@@ -68,6 +68,26 @@ survive edits, and also happened with `LocalSource` file names.
 edits (a bucket lifecycle rule can manage that). Keys written before
 this change are left where they are. Benefit: edited files load, and
 the raw layer holds exactly what was received for each version.
+
+### BigQuery sets `_loaded_at`, not the Parquet file
+
+`_loaded_at` used to be added to the Parquet during conversion, so the
+same workbook produced different Parquet bytes on every run. Parquet
+is stored under a checksum key before the warehouse load, so a retry
+after a failed load (warehouse outage, rolled-back transaction) hit
+`ObjectStoreConflict` and the file was marked `FAILED` on every later
+run.
+
+Now the Parquet holds only source columns and `BigQueryWarehouse`
+sets `_loaded_at` inside the commit transaction, to the audit record's
+timestamp. Matched rows get it refreshed on update. A source column
+named `_loaded_at` is refused.
+
+**Trade-off**: Parquet is only byte-identical while the pandas and
+pyarrow versions stay the same; upgrading them between a failed load
+and its retry can still cause one conflict. `_loaded_at` now means
+"committed to BigQuery" rather than "converted". Benefit: failed loads
+retry cleanly, and each row's `_loaded_at` joins to its audit entry.
 
 ### SharePoint files are identified by item ID and versioned by eTag
 

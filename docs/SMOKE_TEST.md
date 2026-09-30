@@ -48,7 +48,7 @@ that invalid input is caught and isolated before it reaches BigQuery.
 | Valid Excel file | `loaded 2` | The pipeline can validate, convert, store and load two rows. |
 | GCS check | Raw `.xlsx` and processed `.parquet` objects exist | The original and processed versions are retained. |
 | BigQuery check | Two new `DEMO-...` rows appear | The data reached the final destination table. |
-| `_loaded_at` check | Both rows have a timestamp | The pipeline records when the data was loaded. |
+| `_loaded_at` check | Both rows have a timestamp matching the audit entry | BigQuery records when the data was committed. |
 | Rerun unchanged file | `skipped 0` | The same file content is not loaded twice. |
 | Invalid workbook | `quarantined 0` | Invalid data is retained for investigation and does not reach BigQuery. |
 
@@ -121,7 +121,8 @@ The pipeline reads the `Events` sheet into a table-like structure and creates:
 processed/<identity>/<checksum>/<filename>.xlsx.parquet
 ```
 
-It adds `_loaded_at` at this stage using a UTC timestamp.
+It holds only the worksheet's own columns, so the same workbook always
+produces the same Parquet bytes. That lets a failed load be retried safely.
 
 Parquet is efficient for analytics and works well with BigQuery. The original
 Excel workbook remains unchanged in `raw/`, while the Parquet file is the
@@ -155,7 +156,8 @@ using `event_id` as the key:
 
 - A new event ID is inserted.
 - An existing event ID is updated rather than duplicated.
-- `_loaded_at` holds the pipeline's UTC load timestamp.
+- `_loaded_at` is set by BigQuery in the same transaction, to the same UTC
+  timestamp as the audit entry.
 
 The final-table change and BigQuery audit entry are committed together. This
 avoids a successful-looking data load without a corresponding audit record.
@@ -221,6 +223,7 @@ Excel -> raw GCS -> processed Parquet in GCS -> events_final_staging -> events_f
 ```
 
 The smoke-test table has four columns because the source workbook contains
-`event_id`, `employer_id` and `attendees`, and the pipeline adds `_loaded_at`.
+`event_id`, `employer_id` and `attendees`, and BigQuery adds `_loaded_at` when
+it commits the load. A source column called `_loaded_at` is refused.
 If a real workbook has additional columns, they should also be designed into
 the BigQuery destination table.

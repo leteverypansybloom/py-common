@@ -257,6 +257,11 @@ class Pipeline:
         validated, not wb.active: the workbook's active sheet has no
         guaranteed relation to which sheet the contract expects.
 
+        The output is a pure function of the input bytes (no load
+        timestamp), so a retry after a failed warehouse load writes
+        identical bytes to the same processed/ key. The warehouse
+        stamps _loaded_at when it commits.
+
         Args:
             data: Raw Excel bytes.
 
@@ -273,7 +278,6 @@ class Pipeline:
         ]
 
         df = pd.DataFrame(rows)
-        df["_loaded_at"] = datetime.now(timezone.utc)
         parquet_buffer = BytesIO()
         df.to_parquet(parquet_buffer, index=False)
         return parquet_buffer.getvalue()

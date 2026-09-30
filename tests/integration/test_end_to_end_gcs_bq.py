@@ -1,7 +1,6 @@
 """End-to-end test: Parquet → GCS → BigQuery."""
 
 import os
-from datetime import datetime
 from io import BytesIO
 
 import pytest
@@ -25,7 +24,7 @@ class TestEndToEndWorkflow:
             "event_id": ["EVT001", "EVT002"],
             "employer_id": ["EMP001", "EMP002"],
             "attendees": [10, 20],
-            "_loaded_at": [datetime.now(), datetime.now()],
+            # No _loaded_at: BigQueryWarehouse sets it at commit.
         }
         table = pa.table(data)
 

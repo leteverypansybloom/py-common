@@ -495,8 +495,14 @@ class TestBigQueryWarehouseMergeSql:
             "AND T.`period` = S.`period`" in sql
         )
 
-    def test_merge_omits_update_when_all_columns_are_keys(self, warehouse):
-        """No WHEN MATCHED clause when there's nothing to update.
+    def test_merge_refreshes_loaded_at_when_all_columns_are_keys(
+        self, warehouse
+    ):
+        """With only key columns, a match still updates _loaded_at.
+
+        Previously no WHEN MATCHED clause was emitted here. Now that
+        the warehouse owns _loaded_at, a re-loaded row records when
+        it was last confirmed, like any other matched row.
 
         Args:
             warehouse: BigQueryWarehouse fixture with key_columns
@@ -505,14 +511,46 @@ class TestBigQueryWarehouseMergeSql:
             None
 
         Raises:
-            AssertionError: If an empty UPDATE SET is emitted
+            AssertionError: If _loaded_at is not refreshed
         """
         sql = warehouse._build_merge_sql(
             "proj.ds.t_staging", "proj.ds.t", ["event_id"], ["event_id"]
         )
 
-        assert "WHEN MATCHED" not in sql
+        assert (
+            "WHEN MATCHED THEN UPDATE SET T.`_loaded_at` = @timestamp" in sql
+        )
         assert "WHEN NOT MATCHED THEN INSERT" in sql
+
+    def test_merge_stamps_loaded_at_on_update_and_insert(self, warehouse):
+        """_loaded_at comes from the audit @timestamp, not the file.
+
+        Setting it inside the commit transaction means every final
+        row's _loaded_at equals its audit record's timestamp, and
+        the Parquet stays byte-identical across retries.
+
+        Args:
+            warehouse: BigQueryWarehouse fixture with key_columns
+
+        Returns:
+            None
+
+        Raises:
+            AssertionError: If _loaded_at is not set from @timestamp
+        """
+        sql = warehouse._build_merge_sql(
+            "proj.ds.t_staging",
+            "proj.ds.t",
+            ["event_id"],
+            ["event_id", "attendees"],
+        )
+
+        update = sql.split("WHEN MATCHED")[1].split("WHEN NOT MATCHED")[0]
+        assert "T.`_loaded_at` = @timestamp" in update
+        assert (
+            "INSERT (`event_id`, `attendees`, `_loaded_at`) "
+            "VALUES (S.`event_id`, S.`attendees`, @timestamp)" in sql
+        )
 
     def test_load_uses_merge_sql_when_key_columns_configured(self, warehouse):
         """load() builds a real MERGE, not a plain append INSERT,
@@ -598,4 +636,71 @@ class TestBigQueryWarehouseMergeSql:
         txn_sql = next(s for s in sql_calls if "BEGIN TRANSACTION" in s)
 
         assert "WHEN MATCHED" not in txn_sql
-        assert "WHEN NOT MATCHED THEN INSERT ROW" in txn_sql
+        # Explicit column list (not INSERT ROW) so _loaded_at is set.
+        assert "WHEN NOT MATCHED THEN INSERT (`event_id`" in txn_sql
+
+
+class TestBigQueryWarehouseLoadedAt:
+    """The warehouse, not the Parquet file, owns _loaded_at."""
+
+    def _warehouse(self, *staging_columns: str) -> BigQueryWarehouse:
+        """Append-only warehouse whose staging has the given columns.
+
+        Args:
+            *staging_columns: Column names BigQuery "inferred".
+
+        Returns:
+            BigQueryWarehouse with a mocked client.
+        """
+        mock_bq_client = MagicMock()
+        with patch(
+            "py_common.adapters.bigquery.bigquery.Client"
+        ) as mock_client_class:
+            mock_client_class.return_value = mock_bq_client
+            warehouse = BigQueryWarehouse(
+                project_id="test-project",
+                dataset_id="test-dataset",
+                table_id="test_table",
+            )
+        mock_bq_client.get_table.return_value = _staging_table(
+            *staging_columns
+        )
+        mock_query_job = Mock()
+        mock_query_job.result.return_value = [(1,)]
+        mock_bq_client.query.return_value = mock_query_job
+        return warehouse
+
+    def test_append_only_insert_sets_loaded_at(self) -> None:
+        """Append-only MERGE lists columns and stamps _loaded_at.
+
+        INSERT ROW would copy staging as-is, which no longer has a
+        _loaded_at column to match the final table.
+
+        Raises:
+            AssertionError: If INSERT ROW is used or _loaded_at unset
+        """
+        warehouse = self._warehouse("event_id")
+
+        warehouse.load(key="k", checksum="c", data=b"parquet", rows=1)
+
+        sql_calls = [c[0][0] for c in warehouse.client.query.call_args_list]
+        txn_sql = next(s for s in sql_calls if "BEGIN TRANSACTION" in s)
+        assert "INSERT ROW" not in txn_sql
+        assert (
+            "INSERT (`event_id`, `_loaded_at`) "
+            "VALUES (S.`event_id`, @timestamp)" in txn_sql
+        )
+
+    def test_source_column_named_loaded_at_is_refused(self) -> None:
+        """A source column called _loaded_at is refused, not overwritten.
+
+        Raises:
+            AssertionError: If the load proceeds
+        """
+        warehouse = self._warehouse("event_id", "_loaded_at")
+
+        with pytest.raises(ValueError, match="_loaded_at"):
+            warehouse.load(key="k", checksum="c", data=b"parquet", rows=1)
+
+        sql_calls = [c[0][0] for c in warehouse.client.query.call_args_list]
+        assert not any("BEGIN TRANSACTION" in s for s in sql_calls)

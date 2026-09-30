@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from io import BytesIO
 from unittest.mock import Mock
 
+import pandas as pd
 import pytest
 from openpyxl import Workbook
 
@@ -513,3 +514,94 @@ class TestPipelineStorageKeysAreVersioned:
         fixed = self._pipeline(_workbook([("a", 1)]), store, contract)
 
         assert fixed.process(item).outcome == Outcome.LOADED
+
+
+class TestPipelineRetryAfterWarehouseFailure:
+    """A file whose warehouse load failed must load on the next run.
+
+    Processed Parquet is keyed by content checksum and written before
+    the warehouse load. If it carried a conversion-time timestamp, a
+    retry would produce different bytes for the same key and fail
+    with ObjectStoreConflict on every later run. So the Parquet must
+    be a pure function of the source bytes; the warehouse stamps
+    _loaded_at at commit time instead.
+    """
+
+    @pytest.fixture
+    def contract(self) -> Contract:
+        """Contract for the "Events" name/count sheet."""
+        return Contract(
+            worksheets=[
+                Worksheet(
+                    name="Events",
+                    columns=[
+                        Column(name="name", data_type="string"),
+                        Column(name="count", data_type="integer"),
+                    ],
+                )
+            ]
+        )
+
+    def test_parquet_is_identical_for_identical_input(
+        self, contract: Contract
+    ) -> None:
+        """Converting the same workbook twice gives the same bytes.
+
+        Args:
+            contract: Contract fixture.
+        """
+        pipeline = Pipeline(Mock(), Mock(), Mock(), contract)
+        data = _workbook([("a", 1), ("b", 2)])
+
+        assert pipeline._to_parquet(data) == pipeline._to_parquet(data)
+
+    def test_parquet_holds_only_source_columns(
+        self, contract: Contract
+    ) -> None:
+        """No pipeline-added columns such as _loaded_at.
+
+        Args:
+            contract: Contract fixture.
+        """
+        pipeline = Pipeline(Mock(), Mock(), Mock(), contract)
+        parquet = pipeline._to_parquet(_workbook([("a", 1)]))
+
+        assert list(pd.read_parquet(BytesIO(parquet)).columns) == [
+            "name",
+            "count",
+        ]
+
+    @pytest.mark.parametrize(
+        ("error", "first_outcome"),
+        [
+            (ServiceError("BigQuery unavailable"), Outcome.QUARANTINED),
+            (RuntimeError("transaction rolled back"), Outcome.FAILED),
+        ],
+    )
+    def test_next_run_loads_after_warehouse_failure(
+        self,
+        contract: Contract,
+        error: Exception,
+        first_outcome: Outcome,
+    ) -> None:
+        """Run 1 fails at the warehouse; run 2 of the same file loads.
+
+        Args:
+            contract: Contract fixture.
+            error: What the warehouse raises on the first load.
+            first_outcome: Expected outcome of the first run.
+        """
+        item = SourceItem("events.xlsx", "ID1", "v1", 10)
+        source = Mock()
+        source.items.return_value = [item]
+        source.download.return_value = _workbook([("a", 1)])
+        warehouse = Mock()
+        warehouse.identity = "project.dataset.events"
+        warehouse.load.side_effect = [error, None]
+        pipeline = Pipeline(source, InMemoryStore(), warehouse, contract)
+
+        first = pipeline.run()
+        second = pipeline.run()
+
+        assert first[0].outcome == first_outcome
+        assert second[0].outcome == Outcome.LOADED, second[0].errors

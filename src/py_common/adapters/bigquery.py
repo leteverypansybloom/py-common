@@ -17,6 +17,10 @@ from google.cloud import bigquery
 
 logger = logging.getLogger("py_common.adapters.bigquery")
 
+#: Final-table column set by the warehouse at commit time. Reserved:
+#: source data may not contain it.
+LOADED_AT_COLUMN = "_loaded_at"
+
 
 class BigQueryWarehouse:
     """Transactional data loading into BigQuery.
@@ -103,7 +107,9 @@ class BigQueryWarehouse:
         3. Verify row count matches expectation
         4. MERGE into final table (upsert on key_columns, or
            append-only if none configured) and record the audit
-           entry together, in a single BigQuery script transaction
+           entry together, in a single BigQuery script transaction.
+           Every inserted or updated row gets _loaded_at set to the
+           audit record's timestamp.
         5. Commit that transaction, or roll it back entirely
 
         The staging load (steps 1-2) is not part of the transaction:
@@ -125,7 +131,8 @@ class BigQueryWarehouse:
             None
 
         Raises:
-            ValueError: Row count mismatch, schema error, or data issues.
+            ValueError: Row count mismatch, schema error, data issues,
+                or the data has its own _loaded_at column.
             RuntimeError: Cannot acquire write lock or BigQuery failure.
         """
         logger.debug(
@@ -176,6 +183,12 @@ class BigQueryWarehouse:
         # present in this load's data.
         staging_table = self.client.get_table(staging_full_id)
         columns = [field.name for field in staging_table.schema]
+        if LOADED_AT_COLUMN in columns:
+            raise ValueError(
+                f"Source data for {key} has a '{LOADED_AT_COLUMN}' "
+                "column; that name is reserved for the load timestamp "
+                "the warehouse sets"
+            )
         key_columns = [c for c in self.key_columns if c in columns]
 
         if key_columns:
@@ -189,7 +202,7 @@ class BigQueryWarehouse:
                 f"MERGE INTO `{final_full_id}` AS T "
                 f"USING `{staging_full_id}` AS S "
                 f"ON FALSE "
-                f"WHEN NOT MATCHED THEN INSERT ROW"
+                f"WHEN NOT MATCHED THEN {self._insert_clause(columns)}"
             )
 
         # Steps 4-5: MERGE into final table and record the audit
@@ -248,7 +261,8 @@ class BigQueryWarehouse:
         Rows matching on key_columns are updated in place; rows with
         no matching key are inserted. This makes reprocessing a
         changed version of the same logical rows update them instead
-        of creating duplicates.
+        of creating duplicates. Both paths set _loaded_at to the
+        @timestamp query parameter (the audit record's timestamp).
 
         Args:
             staging_full_id (str): Fully-qualified staging table ID.
@@ -262,25 +276,38 @@ class BigQueryWarehouse:
         on_clause = " AND ".join(
             f"T.`{col}` = S.`{col}`" for col in key_columns
         )
-        update_columns = [c for c in columns if c not in key_columns]
-        insert_columns = ", ".join(f"`{c}`" for c in columns)
-        insert_values = ", ".join(f"S.`{c}`" for c in columns)
-
-        when_matched = ""
-        if update_columns:
-            set_clause = ", ".join(
-                f"T.`{c}` = S.`{c}`" for c in update_columns
-            )
-            when_matched = f"WHEN MATCHED THEN UPDATE SET {set_clause}\n"
+        assignments = [
+            f"T.`{c}` = S.`{c}`" for c in columns if c not in key_columns
+        ]
+        assignments.append(f"T.`{LOADED_AT_COLUMN}` = @timestamp")
+        set_clause = ", ".join(assignments)
 
         return (
             f"MERGE INTO `{final_full_id}` AS T\n"
             f"USING `{staging_full_id}` AS S\n"
             f"ON {on_clause}\n"
-            f"{when_matched}"
-            f"WHEN NOT MATCHED THEN "
-            f"INSERT ({insert_columns}) VALUES ({insert_values})"
+            f"WHEN MATCHED THEN UPDATE SET {set_clause}\n"
+            f"WHEN NOT MATCHED THEN {self._insert_clause(columns)}"
         )
+
+    @staticmethod
+    def _insert_clause(columns: list[str]) -> str:
+        """Build the MERGE INSERT clause, adding _loaded_at.
+
+        Args:
+            columns (list[str]): Column names in the staging table.
+
+        Returns:
+            str: "INSERT (...) VALUES (...)" copying staging columns
+                and setting _loaded_at to @timestamp.
+        """
+        insert_columns = ", ".join(
+            f"`{c}`" for c in [*columns, LOADED_AT_COLUMN]
+        )
+        insert_values = ", ".join(
+            [*(f"S.`{c}`" for c in columns), "@timestamp"]
+        )
+        return f"INSERT ({insert_columns}) VALUES ({insert_values})"
 
     def _ensure_staging_table(self) -> None:
         """Create staging table if it does not exist.
