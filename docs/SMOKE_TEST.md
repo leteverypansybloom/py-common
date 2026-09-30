@@ -101,8 +101,13 @@ to correct, while protecting the final dataset from invalid data.
 For a valid file, the original workbook is saved under:
 
 ```text
-raw/<filename>.xlsx
+raw/<identity>/<checksum>/<filename>.xlsx
 ```
+
+`<identity>` is the file's ID at the source (the file name for a local
+folder, the item ID for SharePoint) and `<checksum>` is the SHA-256 of
+its bytes. If the file is edited and supplied again, the new version is
+stored next to the old one, so both are kept.
 
 Keeping the raw file means you can show what was supplied, rerun the process,
 investigate a problem, or change transformation logic without asking the
@@ -113,7 +118,7 @@ source system to resend the file.
 The pipeline reads the `Events` sheet into a table-like structure and creates:
 
 ```text
-processed/<filename>.xlsx.parquet
+processed/<identity>/<checksum>/<filename>.xlsx.parquet
 ```
 
 It adds `_loaded_at` at this stage using a UTC timestamp.

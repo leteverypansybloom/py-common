@@ -108,7 +108,8 @@ class LocalObjectStore:
         """Resolve a key to a path guaranteed to stay under folder.
 
         Args:
-            key: Object path or identifier (e.g., "raw/events.xlsx").
+            key: Object path or identifier (e.g.,
+                "raw/<identity>/<checksum>/events.xlsx").
 
         Returns:
             Path under self.folder.

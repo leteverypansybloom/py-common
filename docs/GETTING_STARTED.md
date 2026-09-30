@@ -236,8 +236,10 @@ events_valid.xlsx loaded 2
 
 ...and, under `tmp / "store"`, a `raw/` copy of every file (even the
 quarantined ones), a `quarantine/` copy of the six bad ones, a
-`processed/events_valid.xlsx.parquet`, and one JSON audit record per
-file under `audit/records/`.
+`processed/events_valid.xlsx/<checksum>/events_valid.xlsx.parquet`, and
+one JSON audit record per file under `audit/records/`. Stored copies
+are keyed `{identity}/{checksum}/{name}`, so an edited file lands next
+to its earlier version rather than clashing with it.
 
 The same flow is covered by the unit tests in
 `tests/unit/test_pipeline.py`, one test per outcome.

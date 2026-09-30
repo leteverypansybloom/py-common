@@ -165,9 +165,10 @@ exact; where nothing exists, that's stated plainly rather than implied.
   the file as `SKIPPED` rather than processing a half-written file
   (`pipeline.py`).
 - The **landing zone** is real: every file that passes the checksum
-  check is written unchanged to `raw/{item.identity}` — a valid file
-  just after validation (`Pipeline._store_raw()`), and a file that
-  fails validation to both `raw/` and `quarantine/{item.identity}`
+  check is written unchanged to `raw/{identity}/{checksum}/{name}` — a
+  valid file just after validation (`Pipeline._store_raw()`), and a
+  file that fails validation to both `raw/` and `quarantine/` under the
+  same key
   (`Pipeline._quarantine_invalid()`) before the pipeline gives up on
   it. So the original bytes are always recoverable, even for files
   that never reach the warehouse.
@@ -447,7 +448,7 @@ behaviour doesn't match the promise), **Missing** (nothing exists).
 | Connector catalogue | Partial | `Source`/`ObjectStore`/`Warehouse` protocols exist (`ports.py`); local, GCP and SharePoint adapters are real. SharePoint has not been run live yet. |
 | Connection testing | Missing | No pre-flight credential/permission check anywhere. |
 | Source discovery | Missing | No "list what's available at this source" helper. |
-| Raw landing storage | **Have** | `pipeline.py`, immutable `raw/{identity}` key per file. |
+| Raw landing storage | **Have** | `pipeline.py`, immutable `raw/{identity}/{checksum}/{name}` key per file version; edited files keep every version. |
 | Standardisation layer | Partial | Excel → pandas → Parquet conversion exists (`pipeline.py`); no multi-format (CSV/JSON) reader yet. |
 | Schema registry | Partial | `Contract` dataclasses exist (`contract.py`); no external, diffable file format (e.g. YAML) yet. |
 | Schema-drift detection | **Have** (strict) | Missing *and* extra columns both raise `ContractError` (`contract.py`) — confirm this "reject on any drift" policy is actually what's wanted; some tools treat an extra column as a warning, not a failure. |
@@ -467,7 +468,7 @@ behaviour doesn't match the promise), **Missing** (nothing exists).
 | Idempotency and deduplication | **Have** | Content-hash dedup at pipeline level (`Pipeline._is_duplicate()`), plus a warehouse `MERGE` on `key_columns` (`BigQueryWarehouse`) — provided the caller passes `key_columns`; see [2.4](#24-publish--writing-to-the-destination-safely). |
 | Checkpointing | Partial | File-level: a crash loses at most one file's work (results are appended per file). No run-level checkpoint. |
 | Delivery ledger / receipts | Partial | The audit record *is* a delivery ledger for BigQuery; no equivalent receipt concept for external destination APIs (none exist yet). |
-| Quarantine / dead-letter storage | **Have** | `pipeline.py`, `quarantine/{identity}` key, with the original file also kept in `raw/`. |
+| Quarantine / dead-letter storage | **Have** | `pipeline.py`, `quarantine/{identity}/{checksum}/{name}` key, with the original file also kept in `raw/`. |
 | Reconciliation | Missing | No source-count vs. destination-count check after a load completes. |
 | Backfill and replay | Missing | No rebuild/replay command; manual procedure only (clear the checksum audit key). |
 | Lineage and audit trail | **Have** (file-level) | `model.py`, written by `pipeline.py`. No run-level record, no code/config version stamped per record. |

@@ -72,7 +72,8 @@ class GCSObjectStore:
         Never raises on missing object (graceful degradation).
 
         Args:
-            key (str): Object path, e.g., "raw/events.xlsx".
+            key (str): Object path, e.g.,
+                "raw/<identity>/<checksum>/events.xlsx".
 
         Returns:
             Optional[bytes]: Bytes if object exists, None otherwise.
@@ -103,7 +104,8 @@ class GCSObjectStore:
         must be safe to retry.
 
         Args:
-            key (str): Object path, e.g., "raw/events.xlsx".
+            key (str): Object path, e.g.,
+                "raw/<identity>/<checksum>/events.xlsx".
             data (bytes): Bytes to store.
 
         Returns:

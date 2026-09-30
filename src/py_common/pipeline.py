@@ -110,7 +110,7 @@ class Pipeline:
             try:
                 rows_processed = self.contract.validate(data, item.name)
             except ValidationError as e:
-                errors = self._quarantine_invalid(item, data, e)
+                errors = self._quarantine_invalid(item, data, checksum, e)
                 return self._make_result(
                     item,
                     Outcome.QUARANTINED,
@@ -120,9 +120,9 @@ class Pipeline:
                     start_time,
                 )
 
-            self._store_raw(item, data)
+            self._store_raw(item, data, checksum)
             parquet_bytes = self._to_parquet(data)
-            self._store_processed(item, parquet_bytes)
+            self._store_processed(item, checksum, parquet_bytes)
 
             warehouse_key = f"{item.identity}_{checksum[:8]}"
             outcome = self._load_to_warehouse(
@@ -196,32 +196,59 @@ class Pipeline:
             return True
         return False
 
+    @staticmethod
+    def _version_key(item: SourceItem, checksum: str) -> str:
+        """Object key suffix for one content version of one item.
+
+        Keyed by identity and checksum so a file edited in place
+        (same identity, new bytes) is stored beside earlier versions
+        rather than colliding with them, and every version stays
+        recoverable. The source filename comes last so stored copies
+        stay recognisable when the identity is an opaque ID (e.g. a
+        SharePoint item ID).
+
+        Args:
+            item: SourceItem being processed.
+            checksum: SHA-256 of the downloaded bytes.
+
+        Returns:
+            "{identity}/{checksum}/{name}".
+        """
+        return f"{item.identity}/{checksum}/{item.name}"
+
     def _quarantine_invalid(
-        self, item: SourceItem, data: bytes, error: ValidationError
+        self,
+        item: SourceItem,
+        data: bytes,
+        checksum: str,
+        error: ValidationError,
     ) -> list[str]:
         """Store raw + quarantine copies after a validation failure.
 
         Args:
             item: SourceItem that failed validation.
             data: Raw downloaded bytes to preserve for triage.
+            checksum: SHA-256 of data.
             error: The validation failure.
 
         Returns:
             Single-element errors list describing the failure.
         """
         logger.warning("Validation failed for %s: %s", item.name, error)
-        self.store.put(f"raw/{item.identity}", data)
-        self.store.put(f"quarantine/{item.identity}", data)
+        key = self._version_key(item, checksum)
+        self.store.put(f"raw/{key}", data)
+        self.store.put(f"quarantine/{key}", data)
         return [str(error)]
 
-    def _store_raw(self, item: SourceItem, data: bytes) -> None:
+    def _store_raw(self, item: SourceItem, data: bytes, checksum: str) -> None:
         """Store the raw downloaded bytes.
 
         Args:
             item: SourceItem being processed.
             data: Raw file bytes.
+            checksum: SHA-256 of data.
         """
-        self.store.put(f"raw/{item.identity}", data)
+        self.store.put(f"raw/{self._version_key(item, checksum)}", data)
 
     def _to_parquet(self, data: bytes) -> bytes:
         """Convert the primary worksheet to Parquet bytes.
@@ -251,14 +278,18 @@ class Pipeline:
         df.to_parquet(parquet_buffer, index=False)
         return parquet_buffer.getvalue()
 
-    def _store_processed(self, item: SourceItem, parquet_bytes: bytes) -> None:
+    def _store_processed(
+        self, item: SourceItem, checksum: str, parquet_bytes: bytes
+    ) -> None:
         """Store the converted Parquet bytes.
 
         Args:
             item: SourceItem being processed.
+            checksum: SHA-256 of the source bytes.
             parquet_bytes: Parquet-encoded data to store.
         """
-        self.store.put(f"processed/{item.identity}.parquet", parquet_bytes)
+        key = f"processed/{self._version_key(item, checksum)}.parquet"
+        self.store.put(key, parquet_bytes)
 
     def _load_to_warehouse(
         self,

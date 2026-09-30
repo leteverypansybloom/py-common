@@ -8,7 +8,7 @@ Entries are not rewritten once made. When a decision changes, add a
 new dated entry saying which earlier entry it replaces, and mark the
 earlier entry as superseded.
 
-## 2026-09-30 — Real GCS lock; SharePoint adapter
+## 2026-09-30 — Real GCS lock; SharePoint adapter; versioned storage keys
 
 ### GCSObjectStore.lock() is a real lock, not a no-op
 
@@ -54,6 +54,20 @@ can be added to the extra once the flow is approved.
 
 **Trade-off**: Pagination, retries and error mapping are ours to
 maintain. Benefit: they are small, visible and fully unit-tested.
+
+### Stored copies are keyed by identity and checksum
+
+`raw/`, `quarantine/` and `processed/` keys are now
+`{identity}/{checksum}/{name}` instead of `{identity}`. Before, a file
+edited in place (same identity, new bytes) collided with its earlier
+copy, `put()` raised `ObjectStoreConflict`, and the file was marked
+`FAILED` on every run. This is common in SharePoint, where item IDs
+survive edits, and also happened with `LocalSource` file names.
+
+**Trade-off**: Every version of a file is kept, so storage grows with
+edits (a bucket lifecycle rule can manage that). Keys written before
+this change are left where they are. Benefit: edited files load, and
+the raw layer holds exactly what was received for each version.
 
 ### SharePoint files are identified by item ID and versioned by eTag
 

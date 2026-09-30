@@ -26,7 +26,7 @@ from py_common.adapters import LocalSource
 from py_common.adapters.bigquery import BigQueryWarehouse
 from py_common.adapters.gcs import GCSObjectStore
 from py_common.contract import Column, Contract, Worksheet
-from py_common.model import Outcome
+from py_common.model import Outcome, digest
 from py_common.pipeline import Pipeline
 
 PROJECT = os.environ["GCP_PROJECT_ID"]
@@ -105,9 +105,14 @@ assert first_results[0].rows_processed == 2
 print("\n2. Verify GCS artefacts")
 storage_bucket = storage.Client(project=PROJECT).bucket(BUCKET)
 
+# Stored copies are keyed {identity}/{checksum}/{name}; for LocalSource
+# the identity is the file name.
+valid_key = (
+    f"{valid_file.name}/{digest(valid_file.read_bytes())}/{valid_file.name}"
+)
 for key in (
-    f"raw/{valid_file.name}",
-    f"processed/{valid_file.name}.parquet",
+    f"raw/{valid_key}",
+    f"processed/{valid_key}.parquet",
 ):
     print(f"{key}: {storage_bucket.blob(key).exists()}")
 
@@ -146,7 +151,10 @@ invalid_result = next(
 
 assert invalid_result.outcome == Outcome.QUARANTINED
 
-quarantine_key = f"quarantine/{invalid_file.name}"
+invalid_checksum = digest(invalid_file.read_bytes())
+quarantine_key = (
+    f"quarantine/{invalid_file.name}/{invalid_checksum}/{invalid_file.name}"
+)
 
 print(f"\n{quarantine_key}: {storage_bucket.blob(quarantine_key).exists()}")
 print("\nDemo passed.")

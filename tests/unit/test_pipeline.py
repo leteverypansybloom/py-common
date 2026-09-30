@@ -1,11 +1,14 @@
-"""Unit tests for Pipeline.process() outcome handling.
+"""Unit tests for Pipeline outcome handling and storage keys.
 
-Uses mocked Source/ObjectStore/Warehouse/Contract throughout so these
-tests exercise only process()'s control flow, not the local adapters
-(LocalObjectStore/LocalSource have a separate, already-tracked
-Windows path issue unrelated to what's being tested here).
+Uses mocked Source/Warehouse/Contract and either a Mock or a small
+in-memory ObjectStore (InMemoryStore, which enforces the real put()
+conflict rule), not the local adapters (LocalObjectStore/LocalSource
+have a separate, already-tracked Windows path issue unrelated to
+what's being tested here).
 """
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from io import BytesIO
 from unittest.mock import Mock
 
@@ -16,11 +19,12 @@ from py_common.contract import Column, Contract, Worksheet
 from py_common.errors import (
     ContractError,
     IndeterminateCommitError,
+    ObjectStoreConflict,
     ServiceError,
     ValidationError,
     VersionMismatch,
 )
-from py_common.model import Outcome, Result, SourceItem
+from py_common.model import Outcome, Result, SourceItem, digest
 from py_common.pipeline import Pipeline
 
 
@@ -308,3 +312,204 @@ class TestPipelineAuditKey:
         put_keys = [c.args[0] for c in pipeline.store.put.call_args_list]
         audit_key = next(k for k in put_keys if k.startswith("audit/records/"))
         assert ":" not in audit_key
+
+
+class InMemoryStore:
+    """Dict-backed ObjectStore with the real put() conflict rule."""
+
+    def __init__(self) -> None:
+        """Start empty."""
+        self.objects: dict[str, bytes] = {}
+
+    def get(self, key: str) -> bytes | None:
+        """Return stored bytes or None.
+
+        Args:
+            key: Object key.
+
+        Returns:
+            Stored bytes, or None if absent.
+        """
+        return self.objects.get(key)
+
+    def put(self, key: str, data: bytes) -> None:
+        """Store bytes; identical rewrite is fine, different raises.
+
+        Args:
+            key: Object key.
+            data: Bytes to store.
+
+        Raises:
+            ObjectStoreConflict: Key holds different bytes.
+        """
+        if key in self.objects and self.objects[key] != data:
+            raise ObjectStoreConflict(key)
+        self.objects[key] = data
+
+    @contextmanager
+    def lock(self, key: str) -> Iterator[None]:
+        """No-op lock.
+
+        Args:
+            key: Lock key.
+
+        Yields:
+            None.
+        """
+        yield
+
+
+def _workbook(rows: list[tuple[str, int]]) -> bytes:
+    """Build an "Events" workbook with name/count rows.
+
+    Args:
+        rows: Data rows.
+
+    Returns:
+        .xlsx bytes.
+    """
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Events"
+    ws.append(["name", "count"])
+    for row in rows:
+        ws.append(list(row))
+    buffer = BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
+class TestPipelineStorageKeysAreVersioned:
+    """A file edited in place (same identity, new bytes) must load.
+
+    Stored copies are keyed by identity *and* content checksum, so a
+    new version of a file lands beside the old one instead of
+    colliding with it (ObjectStoreConflict -> FAILED). Old versions
+    are kept, which is what an auditable raw layer needs.
+    """
+
+    @pytest.fixture
+    def contract(self) -> Contract:
+        """Contract for the "Events" name/count sheet."""
+        return Contract(
+            worksheets=[
+                Worksheet(
+                    name="Events",
+                    columns=[
+                        Column(name="name", data_type="string"),
+                        Column(name="count", data_type="integer"),
+                    ],
+                )
+            ]
+        )
+
+    @pytest.fixture
+    def store(self) -> InMemoryStore:
+        """Empty in-memory store."""
+        return InMemoryStore()
+
+    def _pipeline(
+        self, data: bytes, store: InMemoryStore, contract: Contract
+    ) -> Pipeline:
+        """Pipeline whose source returns data for any item.
+
+        Args:
+            data: Bytes the source returns.
+            store: Object store.
+            contract: Contract.
+
+        Returns:
+            Pipeline.
+        """
+        source = Mock()
+        source.download.return_value = data
+        return Pipeline(
+            source=source, store=store, warehouse=Mock(), contract=contract
+        )
+
+    def test_edited_file_with_same_identity_loads(
+        self, store: InMemoryStore, contract: Contract
+    ) -> None:
+        """Second version of the same item loads, not FAILED.
+
+        Args:
+            store: In-memory store.
+            contract: Contract fixture.
+        """
+        v1 = SourceItem("events.xlsx", "ID1", "v1", 10)
+        v2 = SourceItem("events.xlsx", "ID1", "v2", 10)
+        first = self._pipeline(_workbook([("a", 1)]), store, contract)
+        second = self._pipeline(_workbook([("a", 2)]), store, contract)
+
+        assert first.process(v1).outcome == Outcome.LOADED
+        result = second.process(v2)
+
+        assert result.outcome == Outcome.LOADED, result.errors
+
+    def test_both_raw_versions_are_kept(
+        self, store: InMemoryStore, contract: Contract
+    ) -> None:
+        """Each version's original bytes stay recoverable.
+
+        Args:
+            store: In-memory store.
+            contract: Contract fixture.
+        """
+        old, new = _workbook([("a", 1)]), _workbook([("a", 2)])
+        item = SourceItem("events.xlsx", "ID1", "v1", 10)
+        self._pipeline(old, store, contract).process(item)
+        self._pipeline(new, store, contract).process(item)
+
+        assert store.objects[f"raw/ID1/{digest(old)}/events.xlsx"] == old
+        assert store.objects[f"raw/ID1/{digest(new)}/events.xlsx"] == new
+
+    def test_processed_key_includes_checksum(
+        self, store: InMemoryStore, contract: Contract
+    ) -> None:
+        """Parquet is stored per content version too.
+
+        Args:
+            store: In-memory store.
+            contract: Contract fixture.
+        """
+        data = _workbook([("a", 1)])
+        item = SourceItem("events.xlsx", "ID1", "v1", 10)
+        self._pipeline(data, store, contract).process(item)
+
+        assert (
+            f"processed/ID1/{digest(data)}/events.xlsx.parquet"
+            in store.objects
+        )
+
+    def test_quarantine_keys_include_checksum(
+        self, store: InMemoryStore, contract: Contract
+    ) -> None:
+        """Invalid versions are also kept side by side.
+
+        Args:
+            store: In-memory store.
+            contract: Contract fixture.
+        """
+        bad = b"not a workbook"
+        item = SourceItem("events.xlsx", "ID1", "v1", 10)
+        result = self._pipeline(bad, store, contract).process(item)
+
+        assert result.outcome == Outcome.QUARANTINED
+        key = f"ID1/{digest(bad)}/events.xlsx"
+        assert store.objects[f"raw/{key}"] == bad
+        assert store.objects[f"quarantine/{key}"] == bad
+
+    def test_corrected_file_loads_after_quarantine(
+        self, store: InMemoryStore, contract: Contract
+    ) -> None:
+        """Fixing a quarantined file in place lets it load.
+
+        Args:
+            store: In-memory store.
+            contract: Contract fixture.
+        """
+        item = SourceItem("events.xlsx", "ID1", "v1", 10)
+        self._pipeline(b"broken", store, contract).process(item)
+        fixed = self._pipeline(_workbook([("a", 1)]), store, contract)
+
+        assert fixed.process(item).outcome == Outcome.LOADED

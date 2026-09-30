@@ -35,7 +35,7 @@ from py_common.adapters.sharepoint import (
 from py_common.config import ConfigError
 from py_common.contract import Column, Contract, Worksheet
 from py_common.errors import NotFound, ServiceError, VersionMismatch
-from py_common.model import Outcome, SourceItem
+from py_common.model import Outcome, SourceItem, digest
 from py_common.pipeline import Pipeline
 from py_common.ports import Source
 
@@ -1097,4 +1097,6 @@ class TestSharePointSourceInPipeline:
 
         assert [r.outcome for r in results] == [Outcome.LOADED]
         assert results[0].rows_processed == 2
-        store.put.assert_any_call("raw/ID1", workbook)
+        store.put.assert_any_call(
+            f"raw/ID1/{digest(workbook)}/events.xlsx", workbook
+        )
