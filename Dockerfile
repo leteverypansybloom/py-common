@@ -4,7 +4,7 @@
 #   - Base: pandas, openpyxl, pyyaml, pyarrow
 #   - [dev]: pytest, black, ruff, mypy, pre-commit, detect-secrets
 #   - [gcp]: google-cloud-storage, google-cloud-bigquery
-#   - [sharepoint]: microsoft-graph-core, azure-identity
+#   - [sharepoint]: requests (auth library to follow IT's decision)
 
 FROM python:3.11-slim as builder
 

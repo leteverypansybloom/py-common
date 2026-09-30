@@ -72,7 +72,7 @@ supported**, not as permanently out of scope:
   the protocol assumes a file — a `DatabaseSource` that lists
   "changed since last run" query results and returns each batch as
   bytes would satisfy it structurally, the same way `LocalSource` and
-  the (stubbed) `SharePointSource` do.
+  `SharePointSource` do.
 - The actual blocker is one layer up: `Contract.validate()`
   hard-codes `openpyxl.load_workbook()` (`contract.py`), so
   today's contract only knows how to check an Excel workbook. Reading
@@ -105,8 +105,8 @@ The pattern is the same for any new `Source`, `ObjectStore` or
 
 1. Look at the protocol it must satisfy in `ports.py` and at an
    existing implementation of the same protocol (`LocalSource` is the
-   simplest; `SharePointSource` shows the shape of a not-yet-built
-   one).
+   simplest; `SharePointSource` shows a remote source with
+   pagination, retries and injected authentication).
 2. Write the test first, against the protocol's documented behaviour
    — see `CONTRIBUTING.md`, "Write Tests First (TDD)".
 3. Implement the class. It does **not** need to inherit from

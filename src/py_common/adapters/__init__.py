@@ -1,7 +1,7 @@
 """Adapter implementations for different cloud services.
 
 Each adapter implements one of the ports (protocols):
-- Source: LocalSource, SharePointSource (stub)
+- Source: LocalSource, SharePointSource (Microsoft Graph)
 - ObjectStore: LocalObjectStore, GCSObjectStore
 - Warehouse: BigQueryWarehouse
 - SecretStore: no implementation yet

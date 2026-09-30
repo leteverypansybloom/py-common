@@ -3,8 +3,10 @@
 Reusable Python library for Excel → Cloud workflows. Handles file discovery, validation, storage, and warehouse loading.
 
 **Status**: Early development. The core pipeline, local adapters, and
-the GCS and BigQuery adapters are built and unit-tested. The
-SharePoint adapter is a stub. See [Adapter status](#adapter-status).
+the GCS, BigQuery and SharePoint adapters are built and unit-tested
+against mocks. The SharePoint adapter has not yet been run against a
+real site: it waits on IT's decision on authentication. See
+[Adapter status](#adapter-status).
 
 **New to this repo?** See [`docs/README.md`](docs/README.md) for a
 guided path: a hands-on getting-started walkthrough, a guide to
@@ -91,6 +93,42 @@ proceeds. The other gets a `RuntimeError` naming the holder.
 - The Cloud Run Job's service account needs create and delete
   permission on objects in the bucket.
 
+### SharePoint source
+
+`SharePointSource` (`adapters/sharepoint.py`) lists and downloads
+files in one SharePoint folder through Microsoft Graph. It needs two
+things:
+
+- **Where the files are** — a `SharePointConfig`, usually from a
+  config section:
+
+  ```yaml
+  sharepoint:
+    hostname: ${SHAREPOINT_HOSTNAME}     # contoso.sharepoint.com
+    site_path: ${SHAREPOINT_SITE_PATH}   # /sites/DataSite
+    library: Documents
+    folder: Incoming                     # optional; library root if omitted
+  ```
+
+- **How to authenticate** — a `token_provider`: any function that
+  returns a Graph access token. This is deliberately not built yet.
+  Once IT approves a credential flow, write that function and pass
+  it in; nothing else changes.
+
+```python
+source = SharePointSource(
+    SharePointConfig.from_mapping(config["sharepoint"]),
+    token_provider=approved_token_function,
+)
+```
+
+Credentials never go in the config: unknown keys such as
+`client_secret` are rejected. Files are identified by Graph item ID,
+versioned by eTag, and refused with `VersionMismatch` if they change
+between listing and download. Throttling (429) and transient 5xx
+errors are retried with `Retry-After` or 1s/2s/4s waits. Only files
+directly in the folder are read, not sub-folders.
+
 ### Protocols vs Implementations
 
 Source, ObjectStore and Warehouse are Python `Protocol`s, so adapters
@@ -140,7 +178,7 @@ See [`CONTRIBUTING.md`, Run Tests Locally](CONTRIBUTING.md#run-tests-locally).
 | `LocalObjectStore` | ObjectStore | ✅ Built, unit-tested |
 | `GCSObjectStore` | ObjectStore | ✅ Built, unit-tested against mocks; real `lock()` |
 | `BigQueryWarehouse` | Warehouse | ✅ Built, unit-tested against mocks; `MERGE` on `key_columns` |
-| `SharePointSource` | Source | ⏳ Stub — every method raises `NotImplementedError` |
+| `SharePointSource` | Source | ✅ Built, unit-tested against mocked Graph; not yet run live (auth pending IT) |
 | Secret Manager | SecretStore | ⏳ Not started |
 
 Also built: contract validation, configuration with interpolation,
@@ -149,7 +187,8 @@ helpers (`gcp_auth.py`).
 
 ## What's Next
 
-⏳ SharePoint Online adapter  
+⏳ SharePoint authentication (token provider), once IT approves a flow  
+⏳ Live SharePoint test: one file, then the full Cloud Run job  
 ⏳ Secret Manager adapter  
 ⏳ Structured logging and alerting  
 
@@ -168,7 +207,7 @@ Core:
 Optional extras (`pip install -e ".[gcp]"` etc.):
 
 - `gcp`: google-cloud-storage >= 2.10, google-cloud-bigquery >= 3.13
-- `sharepoint`: microsoft-graph-core >= 0.2, azure-identity >= 1.14
+- `sharepoint`: requests >= 2.31 (authentication library to follow IT's decision)
 - `dev`: pytest, black, ruff, mypy, pre-commit, detect-secrets and
   type stubs
 

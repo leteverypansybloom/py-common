@@ -8,7 +8,7 @@ Entries are not rewritten once made. When a decision changes, add a
 new dated entry saying which earlier entry it replaces, and mark the
 earlier entry as superseded.
 
-## 2026-09-30 — Real GCS lock
+## 2026-09-30 — Real GCS lock; SharePoint adapter
 
 ### GCSObjectStore.lock() is a real lock, not a no-op
 
@@ -28,9 +28,47 @@ later runs are refused until someone deletes it by hand. Benefit:
 overlapping runs can't corrupt the staging table, however they start.
 No new dependency (Firestore was considered and not needed).
 
+### SharePointSource is real, but authentication is not decided
+
+Supersedes the `SharePointSource` part of "GCP adapters are real, not
+stubs" (2026-09-21). `SharePointSource` now lists and downloads files
+through Microsoft Graph and is unit-tested against mocked Graph
+responses. It has not been run against a real site.
+
+Authentication is injected as a `token_provider` (a function returning
+a Graph access token) rather than built in, because IT has not yet
+chosen the credential flow. Configuration (`SharePointConfig`) holds
+only the location: hostname, site path, library, folder. It rejects
+unknown keys, so credentials can't be put there by mistake.
+
+**Consequence**: Before a live run, someone writes the token provider
+for the approved flow. The adapter itself should not need to change.
+
+### Plain `requests` instead of the Graph SDK
+
+The `sharepoint` extra now depends on `requests` instead of
+`microsoft-graph-core` and `azure-identity`. The adapter makes five
+read-only GET calls; the SDK is async and heavier than that needs, and
+`azure-identity` would assume a credential flow. An identity library
+can be added to the extra once the flow is approved.
+
+**Trade-off**: Pagination, retries and error mapping are ours to
+maintain. Benefit: they are small, visible and fully unit-tested.
+
+### SharePoint files are identified by item ID and versioned by eTag
+
+The Graph item ID is stable across renames, so a renamed file is not
+treated as new. The eTag is checked before and after download; any
+change raises `VersionMismatch` and the pipeline skips the file for
+this run. Only files directly in the configured folder are read.
+
 ## 2026-09-21 — GCS and BigQuery adapters built; warehouse merges on key
 
 ### GCP adapters are real, not stubs
+
+> **Partly superseded** on 2026-09-30: `SharePointSource` is no longer
+> a stub (see "SharePointSource is real, but authentication is not
+> decided").
 
 Supersedes "Phase 1: Local testing only" (2026-09-18).
 `GCSObjectStore` and `BigQueryWarehouse` are implemented and

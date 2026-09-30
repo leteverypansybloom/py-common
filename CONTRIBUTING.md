@@ -258,7 +258,7 @@ Mark tests requiring cloud services:
 @pytest.mark.integration
 def test_sharepoint_connectivity():
     """Test live SharePoint connection."""
-    # Requires SHAREPOINT_TENANT_ID env var
+    # Skips unless SHAREPOINT_* env vars are set
     ...
 ```
 

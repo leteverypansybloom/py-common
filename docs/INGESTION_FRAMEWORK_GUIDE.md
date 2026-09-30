@@ -100,14 +100,19 @@ exact; where nothing exists, that's stated plainly rather than implied.
 - `LocalSource` (`src/py_common/adapters/local.py`) implements it
   for a local folder — this is what the test suite and fixtures use.
 - `SharePointSource` (`src/py_common/adapters/sharepoint.py`)
-  is the SharePoint connector **and it is not implemented**: every
-  method raises `NotImplementedError`, and the constructor refuses to
-  run with an explicit message pointing you at `LocalSource` instead.
-  This is the single largest gap for a "SharePoint into GCP" project —
-  see [Section 6](#6-the-recommended-sharepoint--gcp-architecture).
-- There is no connection-testing step, and no source-discovery helper
-  (e.g. "list the drives on this SharePoint site" before you commit to
-  a folder path).
+  is the SharePoint connector. It lists one folder of a document
+  library through Microsoft Graph (following pagination), downloads
+  by item ID, and checks the eTag before and after download. It is
+  unit-tested against mocked Graph responses
+  (`tests/unit/test_sharepoint_adapter.py`) but **has not been run
+  against a real site**: authentication is injected as a token
+  provider, and no provider exists until IT approves a credential
+  flow. See [Section 6](#6-the-recommended-sharepoint--gcp-architecture).
+- There is no connection-testing command and no source-discovery
+  helper (e.g. "list the drives on this SharePoint site" before you
+  commit to a folder path). The nearest thing is the manual live test
+  in `tests/integration/test_live_services.py`, which lists the
+  configured folder and downloads one file.
 - Authentication for GCP is handled separately by `gcp_auth.py`
   (`src/py_common/gcp_auth.py`), which auto-detects Cloud Run/GCE vs. a
   local Application Default Credentials file vs. a service-account
@@ -276,12 +281,13 @@ exact; where nothing exists, that's stated plainly rather than implied.
 - **No delete handling policy** exists or is documented — if a row
   disappears from a source export, nothing in `py-common` decides
   whether that should be propagated, ignored, or flagged.
-- **No retry, backoff or rate-limiting code anywhere** in the
-  repository — not in the BigQuery client calls, not in the (stubbed)
-  SharePoint adapter, not in the pipeline. Every external call is a
-  single attempt. This matters most for SharePoint/Microsoft Graph,
-  which is known to throttle (Airbyte documents this explicitly for
-  its own SharePoint connector — see [reference 3](#11-references)).
+- **Retry and backoff exist only in the SharePoint adapter.**
+  `SharePointSource` retries Graph throttling (429, honouring
+  `Retry-After`) and transient 5xx errors, up to 4 attempts with
+  1s/2s/4s waits capped at 60s — Graph is known to throttle (Airbyte
+  documents this for its own SharePoint connector — see
+  [reference 3](#11-references)). The BigQuery client calls and the
+  pipeline still make single attempts.
 - **No reconciliation** step — nothing compares "rows in the source
   file" against "rows now queryable in the final table" after a load;
   the row-count check in `BigQueryWarehouse.load()` only checks
@@ -410,8 +416,8 @@ Parquet, loads them into a `Warehouse`, and writes an `AuditRecord` for
 every attempt — success, skip, quarantine or failure alike. It runs
 today against a local folder (`LocalSource` + `LocalObjectStore`); the
 production GCP pieces (`GCSObjectStore`, `BigQueryWarehouse`) are written
-and unit-tested against mocks, but the SharePoint side
-(`SharePointSource`) is an explicit stub, and there is no orchestration,
+and unit-tested against mocks, and so is the SharePoint side
+(`SharePointSource`, not yet run live), but there is no orchestration,
 scheduling, alerting, secrets, or infrastructure code anywhere in the
 repository yet.
 
@@ -438,7 +444,7 @@ behaviour doesn't match the promise), **Missing** (nothing exists).
 |---|---|---|
 | Request/onboarding interface | Missing | No request format, form or API anywhere in the repo. |
 | Metadata catalogue | Missing | No store of source/owner/schedule; contracts are Python objects the caller constructs. |
-| Connector catalogue | Partial | `Source`/`ObjectStore`/`Warehouse` protocols exist (`ports.py`); only local + (untested-live) GCP adapters are real. |
+| Connector catalogue | Partial | `Source`/`ObjectStore`/`Warehouse` protocols exist (`ports.py`); local, GCP and SharePoint adapters are real. SharePoint has not been run live yet. |
 | Connection testing | Missing | No pre-flight credential/permission check anywhere. |
 | Source discovery | Missing | No "list what's available at this source" helper. |
 | Raw landing storage | **Have** | `pipeline.py`, immutable `raw/{identity}` key per file. |
@@ -456,8 +462,8 @@ behaviour doesn't match the promise), **Missing** (nothing exists).
 | Scheduling and orchestration | Missing | No scheduler, no orchestrator config; `deploy/` is empty. |
 | Event triggering | Missing | Not built; batch-only today. |
 | Queueing / buffering | N/A | Not needed at current file volumes. |
-| Rate limiting / throttling | Missing | No retry or throttle handling anywhere. |
-| Retries and backoff | Missing | Every external call is a single attempt. |
+| Rate limiting / throttling | Partial | `SharePointSource` honours Graph `Retry-After` on 429; nothing else does. |
+| Retries and backoff | Partial | `SharePointSource` retries 429/5xx and network errors (bounded, exponential); other external calls are single attempts. |
 | Idempotency and deduplication | **Have** | Content-hash dedup at pipeline level (`Pipeline._is_duplicate()`), plus a warehouse `MERGE` on `key_columns` (`BigQueryWarehouse`) — provided the caller passes `key_columns`; see [2.4](#24-publish--writing-to-the-destination-safely). |
 | Checkpointing | Partial | File-level: a crash loses at most one file's work (results are appended per file). No run-level checkpoint. |
 | Delivery ledger / receipts | Partial | The audit record *is* a delivery ledger for BigQuery; no equivalent receipt concept for external destination APIs (none exist yet). |
@@ -572,12 +578,13 @@ require the steps after it.
 **Done:** the BigQuery write now `MERGE`s on `key_columns` inside one
 transaction with its audit record (2026-09-21; see `DECISIONS_en.md`).
 
-1. **Implement `SharePointSource`** against the existing `Source`
-   protocol (`adapters/sharepoint.py`), using the Microsoft Graph API
-   with `Sites.Selected` permission, per the module's own docstring.
-   Start without delta queries (full listing is
-   fine at current volumes); add `listItem: delta` later if/when
-   listing the whole library each run becomes a real cost.
+1. ~~Implement `SharePointSource`~~ — built and tested against mocked
+   Graph responses (`adapters/sharepoint.py`), full listing, no delta
+   queries yet. Still to do: once IT approves a credential flow, write
+   the token provider, run `tests/integration/test_live_services.py`
+   against one file in the test folder, then run the full Cloud Run
+   job. Add `listItem: delta` later if listing the whole folder each
+   run becomes a real cost.
 2. **Add a minimum-row-count check** to `Contract` (e.g. an optional
    `min_rows` field, default 1) so an empty export is caught rather than
    silently marked `LOADED` with zero rows.

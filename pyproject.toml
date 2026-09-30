@@ -31,14 +31,19 @@ dev = [
     "types-PyYAML>=6.0",
     "pandas-stubs>=2.0.0",
     "types-openpyxl>=3.0.0",
+    "types-requests>=2.31.0",
+    # SharePoint adapter unit tests import requests (for its
+    # exception types) even though they never touch the network.
+    "requests>=2.31.0",
 ]
 gcp = [
     "google-cloud-storage>=2.10.0",
     "google-cloud-bigquery>=3.13.0",
 ]
+# Authentication is injected (see adapters/sharepoint.py), so no
+# identity library is pinned here until IT approves a credential flow.
 sharepoint = [
-    "microsoft-graph-core>=0.2.0",
-    "azure-identity>=1.14.0",
+    "requests>=2.31.0",
 ]
 
 [tool.setuptools.packages.find]

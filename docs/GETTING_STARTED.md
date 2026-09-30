@@ -47,8 +47,8 @@ python -m pre_commit install
 import), so with `.[dev]` alone `pytest` fails to collect them. No GCP
 credentials are needed — only the libraries. The optional groups in
 `pyproject.toml` are `dev`, `gcp` and `sharepoint`; there is no `all`
-extra. Add `sharepoint` once `SharePointSource` is implemented (it
-isn't yet — see [Section 3](#3-the-four-building-blocks-in-one-paragraph-each)).
+extra. Add `sharepoint` when you want to use `SharePointSource`
+against a real site (see [Section 3](#3-the-four-building-blocks-in-one-paragraph-each)).
 
 Expect: a clean install with no errors.
 
@@ -85,8 +85,10 @@ what's missing), see
 - **`Source`** (`ports.py`) discovers what files exist and downloads
   one. `LocalSource` (`adapters/local.py`) implements it for a
   folder — this is what you'll use below. `SharePointSource`
-  (`adapters/sharepoint.py`) exists as a class but every method
-  raises `NotImplementedError` on purpose.
+  (`adapters/sharepoint.py`) implements it for a SharePoint folder
+  via Microsoft Graph. It is tested against mocked Graph responses
+  and needs a token provider (authentication) before it can reach a
+  real site.
 - **`Contract`** (`contract.py`) is a plain Python dataclass
   describing the worksheets, columns, types and uniqueness rules a
   workbook must satisfy. `Contract.validate()` is deterministic: the
@@ -261,14 +263,14 @@ Configuration is YAML with environment variable interpolation:
 ```yaml
 # config.yaml
 dev:
-  tenant_id: ${SHAREPOINT_TENANT_ID}
-  client_id: ${SHAREPOINT_CLIENT_ID}
+  hostname: ${SHAREPOINT_HOSTNAME}
+  site_path: ${SHAREPOINT_SITE_PATH}
   project: dev-project
   bucket: dev-bucket
 
 prod:
-  tenant_id: ${SHAREPOINT_TENANT_ID}
-  client_id: ${SHAREPOINT_CLIENT_ID}
+  hostname: ${SHAREPOINT_HOSTNAME}
+  site_path: ${SHAREPOINT_SITE_PATH}
   project: prod-project
   bucket: prod-bucket
 ```
@@ -285,12 +287,14 @@ dev_cfg = config["dev"]
 dev_cfg = {k: interpolate(v) if isinstance(v, str) else v
            for k, v in dev_cfg.items()}
 
-require_keys(dev_cfg, ["tenant_id", "client_id", "project"])
+require_keys(dev_cfg, ["hostname", "site_path", "project"])
 ```
 
 Expect: `load_config` returns the `${...}` placeholders untouched;
-after `interpolate`, `dev_cfg["tenant_id"]` holds the value of
-`SHAREPOINT_TENANT_ID` from your environment.
+after `interpolate`, `dev_cfg["hostname"]` holds the value of
+`SHAREPOINT_HOSTNAME` from your environment. Credentials never go in
+config files; for SharePoint they come from a token provider (see the
+README, "SharePoint source").
 
 ## 8. Next steps
 
