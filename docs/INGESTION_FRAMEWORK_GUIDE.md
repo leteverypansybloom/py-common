@@ -331,19 +331,13 @@ exact; where nothing exists, that's stated plainly rather than implied.
 - **Retention:** no retention policy is set or configurable anywhere —
   the landing/raw/quarantine prefixes in `GCSObjectStore` accumulate
   forever until someone sets a bucket lifecycle rule outside this code.
-- **Locking:** `ObjectStore.lock()` is meant to be a real exclusive
-  lock, and the protocol docstring says so explicitly — *"Lock must
-  not auto-expire or steal from long-running processes"*
-  (`ports.py`). `GCSObjectStore.lock()`
-  (`adapters/gcs.py`) is a documented **no-op stub**: it
-  acquires nothing and will happily let two overlapping runs both
-  believe they hold the warehouse lock. `LocalObjectStore.lock()`
-  (`adapters/local.py`) is the same, appropriately, for local
-  testing. This is fine as long as only one instance of the job ever
-  runs at a time — but nothing currently enforces that either (no
-  Cloud Run concurrency limit is configured in this repo, because no
-  deployment configuration exists yet at all — the `deploy/` folder is
-  present but empty).
+- **Locking:** `ObjectStore.lock()` is an exclusive lock that never
+  expires or steals (`ports.py`). `GCSObjectStore.lock()`
+  (`adapters/gcs.py`) implements it with a lock object created by
+  atomic create-if-absent, so overlapping runs get a `RuntimeError`.
+  A run killed mid-flight leaves the lock in place until an operator
+  deletes it. `LocalObjectStore.lock()` (`adapters/local.py`) is still
+  a no-op, appropriately, for local testing.
 - **Secrets:** the `SecretStore` protocol exists (`ports.py`)
   but **no adapter implements it** — there is no Secret Manager class
   anywhere in `src/py_common/adapters/`. `gcp_auth.py` handles *GCP
@@ -495,7 +489,7 @@ not a redesign.
 | Raw landing | Cloud Storage, immutable per-run/per-object paths | Already the shape of `GCSObjectStore` (`adapters/gcs.py`) via `pipeline.py`. |
 | Processing | Python, run as a Cloud Run job (batch-to-completion, not a long-lived service) | `Pipeline.run()` (`pipeline.py`) is already written as a single batch pass suitable for this. |
 | Scheduling | Cloud Scheduler triggering the Cloud Run job directly, or via a Workflows definition if more than one step needs coordinating | Not yet built; belongs in the *solution* repo's `deploy/`, using Terraform, not in `py-common`. |
-| Operational state (locks, checkpoints) | Firestore, or another approved store — **not** the no-op `GCSObjectStore.lock()` as currently implemented | `ObjectStore.lock()` (`ports.py`) needs a real implementation before more than one Cloud Run execution can safely overlap. |
+| Operational state (locks, checkpoints) | GCS lock object for the run lock; Firestore or another approved store for checkpoints if needed | Built: `GCSObjectStore.lock()` (`adapters/gcs.py`) refuses overlapping runs. A run killed mid-flight needs its lock object deleted by hand. |
 | Warehouse | BigQuery, with a `MERGE` on `Contract.key_columns` | Built: `BigQueryWarehouse.load()` (`adapters/bigquery.py`); the solution's `main.py` must pass `key_columns=contract.key_columns`. |
 | Secrets | Secret Manager, referenced (never inlined) from configuration | Needs a new adapter implementing `SecretStore` (`ports.py`); none exists today. |
 | Quality | Reusable checks: schema, required fields, uniqueness, valid codes, record counts, freshness | `Contract.validate()` covers the first four; row-count/freshness checks are not built (see [Section 5](#5-feature-by-feature-status)). |
@@ -587,10 +581,7 @@ transaction with its audit record (2026-09-21; see `DECISIONS_en.md`).
 2. **Add a minimum-row-count check** to `Contract` (e.g. an optional
    `min_rows` field, default 1) so an empty export is caught rather than
    silently marked `LOADED` with zero rows.
-3. **Implement a real `ObjectStore.lock()`** for GCP (Firestore is the
-   natural choice, per [Section 6](#6-the-recommended-sharepoint--gcp-architecture)) —
-   today's stub (`adapters/gcs.py`) will not stop two overlapping
-   Cloud Run executions from double-processing.
+3. ~~Implement a real `ObjectStore.lock()` for GCP~~ — done: `GCSObjectStore.lock()` (`adapters/gcs.py`) uses atomic create-if-absent. Still to do: an operator runbook for clearing a stale lock.
 4. **Add a `SecretStore` adapter for Secret Manager**, implementing the
    existing protocol (`ports.py`), before any credential (a
    SharePoint client secret, in particular) is wired into configuration.

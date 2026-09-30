@@ -59,8 +59,9 @@ described in
 - `put(key, data)` — write object; repeating an identical write
   succeeds, but writing different bytes to an existing key raises
   `ObjectStoreConflict`
-- `lock(key)` — acquire exclusive write lock (a no-op in the current
-  adapters; see [Concurrency](#concurrency))
+- `lock(key)` — acquire exclusive write lock (real in
+  `GCSObjectStore`, a no-op in `LocalObjectStore`; see
+  [Concurrency](#concurrency))
 
 **Warehouse** (protocol)
 - Stages, validates, and loads data
@@ -75,18 +76,20 @@ described in
 
 ### Concurrency
 
-`GCSObjectStore.lock()` is a **deliberate no-op stub**, not a bug.
-PHW's ingestion runs as a single Cloud Scheduler → Cloud Run Job
-trigger — one job at a time, never in parallel. Under that model
-there is no concurrent writer to lock out.
+`GCSObjectStore.lock()` is a real exclusive lock. It creates a small
+object under `locks/` in the bucket using GCS's atomic
+create-if-absent (`if_generation_match=0`), so if two runs start at
+once (a second scheduler trigger, a manual re-run, a retry) only one
+proceeds. The other gets a `RuntimeError` naming the holder.
 
-This stub is **unsafe** if that changes: two processes racing to
-stage and merge into the same `{table}_staging` table can corrupt
-each other's load. Before enabling any concurrent or manually
-overlapping execution, replace `lock()` with real distributed
-locking — Firestore document locks are the recommended approach on
-GCP — so `store.lock()` genuinely raises `RuntimeError` when another
-process already holds it, as the `ObjectStore` protocol promises.
+- The lock never expires and is never stolen, as the `ObjectStore`
+  protocol requires.
+- If a run is killed without releasing it, later runs are refused
+  until someone confirms no run is active and deletes the lock
+  object named in the error message.
+- Release only deletes the lock this run created.
+- The Cloud Run Job's service account needs create and delete
+  permission on objects in the bucket.
 
 ### Protocols vs Implementations
 
@@ -135,7 +138,7 @@ See [`CONTRIBUTING.md`, Run Tests Locally](CONTRIBUTING.md#run-tests-locally).
 |---|---|---|
 | `LocalSource` | Source | ✅ Built, unit-tested |
 | `LocalObjectStore` | ObjectStore | ✅ Built, unit-tested |
-| `GCSObjectStore` | ObjectStore | ✅ Built, unit-tested against mocks; `lock()` is a no-op |
+| `GCSObjectStore` | ObjectStore | ✅ Built, unit-tested against mocks; real `lock()` |
 | `BigQueryWarehouse` | Warehouse | ✅ Built, unit-tested against mocks; `MERGE` on `key_columns` |
 | `SharePointSource` | Source | ⏳ Stub — every method raises `NotImplementedError` |
 | Secret Manager | SecretStore | ⏳ Not started |
@@ -147,7 +150,6 @@ helpers (`gcp_auth.py`).
 ## What's Next
 
 ⏳ SharePoint Online adapter  
-⏳ Real distributed `lock()` (Firestore)  
 ⏳ Secret Manager adapter  
 ⏳ Structured logging and alerting  
 

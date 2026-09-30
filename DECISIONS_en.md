@@ -8,6 +8,26 @@ Entries are not rewritten once made. When a decision changes, add a
 new dated entry saying which earlier entry it replaces, and mark the
 earlier entry as superseded.
 
+## 2026-09-30 — Real GCS lock
+
+### GCSObjectStore.lock() is a real lock, not a no-op
+
+Replaces the earlier position, recorded in the README "Concurrency"
+section, that the lock could be a no-op because one Cloud Scheduler
+job runs at a time. That doesn't stop a manual re-run, a retry or a
+second trigger overlapping a scheduled run.
+
+`lock()` now creates a lock object with GCS's atomic create-if-absent
+(`if_generation_match=0`). A second run gets `RuntimeError` naming the
+holder. The lock never expires and is never stolen, as the
+`ObjectStore` protocol requires; release deletes only the lock this
+run created.
+
+**Trade-off**: A run killed mid-flight leaves its lock behind, and
+later runs are refused until someone deletes it by hand. Benefit:
+overlapping runs can't corrupt the staging table, however they start.
+No new dependency (Firestore was considered and not needed).
+
 ## 2026-09-21 — GCS and BigQuery adapters built; warehouse merges on key
 
 ### GCP adapters are real, not stubs

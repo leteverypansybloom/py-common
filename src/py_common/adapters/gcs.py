@@ -8,13 +8,20 @@ RAP Compliance:
 - Reproducible: Same key and data always produces same result
 - Auditable: All operations logged at debug level
 - Transparent: No hardcoded credentials; uses Application Default
+
+lock() gives real mutual exclusion via atomic create-if-absent.
 """
 
+import json
 import logging
+import os
+import socket
+import uuid
 from contextlib import contextmanager
-from typing import Optional, Generator
+from datetime import datetime, timezone
+from typing import Any, Generator, Optional
 
-from google.api_core.exceptions import PreconditionFailed
+from google.api_core.exceptions import NotFound, PreconditionFailed
 from google.cloud import storage  # type: ignore
 
 logger = logging.getLogger("py_common.adapters.gcs")
@@ -132,35 +139,96 @@ class GCSObjectStore:
 
     @contextmanager
     def lock(self, key: str) -> Generator[None, None, None]:
-        """Acquire exclusive write lock.
+        """Acquire an exclusive write lock, or fail immediately.
 
-        Deliberate no-op stub: PHW runs one ingestion job at a time,
-        triggered by a single Cloud Scheduler job, so there is no
-        concurrent writer to lock out. This is a documented decision,
-        not an oversight — see README "Concurrency" section.
+        The lock is a small GCS object created with
+        ``if_generation_match=0`` (atomic create-if-absent), so of any
+        number of executions that try at once - a second scheduler
+        trigger, a manual re-run, a retry - exactly one succeeds.
+        Protection does not depend on how runs are started.
 
-        If PHW ever runs concurrent pipelines against the same
-        warehouse table (parallel triggers, manual re-runs overlapping
-        the schedule), this stub is UNSAFE: two processes can both
-        stage and merge into the same {table}_staging table at once.
-        Replace it with real distributed locking (Firestore document
-        locks are the recommended option on GCP) before enabling any
-        form of concurrent execution.
+        The lock never expires and is never stolen, as the
+        ObjectStore protocol requires. If a run dies without
+        releasing it (for example the container is killed), later
+        runs are refused until an operator has checked no run is
+        active and deleted the lock object named in the error.
+
+        The lock object records the holder (run ID, host, process ID,
+        UTC start time) so a refusal can say who holds it. On release
+        the object is deleted only if it is still the one this run
+        created.
 
         Args:
-            key (str): Lock identifier (e.g., warehouse table name).
+            key (str): Lock identifier (e.g., "locks/<warehouse hash>").
 
-        Returns:
-            Generator (context manager).
+        Yields:
+            None: Control while the lock is held.
 
         Raises:
-            None (stub; future: RuntimeError if lock unavailable)
+            RuntimeError: Another process holds the lock.
+            google.api_core.exceptions.GoogleAPICallError: GCS failed
+                for a reason other than the lock being held.
         """
-        logger.warning(
-            f"GCS lock stub for {key}: no concurrent protection. "
-            "Safe only for sequential (one-job-at-a-time) execution."
-        )
+        blob = self.bucket.blob(key)
+        holder = {
+            "run_id": uuid.uuid4().hex,
+            "host": socket.gethostname(),
+            "pid": os.getpid(),
+            "acquired_at": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            blob.upload_from_string(json.dumps(holder), if_generation_match=0)
+        except PreconditionFailed:
+            raise RuntimeError(
+                f"Lock {key} is held by another run: "
+                f"{self._describe_holder(key)}. If no run is active, "
+                f"delete gs://{self.bucket_name}/{key} and retry."
+            ) from None
+
+        generation = blob.generation
+        logger.info(f"Acquired lock {key} (run_id={holder['run_id']})")
         try:
             yield
         finally:
-            logger.debug(f"Releasing lock for {key} (stub)")
+            self._release_lock(blob, key, generation)
+
+    def _describe_holder(self, key: str) -> str:
+        """Read the current lock holder for an error message.
+
+        Args:
+            key (str): Lock identifier.
+
+        Returns:
+            str: Holder details as stored, or a note that they could
+                not be read.
+        """
+        try:
+            raw: bytes = self.bucket.blob(key).download_as_bytes()
+            return raw.decode()
+        except Exception as e:
+            return f"holder unreadable ({e})"
+
+    def _release_lock(self, blob: Any, key: str, generation: int) -> None:
+        """Delete the lock object if it is still the one we created.
+
+        Never raises: a failure to release must not mask the
+        pipeline's own result or exception.
+
+        Args:
+            blob (Any): Lock blob created by this run.
+            key (str): Lock identifier, for logging.
+            generation (int): Generation of the lock we created.
+
+        Returns:
+            None
+        """
+        try:
+            blob.delete(if_generation_match=generation)
+            logger.info(f"Released lock {key}")
+        except NotFound:
+            logger.warning(f"Lock {key} was already gone at release")
+        except PreconditionFailed:
+            logger.error(
+                f"Lock {key} was replaced by another run; "
+                "not deleting it. Check for overlapping runs."
+            )

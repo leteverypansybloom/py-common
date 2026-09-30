@@ -187,9 +187,10 @@ BigQuery receives a warehouse audit record for successful loads.
 
 ## Current constraint
 
-The GCS lock is currently a no-op. The design is safe only when one pipeline
-run happens at a time, such as a single Cloud Scheduler-triggered Cloud Run
-job.
+The GCS lock is a real exclusive lock (a lock object under `locks/` in the
+bucket). A second run started while one is active fails with a `RuntimeError`.
+If a run is killed without releasing the lock, delete the lock object named in
+the error once you have confirmed no run is active.
 
 ## Where the loaded data is stored
 
