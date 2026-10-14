@@ -65,6 +65,12 @@ class Worksheet:
         excluded: Columns known to be in the sheet that are never
             loaded, e.g. names or email addresses the analysis
             doesn't need. Names are as read_sheet() gives them.
+        on_mismatch: What a mismatch does. "quarantine" (the default)
+            rejects the file, as before. "warn" records the problem
+            as a warning and loads the file anyway: missing columns
+            load as empty, and row-level problems (wrong type,
+            missing required value, duplicate) are warnings too, left
+            for the cleaning layer to deal with row by row.
     """
 
     name: str
@@ -72,14 +78,21 @@ class Worksheet:
     header_row: int = 1
     column_selection: Literal["listed", "all_except"] = "listed"
     excluded: list[str] = field(default_factory=list)
+    on_mismatch: Literal["quarantine", "warn"] = "quarantine"
 
     def __post_init__(self) -> None:
         """Check settings that would otherwise fail confusingly later.
 
         Raises:
             ValueError: header_row is less than 1, column_selection
-                is unknown, or a column is both listed and excluded.
+                or on_mismatch is unknown, or a column is both listed
+                and excluded.
         """
+        if self.on_mismatch not in ("quarantine", "warn"):
+            raise ValueError(
+                f"Worksheet '{self.name}': on_mismatch must be "
+                f"'quarantine' or 'warn', got {self.on_mismatch!r}"
+            )
         if self.header_row < 1:
             raise ValueError(
                 f"Worksheet '{self.name}': header_row must be 1 or "
@@ -133,6 +146,7 @@ class Contract:
         self,
         excel_bytes: bytes,
         source_name: str,
+        warnings: list[str] | None = None,
     ) -> int:
         """Validate workbook against this contract.
 
@@ -144,6 +158,9 @@ class Contract:
         Args:
             excel_bytes: Raw Excel file bytes.
             source_name: Filename for error messages.
+            warnings: List to append problems to for worksheets whose
+                on_mismatch is "warn" (mutated). If None, those
+                problems are still tolerated but not reported.
 
         Returns:
             Row count of the first configured worksheet if valid.
@@ -154,11 +171,13 @@ class Contract:
             ValidationError: Data violates contract rules.
         """
         wb = self._open(excel_bytes, source_name)
+        if warnings is None:
+            warnings = []
 
         primary_rows = 0
         for index, ws_def in enumerate(self.worksheets):
             ws = wb[ws_def.name]
-            rows = self._validate_worksheet(ws, ws_def, source_name)
+            rows = self._validate_worksheet(ws, ws_def, source_name, warnings)
             if index == 0:
                 primary_rows = rows
 
@@ -262,6 +281,7 @@ class Contract:
         ws: XlWorksheet,
         ws_def: Worksheet,
         source_name: str,
+        warnings: list[str],
     ) -> int:
         """Validate one worksheet against its Worksheet definition.
 
@@ -269,14 +289,18 @@ class Contract:
             ws: The openpyxl worksheet to validate.
             ws_def: Contract definition for this worksheet.
             source_name: Filename for error messages.
+            warnings: Where problems go when ws_def.on_mismatch is
+                "warn" (mutated).
 
         Returns:
             Number of non-empty data rows (below the heading row) if
             valid.
 
         Raises:
-            ContractError: Column structure doesn't match ws_def.
-            ValidationError: Data violates ws_def's column rules.
+            ContractError: Column structure doesn't match ws_def, and
+                ws_def.on_mismatch is "quarantine".
+            ValidationError: Data violates ws_def's column rules, and
+                ws_def.on_mismatch is "quarantine".
         """
         errors: list[str] = []
         header = f"{source_name} [{ws_def.name}]"
@@ -298,7 +322,10 @@ class Contract:
                 )
 
         if errors:
-            raise ContractError(f"{header}: {'; '.join(errors)}")
+            message = f"{header}: {'; '.join(errors)}"
+            if ws_def.on_mismatch == "quarantine":
+                raise ContractError(message)
+            warnings.append(message)
 
         # Column position in the sheet may not match ws_def.columns'
         # order, so look up each column's index by its header name
@@ -310,14 +337,14 @@ class Contract:
             col.name: set() for col in ws_def.columns if col.unique
         }
 
+        # A missing column has already been reported once above (only
+        # possible in "warn" mode); don't report it again on every row.
+        present = [c for c in ws_def.columns if c.name in header_index]
+
         for row_idx, row in rows:
-            for col_def in ws_def.columns:
-                col_idx = header_index.get(col_def.name)
-                value = (
-                    row[col_idx]
-                    if col_idx is not None and col_idx < len(row)
-                    else None
-                )
+            for col_def in present:
+                col_idx = header_index[col_def.name]
+                value = row[col_idx] if col_idx < len(row) else None
 
                 # Check nullable
                 if value is None and not col_def.nullable:
@@ -348,14 +375,14 @@ class Contract:
                         seen_values[col_def.name].add(value)
 
         if row_errors:
-            raise ValidationError(
-                f"{header}: {'; '.join(row_errors[:5])}"
-                + (
-                    f"... and {len(row_errors) - 5} more"
-                    if len(row_errors) > 5
-                    else ""
-                )
+            message = f"{header}: {'; '.join(row_errors[:5])}" + (
+                f"... and {len(row_errors) - 5} more"
+                if len(row_errors) > 5
+                else ""
             )
+            if ws_def.on_mismatch == "quarantine":
+                raise ValidationError(message)
+            warnings.append(message)
 
         return len(rows)
 

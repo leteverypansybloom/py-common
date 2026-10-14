@@ -739,3 +739,148 @@ class TestContractExtract:
         assert list(sheets) == ["Survey info", "Account signups"]
         assert sheets["Survey info"].rows == [(3, ("Org 1",))]
         assert sheets["Account signups"].rows == [(2, ("Org 2",))]
+
+
+class TestWorksheetOnMismatch:
+    """Worksheet.on_mismatch defaults to today's quarantine."""
+
+    def test_defaults_to_quarantine(self):
+        """Existing contracts keep rejecting mismatched files."""
+        assert Worksheet(name="Events").on_mismatch == "quarantine"
+
+    def test_unknown_mode_is_rejected(self):
+        """A typo in on_mismatch fails when the contract is built."""
+        with pytest.raises(ValueError, match="on_mismatch"):
+            Worksheet(name="Events", on_mismatch="ignore")
+
+
+class TestContractValidateWarnMode:
+    """In "warn" mode, problems are recorded and the file passes."""
+
+    @staticmethod
+    def _contract(on_mismatch: str) -> Contract:
+        """Contract for a "Peers" sheet with an ID and a size.
+
+        Args:
+            on_mismatch: "quarantine" or "warn".
+
+        Returns:
+            Contract.
+        """
+        return Contract(
+            worksheets=[
+                Worksheet(
+                    name="Peers",
+                    on_mismatch=on_mismatch,
+                    columns=[
+                        Column(
+                            name="Participant ID",
+                            data_type="string",
+                            unique=True,
+                        ),
+                        Column(name="Business Size", data_type="string"),
+                    ],
+                )
+            ]
+        )
+
+    def test_renamed_column_is_a_warning(self):
+        """A renamed heading is reported, and the rows still count."""
+        excel_bytes = _build_grid_workbook(
+            {"Peers": [["Participant ID", "Size"], ["0001", "50-249"]]}
+        )
+        warnings: list[str] = []
+
+        rows = self._contract("warn").validate(
+            excel_bytes, "peers.xlsx", warnings=warnings
+        )
+
+        assert rows == 1
+        assert len(warnings) == 1
+        assert "Missing column 'Business Size'" in warnings[0]
+        assert "Unexpected columns: Size" in warnings[0]
+
+    def test_renamed_column_quarantines_in_quarantine_mode(self):
+        """The same file is rejected when on_mismatch is quarantine."""
+        excel_bytes = _build_grid_workbook(
+            {"Peers": [["Participant ID", "Size"], ["0001", "50-249"]]}
+        )
+
+        with pytest.raises(ContractError, match="Missing column"):
+            self._contract("quarantine").validate(excel_bytes, "peers.xlsx")
+
+    def test_missing_column_is_not_reported_on_every_row(self):
+        """One header warning, not a "required" error per row."""
+        excel_bytes = _build_grid_workbook(
+            {"Peers": [["Participant ID"], ["0001"], ["0002"]]}
+        )
+        warnings: list[str] = []
+
+        self._contract("warn").validate(
+            excel_bytes, "peers.xlsx", warnings=warnings
+        )
+
+        assert len(warnings) == 1
+        assert "is required" not in warnings[0]
+
+    def test_row_problems_are_warnings(self):
+        """A duplicate and a wrong type don't stop the file."""
+        excel_bytes = _build_grid_workbook(
+            {
+                "Peers": [
+                    ["Participant ID", "Business Size"],
+                    ["0001", "50-249"],
+                    ["0001", 250],
+                ]
+            }
+        )
+        warnings: list[str] = []
+
+        rows = self._contract("warn").validate(
+            excel_bytes, "peers.xlsx", warnings=warnings
+        )
+
+        assert rows == 2
+        assert "Row 3: Duplicate value" in warnings[0]
+        assert "Row 3: 'Business Size' is int" in warnings[0]
+
+    def test_row_problems_quarantine_in_quarantine_mode(self):
+        """The same rows are rejected when on_mismatch is quarantine."""
+        excel_bytes = _build_grid_workbook(
+            {
+                "Peers": [
+                    ["Participant ID", "Business Size"],
+                    ["0001", "50-249"],
+                    ["0001", "50-249"],
+                ]
+            }
+        )
+
+        with pytest.raises(ValidationError, match="Duplicate value"):
+            self._contract("quarantine").validate(excel_bytes, "peers.xlsx")
+
+    def test_warnings_are_tolerated_without_a_list(self):
+        """Callers that pass no list still get a passing file."""
+        excel_bytes = _build_grid_workbook(
+            {"Peers": [["Participant ID"], ["0001"]]}
+        )
+
+        assert self._contract("warn").validate(excel_bytes, "p.xlsx") == 1
+
+    def test_valid_file_adds_no_warnings(self):
+        """Nothing is recorded when the sheet matches."""
+        excel_bytes = _build_grid_workbook(
+            {
+                "Peers": [
+                    ["Participant ID", "Business Size"],
+                    ["0001", "50-249"],
+                ]
+            }
+        )
+        warnings: list[str] = []
+
+        self._contract("warn").validate(
+            excel_bytes, "peers.xlsx", warnings=warnings
+        )
+
+        assert warnings == []

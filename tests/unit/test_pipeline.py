@@ -7,6 +7,7 @@ have a separate, already-tracked Windows path issue unrelated to
 what's being tested here).
 """
 
+import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from io import BytesIO
@@ -702,3 +703,100 @@ class TestPipelineToParquetColumnSelection:
         )
 
         assert list(frame.columns) == ["name"]
+
+
+class TestPipelineProcessWarnings:
+    """Warnings from a "warn" contract are kept, logged and audited."""
+
+    @staticmethod
+    def _warn(data: bytes, name: str, warnings: list[str]) -> int:
+        """Stand-in for Contract.validate() that records a warning.
+
+        Args:
+            data: Workbook bytes (unused).
+            name: Source file name.
+            warnings: List to append to.
+
+        Returns:
+            Row count.
+        """
+        warnings.append(f"{name} [Events]: Unexpected columns: extra")
+        return 1
+
+    @pytest.fixture
+    def warn_pipeline(self, pipeline: Pipeline) -> Pipeline:
+        """Pipeline whose contract passes the file with one warning."""
+        pipeline.contract.validate.side_effect = self._warn
+        pipeline._to_parquet = Mock(return_value=b"parquet")
+        return pipeline
+
+    def test_file_with_warnings_loads(
+        self, warn_pipeline: Pipeline, item: SourceItem
+    ) -> None:
+        """A warning doesn't stop the load.
+
+        Args:
+            warn_pipeline: Pipeline fixture.
+            item: SourceItem fixture.
+        """
+        result = warn_pipeline.process(item)
+
+        assert result.outcome == Outcome.LOADED, result.errors
+        assert result.warnings == [
+            "events.xlsx [Events]: Unexpected columns: extra"
+        ]
+        warn_pipeline.warehouse.load.assert_called_once()
+
+    def test_warnings_are_logged_at_warning_level(
+        self,
+        warn_pipeline: Pipeline,
+        item: SourceItem,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """WARNING log lines are what alerts are built on.
+
+        Args:
+            warn_pipeline: Pipeline fixture.
+            item: SourceItem fixture.
+            caplog: pytest log capture.
+        """
+        with caplog.at_level("WARNING", logger="py_common.pipeline"):
+            warn_pipeline.process(item)
+
+        assert any(
+            r.levelname == "WARNING" and "Unexpected columns" in r.message
+            for r in caplog.records
+        )
+
+    def test_warnings_are_in_the_audit_record(
+        self, warn_pipeline: Pipeline, item: SourceItem
+    ) -> None:
+        """The audit record says what was tolerated.
+
+        Args:
+            warn_pipeline: Pipeline fixture.
+            item: SourceItem fixture.
+        """
+        result = warn_pipeline.process(item)
+        warn_pipeline._audit(result)
+
+        records = [
+            json.loads(c.args[1])
+            for c in warn_pipeline.store.put.call_args_list
+            if c.args[0].startswith("audit/records/")
+        ]
+        assert records[0]["warnings"] == result.warnings
+
+    def test_clean_file_has_no_warnings(
+        self, pipeline: Pipeline, item: SourceItem
+    ) -> None:
+        """Results default to an empty warnings list.
+
+        Args:
+            pipeline: Pipeline fixture.
+            item: SourceItem fixture.
+        """
+        pipeline.contract.validate.return_value = 1
+        pipeline._to_parquet = Mock(return_value=b"parquet")
+
+        assert pipeline.process(item).warnings == []

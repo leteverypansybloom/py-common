@@ -5,7 +5,7 @@ Result: Outcome of processing one file (success, skipped, failed).
 Audit: Record of an attempt for compliance and debugging.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from hashlib import sha256
@@ -49,6 +49,8 @@ class Result:
         errors: Validation or service failures, if any.
         processing_time_seconds: Wall-clock duration.
         warehouse_key: Reference in final table (empty if skipped).
+        warnings: Problems tolerated by a worksheet whose
+            on_mismatch is "warn"; the file still loaded.
     """
 
     item: SourceItem
@@ -58,6 +60,7 @@ class Result:
     errors: list[str]
     processing_time_seconds: float
     warehouse_key: str = ""
+    warnings: list[str] = field(default_factory=list)
 
 
 def digest(data: bytes) -> str:
@@ -89,3 +92,4 @@ class AuditRecord:
     errors: list[str]
     processing_time_seconds: float
     warehouse_key: str
+    warnings: list[str] = field(default_factory=list)

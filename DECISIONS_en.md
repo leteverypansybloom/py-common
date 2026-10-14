@@ -10,6 +10,27 @@ earlier entry as superseded.
 
 ## 2026-10-14 — Workbook layouts and a raw JSON load route
 
+### Mismatches can warn instead of quarantine
+
+A worksheet's `on_mismatch` is `"quarantine"` (the default, as
+before) or `"warn"`. In `"warn"` mode a header mismatch (missing or
+unexpected column) and row-level problems (wrong type, missing
+required value, duplicate in a unique column) are recorded as
+warnings, and the file still loads. A missing listed column loads as
+empty. Warnings are logged at WARNING, kept on `Result.warnings`, and
+written to the audit record.
+
+This qualifies "Validation errors quarantine, not fail" below. With
+the raw JSON route, the cleaning layer in Dataform quarantines bad
+rows one at a time, so rejecting a whole monthly file over one bad
+value would hold back every good row with it.
+
+**Trade-off**: In `"warn"` mode, bad data reaches the raw tables, and
+the Dataform checks must catch it before it reaches reports.
+Warnings only help if someone is alerted to them (see
+`docs/GCP_SETUP.md`). Benefit: a renamed column or a stray value no
+longer stops a month's data, and the file owner still hears about it.
+
 ### Contracts choose which columns are loaded
 
 A worksheet's `column_selection` is `"listed"` (the default) or

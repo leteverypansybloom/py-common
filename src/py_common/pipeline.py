@@ -88,6 +88,7 @@ class Pipeline:
         """
         start_time = perf_counter()
         errors: list[str] = []
+        warnings: list[str] = []
         outcome = Outcome.LOADED
         checksum = ""
         rows_processed = 0
@@ -107,7 +108,9 @@ class Pipeline:
                 )
 
             try:
-                rows_processed = self.contract.validate(data, item.name)
+                rows_processed = self.contract.validate(
+                    data, item.name, warnings=warnings
+                )
             except ValidationError as e:
                 errors = self._quarantine_invalid(item, data, checksum, e)
                 return self._make_result(
@@ -118,6 +121,12 @@ class Pipeline:
                     errors,
                     start_time,
                 )
+
+            # Logged at WARNING so an alert can be raised on them: in
+            # "warn" mode the file loads, so nothing else would show
+            # that the layout or data has changed.
+            for warning in warnings:
+                logger.warning("Contract warning: %s", warning)
 
             self._store_raw(item, data, checksum)
             parquet_bytes = self._to_parquet(data)
@@ -155,6 +164,7 @@ class Pipeline:
             errors,
             start_time,
             warehouse_key,
+            warnings,
         )
 
     def _download(self, item: SourceItem) -> bytes | None:
@@ -344,6 +354,7 @@ class Pipeline:
         errors: list[str],
         start_time: float,
         warehouse_key: str = "",
+        warnings: list[str] | None = None,
     ) -> Result:
         """Assemble a Result with elapsed processing time.
 
@@ -355,6 +366,7 @@ class Pipeline:
             errors: Errors encountered, if any.
             start_time: perf_counter() value at start of process().
             warehouse_key: Reference in final table, if loaded.
+            warnings: Problems tolerated in "warn" mode, if any.
 
         Returns:
             Populated Result.
@@ -367,6 +379,7 @@ class Pipeline:
             errors=errors,
             processing_time_seconds=perf_counter() - start_time,
             warehouse_key=warehouse_key,
+            warnings=list(warnings or []),
         )
 
     def _audit(self, result: Result) -> None:
@@ -386,6 +399,7 @@ class Pipeline:
             errors=result.errors,
             processing_time_seconds=result.processing_time_seconds,
             warehouse_key=result.warehouse_key,
+            warnings=result.warnings,
         )
 
         audit_json = json.dumps(
