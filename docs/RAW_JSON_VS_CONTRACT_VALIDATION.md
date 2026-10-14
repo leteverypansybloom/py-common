@@ -1,9 +1,58 @@
 # Raw JSON tables vs contract validation
 
 *Written 2026-10-14. Compares the raw-JSON ingestion pattern proposed
-in [`upcoming_work.md`](upcoming_work.md) with py-common's current
-approach, first for small monthly Excel feeds, then for a large daily
-feed.*
+in [`upcoming_work.md`](upcoming_work.md) with py-common's original
+validate-first approach, first for small monthly Excel feeds, then for
+a large daily feed. The [decision](#decision-raw-json--dataform-with-py-common-landing-the-data)
+below replaces the recommendation first written here; the analysis in
+Parts 1 and 2 is kept because it explains why.*
+
+## Decision: raw JSON + Dataform, with py-common landing the data
+
+For Healthy Working Wales the project combines the two approaches:
+
+- **py-common does the landing and the raw load.** `GCSSource` reads
+  the monthly files from a landing bucket; the contract reads each
+  worksheet (heading row, blank and repeated headings), loads only
+  the columns it selects, and leaves personal-data columns out.
+  `Pipeline(output_format="raw_json")` and `RawJsonWarehouse` insert
+  every row into one raw table per worksheet as a JSON payload.
+- **Dataform does the cleaning and modelling.** It picks the latest
+  upload of each file, types the values, sends bad rows to a
+  quarantine table, merges duplicate employers, and builds the tables
+  Power BI reads.
+
+Why combine rather than pick one:
+
+- **Most of the project's work comes after loading:** employer
+  deduplication, the data model and the reporting tables. That is SQL
+  in BigQuery, which is Dataform's job; py-common stops at the load.
+- **Sources will change shape.** Forms and survey exports change
+  their columns when questions are edited, and raw JSON absorbs that.
+- **It is the team's documented pattern** (`upcoming_work.md`), so one
+  approach is supported rather than two.
+- **py-common still adds what the plain loader lacks:** Excel types
+  kept (dates stay dates), checksums and every file version kept, an
+  audit record per attempt, data minimisation, and header checks that
+  warn rather than block.
+
+### Where validation sits now
+
+1. **In py-common, at load: light and non-blocking.** Worksheets use
+   `on_mismatch="warn"`. A missing, renamed or unexpected column, or a
+   wrong value, is logged at WARNING and kept in the audit record, and
+   the file still loads. An alert on those warnings tells the file
+   owner straight away (see [`GCP_SETUP.md`](GCP_SETUP.md)).
+2. **In Dataform: the real checks.** Typing with `SAFE_CAST`, required
+   fields, uniqueness and row-level quarantine. Checks that the
+   expected columns exist must *block* the reporting tables, so a
+   renamed column can't quietly become blanks in Power BI.
+3. **Before the visualisation: a light safety check.** This period's
+   data arrived, row counts look reasonable, key fields aren't empty.
+
+What the raw tables contain, and how to read them, is in
+[`RAW_TABLE_LAYOUT.md`](RAW_TABLE_LAYOUT.md). The reasoning for each
+code change is in [`DECISIONS_en.md`](../DECISIONS_en.md) (2026-10-14).
 
 ## The question
 
@@ -110,38 +159,35 @@ different job:
    and that key fields aren't empty. A simple SQL check or a Dataform
    assertion would do.
 
-### Recommendation: py-common, plus a hybrid
+### What changed after this analysis
 
-- **Keep py-common's typed tables and the contract check at the
-  start.**
-- **Add alerts when a file is quarantined.** At the moment a
-  quarantined file triggers no alert (see "Validation errors
-  quarantine, not fail" in [`DECISIONS_en.md`](../DECISIONS_en.md)).
-  A monthly file that gets quarantined could leave the visualisation
-  out of date with nobody knowing. This is the most important
-  addition.
-- **Optionally, also load every file into a raw JSON table, including
-  quarantined ones.** That keeps everything queryable in BigQuery,
-  with the typed tables still built only from files that passed.
-  Since the original files are already kept in GCS, this is a
-  nice-to-have.
-- **Optionally, accept extra columns but ignore them.** Today an
-  extra column, such as someone adding a "notes" column, rejects the
-  whole file. This would need a small change to the contract code.
+The recommendation first written here was to keep py-common's typed
+tables, add quarantine alerts, and optionally add a raw JSON table and
+tolerate extra columns. Looking at the project's goals as a whole led
+to the [decision above](#decision-raw-json--dataform-with-py-common-landing-the-data)
+instead. Of the gaps listed at the time:
 
-### Gaps in py-common to check first
+- **Several worksheets per workbook: fixed.** The raw JSON route loads
+  every configured worksheet into its own table. For the typed route,
+  run one pipeline per worksheet: duplicate markers and processed
+  copies are now kept per destination, so they don't clash.
+- **Extra columns: fixed.** `column_selection="all_except"` loads new
+  columns, `excluded` names columns to leave out, and
+  `on_mismatch="warn"` loads the file and records the mismatch.
+- **Alerts: documented.** [`GCP_SETUP.md`](GCP_SETUP.md) sets up alerts
+  for failed runs, warnings, quarantined files and a missing monthly
+  file.
+- **Raw tables are created by the code**, partitioned by day.
 
-- **Only the first worksheet is loaded.** Every worksheet listed in
-  the contract is validated, but only the first one is converted and
-  loaded (`Pipeline._to_parquet`). If several tables share a
-  workbook, use one contract per sheet, with that sheet listed first.
+Two gaps remain, for the typed route only:
+
 - **An integer column with a blank cell may fail at the merge.**
   pandas would likely turn that column into decimals, and BigQuery
   won't insert decimals into an INT64 column. This hasn't been run
   yet; test it with the `events_missing_value` fixture against a
   nullable integer column.
-- **The final tables are not created by the code.** The final
-  BigQuery tables have to be created with their schema beforehand.
+- **The final typed tables are not created by the code.** They have
+  to be created with their schema beforehand.
 
 ---
 
@@ -233,12 +279,14 @@ little.
 
 One approach doesn't have to fit every feed:
 
-- **Small Excel feeds:** py-common as it is, plus quarantine alerts.
-- **Large feeds:** reuse py-common's outer parts if useful: finding
-  source files, skipping repeats by checksum, keeping the original
-  file, the audit trail and the run lock. Replace the middle steps
-  (Excel parsing, Python validation and the unpartitioned MERGE) with
-  steps 1–4 above.
+- **Small Excel feeds:** the raw JSON route described in the
+  [decision](#decision-raw-json--dataform-with-py-common-landing-the-data).
+  Its row-by-row Python reading is fine at these volumes.
+- **Large feeds:** the same raw table layout and Dataform checks, but
+  not py-common's Excel reading. Reuse py-common's outer parts if
+  useful (finding source files, skipping repeats by checksum, keeping
+  the original file, the audit trail and the run lock), and load with
+  a BigQuery load job straight from the file (steps 1–4 above).
 
 The large-feed numbers rest on the assumptions above. To firm them
 up, confirm the feed's file format, the number of columns, and
