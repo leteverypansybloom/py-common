@@ -79,7 +79,9 @@ def digest(data: bytes) -> str:
 class AuditRecord:
     """Immutable record of one processing attempt.
 
-    Stored in warehouse audit table or audit log file.
+    Stored in warehouse audit table or audit log file. `warehouse` is
+    the destination's identity, since one file can feed several
+    pipelines.
     """
 
     timestamp: datetime
@@ -93,3 +95,4 @@ class AuditRecord:
     processing_time_seconds: float
     warehouse_key: str
     warnings: list[str] = field(default_factory=list)
+    warehouse: str = ""

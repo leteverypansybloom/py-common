@@ -10,6 +10,27 @@ earlier entry as superseded.
 
 ## 2026-10-14 — Workbook layouts and a raw JSON load route
 
+### Loaded markers and processed copies are kept per destination
+
+The "already loaded" marker moves from `audit/{checksum}` to
+`audit/{warehouse identity}/{checksum}`, and processed copies from
+`processed/{identity}/{checksum}/...` to
+`processed/{warehouse identity}/{identity}/{checksum}/...`. Audit
+records gain a `warehouse` field. `raw/` and `quarantine/` keys don't
+change: every pipeline stores the same original bytes there, which
+`put()` accepts as a repeat.
+
+Before, the first pipeline to load a workbook wrote the marker, and
+every other pipeline reading a different sheet of that workbook then
+skipped it as a duplicate. Had it not skipped, its different Parquet
+would have collided with the first one's under the same key.
+
+**Trade-off**: Markers written before this change are not looked
+up, so files that were already loaded load once more after
+upgrading. Nothing is in production yet; for a typed table with key
+columns, the MERGE makes that reload harmless. Benefit: one workbook
+can feed one pipeline per sheet.
+
 ### Mismatches can warn instead of quarantine
 
 A worksheet's `on_mismatch` is `"quarantine"` (the default, as

@@ -425,8 +425,10 @@ class TestPipelineStorageKeysAreVersioned:
         """
         source = Mock()
         source.download.return_value = data
+        warehouse = Mock()
+        warehouse.identity = "project.dataset.events"
         return Pipeline(
-            source=source, store=store, warehouse=Mock(), contract=contract
+            source=source, store=store, warehouse=warehouse, contract=contract
         )
 
     def test_edited_file_with_same_identity_loads(
@@ -479,8 +481,8 @@ class TestPipelineStorageKeysAreVersioned:
         self._pipeline(data, store, contract).process(item)
 
         assert (
-            f"processed/ID1/{digest(data)}/events.xlsx.parquet"
-            in store.objects
+            f"processed/project.dataset.events/ID1/{digest(data)}/"
+            "events.xlsx.parquet" in store.objects
         )
 
     def test_quarantine_keys_include_checksum(
@@ -800,3 +802,112 @@ class TestPipelineProcessWarnings:
         pipeline._to_parquet = Mock(return_value=b"parquet")
 
         assert pipeline.process(item).warnings == []
+
+
+class TestPipelineKeysPerDestination:
+    """One workbook can feed several pipelines, one per table."""
+
+    @staticmethod
+    def _sheet_pipeline(
+        sheet: str, table: str, data: bytes, store: InMemoryStore
+    ) -> Pipeline:
+        """Pipeline loading one sheet of `data` into `table`.
+
+        Args:
+            sheet: Worksheet the contract reads.
+            table: Warehouse identity.
+            data: Workbook bytes the source returns.
+            store: Shared object store.
+
+        Returns:
+            Pipeline.
+        """
+        source = Mock()
+        source.download.return_value = data
+        warehouse = Mock()
+        warehouse.identity = table
+        contract = Contract(
+            worksheets=[
+                Worksheet(
+                    name=sheet,
+                    columns=[Column(name="name", data_type="string")],
+                )
+            ]
+        )
+        return Pipeline(source, store, warehouse, contract)
+
+    @staticmethod
+    def _two_sheet_workbook() -> bytes:
+        """Workbook with differently-filled "A" and "B" sheets.
+
+        Returns:
+            .xlsx bytes.
+        """
+        wb = Workbook()
+        first = wb.active
+        first.title = "A"
+        first.append(["name"])
+        first.append(["from A"])
+        second = wb.create_sheet("B")
+        second.append(["name"])
+        second.append(["from B"])
+        buffer = BytesIO()
+        wb.save(buffer)
+        return buffer.getvalue()
+
+    def test_second_pipeline_on_same_file_is_not_skipped(self) -> None:
+        """Loading sheet A doesn't mark the file done for sheet B."""
+        store = InMemoryStore()
+        data = self._two_sheet_workbook()
+        item = SourceItem("hww.xlsx", "ID1", "v1", 10)
+        first = self._sheet_pipeline("A", "p.d.a", data, store)
+        second = self._sheet_pipeline("B", "p.d.b", data, store)
+
+        first_result = first.process(item)
+        first._audit(first_result)
+        second_result = second.process(item)
+
+        assert first_result.outcome == Outcome.LOADED
+        assert second_result.outcome == Outcome.LOADED, second_result.errors
+        second.warehouse.load.assert_called_once()
+
+    def test_same_pipeline_still_skips_a_repeat(self) -> None:
+        """A rerun into the same table is still a duplicate."""
+        store = InMemoryStore()
+        data = self._two_sheet_workbook()
+        item = SourceItem("hww.xlsx", "ID1", "v1", 10)
+        pipeline = self._sheet_pipeline("A", "p.d.a", data, store)
+
+        pipeline._audit(pipeline.process(item))
+        repeat = pipeline.process(item)
+
+        assert repeat.outcome == Outcome.SKIPPED
+
+    def test_each_destination_keeps_its_own_processed_copy(self) -> None:
+        """Different sheets' Parquet doesn't collide in the store."""
+        store = InMemoryStore()
+        data = self._two_sheet_workbook()
+        item = SourceItem("hww.xlsx", "ID1", "v1", 10)
+
+        self._sheet_pipeline("A", "p.d.a", data, store).process(item)
+        self._sheet_pipeline("B", "p.d.b", data, store).process(item)
+
+        suffix = f"ID1/{digest(data)}/hww.xlsx.parquet"
+        assert f"processed/p.d.a/{suffix}" in store.objects
+        assert f"processed/p.d.b/{suffix}" in store.objects
+
+    def test_audit_record_names_the_destination(self) -> None:
+        """The audit record says which table the attempt was for."""
+        store = InMemoryStore()
+        data = self._two_sheet_workbook()
+        item = SourceItem("hww.xlsx", "ID1", "v1", 10)
+        pipeline = self._sheet_pipeline("A", "p.d.a", data, store)
+
+        pipeline._audit(pipeline.process(item))
+
+        record = next(
+            json.loads(value)
+            for key, value in store.objects.items()
+            if key.startswith("audit/records/")
+        )
+        assert record["warehouse"] == "p.d.a"

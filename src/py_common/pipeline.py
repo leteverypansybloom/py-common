@@ -193,9 +193,10 @@ class Pipeline:
             checksum: SHA-256 of the downloaded bytes.
 
         Returns:
-            True if an audit record already exists for this checksum.
+            True if this content was already loaded into this
+            pipeline's warehouse.
         """
-        existing = self.store.get(f"audit/{checksum}")
+        existing = self.store.get(self._loaded_marker_key(checksum))
         if existing:
             logger.info(
                 "Skipping %s: checksum %s already processed",
@@ -204,6 +205,22 @@ class Pipeline:
             )
             return True
         return False
+
+    def _loaded_marker_key(self, checksum: str) -> str:
+        """Key of the marker saying this content was loaded here.
+
+        Scoped to the destination (warehouse identity), not just the
+        content: one workbook can feed several pipelines, one per
+        worksheet or table, and the first to load it must not make
+        the others skip it as a duplicate.
+
+        Args:
+            checksum: SHA-256 of the source bytes.
+
+        Returns:
+            "audit/{warehouse identity}/{checksum}".
+        """
+        return f"audit/{self.warehouse.identity}/{checksum}"
 
     @staticmethod
     def _version_key(item: SourceItem, checksum: str) -> str:
@@ -293,12 +310,19 @@ class Pipeline:
     ) -> None:
         """Store the converted Parquet bytes.
 
+        Keyed by destination as well as content: pipelines reading
+        different sheets of the same workbook produce different
+        bytes, which would otherwise collide under one key.
+
         Args:
             item: SourceItem being processed.
             checksum: SHA-256 of the source bytes.
             parquet_bytes: Parquet-encoded data to store.
         """
-        key = f"processed/{self._version_key(item, checksum)}.parquet"
+        key = (
+            f"processed/{self.warehouse.identity}/"
+            f"{self._version_key(item, checksum)}.parquet"
+        )
         self.store.put(key, parquet_bytes)
 
     def _load_to_warehouse(
@@ -400,6 +424,7 @@ class Pipeline:
             processing_time_seconds=result.processing_time_seconds,
             warehouse_key=result.warehouse_key,
             warnings=result.warnings,
+            warehouse=self.warehouse.identity,
         )
 
         audit_json = json.dumps(
@@ -418,4 +443,6 @@ class Pipeline:
 
         # Also store duplicate check record if loaded
         if result.outcome == Outcome.LOADED:
-            self.store.put(f"audit/{result.checksum}", b"processed")
+            self.store.put(
+                self._loaded_marker_key(result.checksum), b"processed"
+            )
