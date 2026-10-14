@@ -10,7 +10,7 @@ docs/GETTING_STARTED.md shows a small in-memory fake.
 import logging
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Generator,  Iterable
+from typing import Generator, Iterable
 
 from py_common.errors import NotFound, ObjectStoreConflict, VersionMismatch
 from py_common.model import SourceItem
@@ -33,7 +33,10 @@ class LocalSource:
         self.folder = Path(folder)
 
     def items(self) -> Iterable[SourceItem]:
-        """List all .xlsx and .xls files in folder.
+        """List all .xlsx files in folder.
+
+        Old-style .xls workbooks are not listed: openpyxl cannot read
+        them, so they would only ever be quarantined as unreadable.
 
         Yields:
             SourceItem for each Excel file.
@@ -42,9 +45,7 @@ class LocalSource:
             logger.warning("Source folder does not exist: %s", self.folder)
             return
 
-        for path in sorted(self.folder.glob("*.xlsx")) + sorted(
-            self.folder.glob("*.xls")
-        ):
+        for path in sorted(self.folder.glob("*.xlsx")):
             stat = path.stat()
             yield SourceItem(
                 name=path.name,

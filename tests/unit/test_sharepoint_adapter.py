@@ -396,7 +396,7 @@ class TestSharePointConfig:
             )
 
     def test_extensions_default_to_excel_and_are_normalised(self) -> None:
-        """Default is .xlsx/.xls; custom values are lower-cased."""
+        """Default is .xlsx only; custom values are lower-cased."""
         default = SharePointConfig(
             "contoso.sharepoint.com", "/sites/DataSite", "Documents"
         )
@@ -408,7 +408,7 @@ class TestSharePointConfig:
                 "extensions": [".XLSX"],
             }
         )
-        assert default.extensions == (".xlsx", ".xls")
+        assert default.extensions == (".xlsx",)
         assert custom.extensions == (".xlsx",)
 
     def test_extension_without_leading_dot_is_rejected(self) -> None:
@@ -487,7 +487,7 @@ class TestSharePointSourceItems:
     def test_items_skips_folders_and_non_excel_files(
         self, source: SharePointSource, graph: FakeGraph
     ) -> None:
-        """Sub-folders and other file types are ignored.
+        """Sub-folders, other file types and old .xls files are ignored.
 
         Args:
             source: SharePointSource fixture.
@@ -506,7 +506,7 @@ class TestSharePointSourceItems:
                 }
             ),
         )
-        assert [i.identity for i in source.items()] == ["ID2", "ID3"]
+        assert [i.identity for i in source.items()] == ["ID2"]
 
     def test_items_follows_pagination(
         self, source: SharePointSource, graph: FakeGraph
