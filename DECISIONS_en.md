@@ -10,6 +10,36 @@ earlier entry as superseded.
 
 ## 2026-10-14 — Workbook layouts and a raw JSON load route
 
+### A raw JSON route alongside the typed MERGE route
+
+The Healthy Working Wales project lands data in BigQuery as raw JSON
+and cleans it in Dataform (see
+`docs/RAW_JSON_VS_CONTRACT_VALIDATION.md`). py-common provides the
+landing and raw load: `Pipeline(output_format="raw_json")` writes
+every configured sheet as newline-delimited JSON
+(`py_common.raw.to_ndjson`), and `RawJsonWarehouse` inserts each
+sheet's rows into its own raw table. A raw table has `source_file`,
+`source_generation`, `sheet_name`, `row_number`, `checksum`,
+`payload` (JSON) and `ingested_at`, and is partitioned by day of
+`ingested_at`. `BigQueryWarehouse` and the Parquet route are
+unchanged.
+
+All of a file's rows, across every sheet, are inserted with the
+audit record in one script transaction, as `BigQueryWarehouse` does
+for its MERGE. Rows are only ever inserted. Every version of a file
+stays in the raw table, and Dataform picks the latest
+`source_generation`. Values keep their Excel type as far as JSON
+allows: numbers stay numbers, and dates become ISO 8601 text. That
+way the cleaning layer doesn't have to guess which "01/02/2026" was
+a real date.
+
+**Trade-off**: Raw tables grow with every monthly upload of a
+cumulative file, though at HWW volumes that is kilobytes. Typing and
+deduplication move to Dataform, so they are tested there rather than
+here. Benefit: a schema change never stops a load, nothing is
+overwritten, and the cleaning SQL can be rerun from the raw tables
+at any time.
+
 ### Loaded markers and processed copies are kept per destination
 
 The "already loaded" marker moves from `audit/{checksum}` to
