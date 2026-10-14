@@ -5,9 +5,9 @@ from io import BytesIO
 from typing import Any
 
 import pytest
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
-from py_common.contract import Column, Contract, Worksheet
+from py_common.contract import Column, Contract, Worksheet, read_sheet
 from py_common.errors import ContractError, ValidationError
 from py_common.fixtures import make_fixtures
 
@@ -427,3 +427,119 @@ class TestContractValidateHeaderRow:
 
         with pytest.raises(ContractError, match="Missing column 'Org'"):
             contract.validate(excel_bytes, "signups.xlsx")
+
+
+def _read(rows: list[list[Any]], header_row: int = 1):
+    """Run read_sheet() over a one-sheet workbook built from rows.
+
+    Args:
+        rows: Sheet rows, top to bottom.
+        header_row: Row holding the headings.
+
+    Returns:
+        read_sheet()'s (names, rows) result.
+    """
+    excel_bytes = _build_grid_workbook({"Sheet": rows})
+    ws = load_workbook(BytesIO(excel_bytes), data_only=True)["Sheet"]
+    return read_sheet(ws, header_row)
+
+
+class TestReadSheet:
+    """read_sheet() gives every column a present, unique name."""
+
+    def test_blank_heading_over_data_is_named_by_letter(self):
+        """Column B with no heading but with data becomes col_B."""
+        names, rows = _read([["Count", None, "Org"], [1, "Nov", "Org 1"]])
+
+        assert names == ["Count", "col_B", "Org"]
+        assert rows == [(2, (1, "Nov", "Org 1"))]
+
+    def test_blank_heading_over_empty_column_is_ignored(self):
+        """A blank, empty column is only formatting, so it's dropped."""
+        names, rows = _read([["Org", None, "Size"], ["Org 1", None, "S"]])
+
+        assert names == ["Org", "Size"]
+        assert rows == [(2, ("Org 1", "S"))]
+
+    def test_repeated_headings_get_numbered(self):
+        """The first "Other" keeps its name; later ones get _2, _3."""
+        names, _ = _read([["Q1", "Other", "Q2", "Other", "Other"], [1] * 5])
+
+        assert names == ["Q1", "Other", "Q2", "Other_2", "Other_3"]
+
+    def test_renamed_repeat_skips_a_name_the_sheet_uses(self):
+        """A repeat can't take "Other_2" if a real heading uses it."""
+        names, _ = _read([["Other", "Other", "Other_2"], [1, 2, 3]])
+
+        assert names == ["Other", "Other_3", "Other_2"]
+
+    def test_headings_are_kept_exactly_as_written(self):
+        """No trimming: contracts must match the sheet exactly."""
+        names, _ = _read([["Organisation Industry ", 2026], ["x", "y"]])
+
+        assert names == ["Organisation Industry ", "2026"]
+
+    def test_empty_rows_are_skipped_and_row_numbers_kept(self):
+        """Blank rows vanish; remaining rows keep their Excel numbers."""
+        names, rows = _read(
+            [["Org"], ["Org 1"], [None], ["   "], ["Org 2"]],
+        )
+
+        assert names == ["Org"]
+        assert rows == [(2, ("Org 1",)), (5, ("Org 2",))]
+
+
+class TestContractValidateHeadingNames:
+    """validate() checks the names read_sheet() gives each column."""
+
+    def test_repeated_heading_can_be_listed_by_its_new_name(self):
+        """Contracts refer to the second "Other" as "Other_2"."""
+        contract = Contract(
+            worksheets=[
+                Worksheet(
+                    name="Survey info",
+                    columns=[
+                        Column(name="Other", data_type="string"),
+                        Column(name="Other_2", data_type="string"),
+                    ],
+                )
+            ]
+        )
+        excel_bytes = _build_grid_workbook(
+            {"Survey info": [["Other", "Other"], ["a", "b"]]}
+        )
+
+        assert contract.validate(excel_bytes, "survey.xlsx") == 1
+
+    def test_unlisted_blank_heading_column_is_unexpected(self):
+        """A data column with no heading is reported, not ignored."""
+        contract = Contract(
+            worksheets=[
+                Worksheet(
+                    name="Account signups",
+                    columns=[Column(name="Org", data_type="string")],
+                )
+            ]
+        )
+        excel_bytes = _build_grid_workbook(
+            {"Account signups": [["Org", None], ["Org 1", "Nov"]]}
+        )
+
+        with pytest.raises(ContractError, match="Unexpected columns: col_B"):
+            contract.validate(excel_bytes, "signups.xlsx")
+
+    def test_trailing_blank_rows_are_not_counted(self):
+        """Blank rows below the data don't count or fail checks."""
+        contract = Contract(
+            worksheets=[
+                Worksheet(
+                    name="Events",
+                    columns=[Column(name="event_id", data_type="string")],
+                )
+            ]
+        )
+        excel_bytes = _build_grid_workbook(
+            {"Events": [["event_id"], ["EVT001"], [None], [None]]}
+        )
+
+        assert contract.validate(excel_bytes, "events.xlsx") == 1

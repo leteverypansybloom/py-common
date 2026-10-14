@@ -10,6 +10,7 @@ from io import BytesIO
 from typing import Any, Literal
 
 from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet as XlWorksheet
 
 from py_common.errors import ContractError, ValidationError
@@ -166,7 +167,8 @@ class Contract:
             source_name: Filename for error messages.
 
         Returns:
-            Number of data rows (below the heading row) if valid.
+            Number of non-empty data rows (below the heading row) if
+            valid.
 
         Raises:
             ContractError: Column structure doesn't match ws_def.
@@ -181,13 +183,10 @@ class Contract:
                 errors.append(f"Missing column '{col_def.name}'")
 
         expected = {col.name for col in ws_def.columns}
-        # Header cells can hold several different types (text, a
-        # number, a date, ...), which sorted() can't compare against
-        # each other - stringify before comparing/sorting so a sheet
-        # with e.g. one text and one numeric stray header reports
-        # cleanly instead of raising TypeError from sorted().
-        actual = {str(h) for h in headers if h}
-        unexpected = actual - expected
+        # read_sheet() has already turned every heading into text
+        # (headings can be numbers or dates too), so they compare and
+        # sort cleanly here.
+        unexpected = set(headers) - expected
         if unexpected:
             errors.append(
                 f"Unexpected columns: {', '.join(sorted(unexpected))}"
@@ -199,7 +198,7 @@ class Contract:
         # Column position in the sheet may not match ws_def.columns'
         # order, so look up each column's index by its header name
         # rather than assuming the two lists are aligned.
-        header_index = {h: i for i, h in enumerate(headers) if h is not None}
+        header_index = {h: i for i, h in enumerate(headers)}
 
         row_errors: list[str] = []
         seen_values: dict[str, set[Any]] = {
@@ -258,23 +257,86 @@ class Contract:
 
 def read_sheet(
     ws: XlWorksheet, header_row: int
-) -> tuple[list[Any], list[tuple[int, tuple[Any, ...]]]]:
-    """Read a worksheet's headings and the data rows below them.
+) -> tuple[list[str], list[tuple[int, tuple[Any, ...]]]]:
+    """Read a worksheet's column names and the data rows below them.
+
+    Headings are turned into names that are always present and
+    unique, so no column is lost on the way to the warehouse:
+
+    - a heading cell is used as text, exactly as written (no
+      trimming, so contracts must match it exactly);
+    - a blank heading over a column that holds data is named after
+      its column letter, e.g. "col_B";
+    - a blank heading over an empty column is ignored, as it is only
+      formatting;
+    - a repeated heading keeps its name the first time and gets
+      "_2", "_3", ... after that, left to right, skipping any name
+      the sheet already uses.
+
+    Rows with no values at all are skipped.
 
     Args:
         ws: The openpyxl worksheet to read.
         header_row: Row holding the headings (1 = first row).
 
     Returns:
-        (headings, rows): the heading cell values, and each data row
-        as (Excel row number, cell values). Row numbers are the ones
-        shown in Excel, so errors can be traced back to the sheet.
+        (names, rows): the column names, and each data row as
+        (Excel row number, values lined up with names). Row numbers
+        are the ones shown in Excel, so errors can be traced back to
+        the sheet.
     """
     grid = list(ws.iter_rows(min_row=header_row, values_only=True))
     if not grid:
         return [], []
-    rows = [
-        (header_row + offset, tuple(values))
+    headings = list(grid[0])
+    data = [
+        (header_row + offset, values)
         for offset, values in enumerate(grid[1:], start=1)
+        if not all(_is_blank(value) for value in values)
     ]
-    return list(grid[0]), rows
+
+    # Reserve every heading actually written in the sheet, so a
+    # renamed repeat ("Other" -> "Other_2") never takes a name that
+    # a later heading uses itself.
+    written = {str(h) for h in headings if not _is_blank(h)}
+    names: list[str] = []
+    keep: list[int] = []
+    for index, heading in enumerate(headings):
+        if _is_blank(heading):
+            has_data = any(
+                index < len(values) and not _is_blank(values[index])
+                for _, values in data
+            )
+            if not has_data:
+                continue
+            base = f"col_{get_column_letter(index + 1)}"
+        else:
+            base = str(heading)
+        name = base
+        suffix = 2
+        while name in names or (name != base and name in written):
+            name = f"{base}_{suffix}"
+            suffix += 1
+        names.append(name)
+        keep.append(index)
+
+    rows = [
+        (
+            row_number,
+            tuple(values[i] if i < len(values) else None for i in keep),
+        )
+        for row_number, values in data
+    ]
+    return names, rows
+
+
+def _is_blank(value: Any) -> bool:
+    """Whether a cell holds nothing (empty, or only whitespace).
+
+    Args:
+        value: Cell value from openpyxl.
+
+    Returns:
+        True for None or a whitespace-only string.
+    """
+    return value is None or (isinstance(value, str) and not value.strip())

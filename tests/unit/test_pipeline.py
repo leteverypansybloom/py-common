@@ -640,3 +640,35 @@ class TestPipelineToParquetHeaderRow:
 
         assert list(frame.columns) == ["name", "count"]
         assert frame.to_dict("records") == [{"name": "a", "count": 1}]
+
+
+class TestPipelineToParquetHeadingNames:
+    """_to_parquet() keeps every column under its read_sheet() name."""
+
+    def test_repeated_headings_are_all_kept(self) -> None:
+        """Both "Other" columns reach the Parquet file."""
+        contract = Contract(
+            worksheets=[
+                Worksheet(
+                    name="Events",
+                    columns=[
+                        Column(name="Other", data_type="string"),
+                        Column(name="Other_2", data_type="string"),
+                    ],
+                )
+            ]
+        )
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Events"
+        ws.append(["Other", "Other"])
+        ws.append(["a", "b"])
+        buffer = BytesIO()
+        wb.save(buffer)
+        pipeline = Pipeline(Mock(), Mock(), Mock(), contract)
+
+        frame = pd.read_parquet(
+            BytesIO(pipeline._to_parquet(buffer.getvalue()))
+        )
+
+        assert frame.to_dict("records") == [{"Other": "a", "Other_2": "b"}]

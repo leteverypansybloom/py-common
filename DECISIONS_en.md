@@ -8,6 +8,30 @@ Entries are not rewritten once made. When a decision changes, add a
 new dated entry saying which earlier entry it replaces, and mark the
 earlier entry as superseded.
 
+## 2026-10-14 — Workbook layouts and a raw JSON load route
+
+### Every column gets a name; none are dropped
+
+Headings are read once, by `read_sheet()` in `contract.py`, and both
+validation and conversion use its names. A blank heading over a
+column with data becomes `col_<letter>` (e.g. `col_B`); a blank
+heading over an empty column is ignored as formatting. A repeated
+heading keeps its name the first time and becomes `_2`, `_3`, ...
+after that, skipping any name the sheet already uses. Headings are
+not trimmed. Rows with no values are skipped.
+
+Before, the Parquet conversion built each row with
+`dict(zip(headers, row))`, so a repeated heading silently kept only
+its last column, and a blank heading's data went nowhere useful. The
+HWW survey sheets repeat "Other" many times.
+
+**Trade-off**: A data column with no heading is now reported as an
+unexpected column (`col_B`) instead of passing unnoticed, so a
+contract may need to list it. Names depend on column position for
+blank headings and on order for repeats, so moving such a column
+changes its name. Benefit: no data is lost without anyone knowing,
+and the names are the same on every run of the same layout.
+
 ## 2026-09-30 — Real GCS lock; SharePoint adapter; versioned storage keys; `_loaded_at` set by BigQuery
 
 ### GCSObjectStore.lock() is a real lock, not a no-op
