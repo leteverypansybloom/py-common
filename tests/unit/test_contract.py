@@ -543,3 +543,199 @@ class TestContractValidateHeadingNames:
         )
 
         assert contract.validate(excel_bytes, "events.xlsx") == 1
+
+
+class TestWorksheetColumnSelection:
+    """Worksheet checks its column selection settings up front."""
+
+    def test_defaults_load_only_listed_columns(self):
+        """Existing contracts keep loading just their listed columns."""
+        ws_def = Worksheet(name="Events")
+
+        assert ws_def.column_selection == "listed"
+        assert ws_def.excluded == []
+
+    def test_unknown_selection_is_rejected(self):
+        """A typo in column_selection fails when the contract is built."""
+        with pytest.raises(ValueError, match="column_selection"):
+            Worksheet(name="Events", column_selection="everything")
+
+    def test_column_both_listed_and_excluded_is_rejected(self):
+        """A column can't be loaded and excluded at the same time."""
+        with pytest.raises(ValueError, match="both listed and excluded"):
+            Worksheet(
+                name="Events",
+                columns=[Column(name="Email", data_type="string")],
+                excluded=["Email"],
+            )
+
+
+class TestContractValidateColumnSelection:
+    """validate() accepts excluded and, in all_except, new columns."""
+
+    def test_excluded_column_is_not_unexpected(self):
+        """A known personal-data column can stay in the sheet."""
+        contract = Contract(
+            worksheets=[
+                Worksheet(
+                    name="Peers",
+                    columns=[
+                        Column(name="Participant ID", data_type="string")
+                    ],
+                    excluded=["Email Address"],
+                )
+            ]
+        )
+        excel_bytes = _build_grid_workbook(
+            {"Peers": [["Participant ID", "Email Address"], ["0001", "a@b"]]}
+        )
+
+        assert contract.validate(excel_bytes, "peers.xlsx") == 1
+
+    def test_all_except_accepts_new_columns(self):
+        """A column added to the sheet doesn't stop the load."""
+        contract = Contract(
+            worksheets=[
+                Worksheet(
+                    name="Peers",
+                    columns=[
+                        Column(name="Participant ID", data_type="string")
+                    ],
+                    column_selection="all_except",
+                )
+            ]
+        )
+        excel_bytes = _build_grid_workbook(
+            {"Peers": [["Participant ID", "New question"], ["0001", "yes"]]}
+        )
+
+        assert contract.validate(excel_bytes, "peers.xlsx") == 1
+
+    def test_all_except_still_requires_listed_columns(self):
+        """Listed columns must be present in either mode."""
+        contract = Contract(
+            worksheets=[
+                Worksheet(
+                    name="Peers",
+                    columns=[
+                        Column(name="Participant ID", data_type="string")
+                    ],
+                    column_selection="all_except",
+                )
+            ]
+        )
+        excel_bytes = _build_grid_workbook({"Peers": [["ID"], ["0001"]]})
+
+        with pytest.raises(ContractError, match="Missing column"):
+            contract.validate(excel_bytes, "peers.xlsx")
+
+
+class TestContractExtract:
+    """extract() returns only the columns the contract selects."""
+
+    def test_listed_mode_returns_listed_columns_in_contract_order(self):
+        """Unlisted and excluded columns are left out."""
+        contract = Contract(
+            worksheets=[
+                Worksheet(
+                    name="Peers",
+                    columns=[
+                        Column(name="Sector", data_type="string"),
+                        Column(name="Participant ID", data_type="string"),
+                    ],
+                    excluded=["Email Address"],
+                )
+            ]
+        )
+        excel_bytes = _build_grid_workbook(
+            {
+                "Peers": [
+                    ["Participant ID", "Email Address", "Sector"],
+                    ["0001", "a@b", "Public"],
+                ]
+            }
+        )
+
+        sheet = contract.extract(excel_bytes)["Peers"]
+
+        assert sheet.columns == ["Sector", "Participant ID"]
+        assert sheet.rows == [(2, ("Public", "0001"))]
+
+    def test_all_except_mode_drops_only_excluded_columns(self):
+        """Everything else is kept, in the sheet's order."""
+        contract = Contract(
+            worksheets=[
+                Worksheet(
+                    name="Peers",
+                    column_selection="all_except",
+                    excluded=["First Name", "Email Address"],
+                )
+            ]
+        )
+        excel_bytes = _build_grid_workbook(
+            {
+                "Peers": [
+                    [
+                        "Participant ID",
+                        "First Name",
+                        "Sector",
+                        "Email Address",
+                    ],
+                    ["0001", "Jan", "Public", "a@b"],
+                ]
+            }
+        )
+
+        sheet = contract.extract(excel_bytes)["Peers"]
+
+        assert sheet.columns == ["Participant ID", "Sector"]
+        assert sheet.rows == [(2, ("0001", "Public"))]
+
+    def test_listed_column_missing_from_sheet_is_none(self):
+        """A missing listed column comes back empty, not as an error."""
+        contract = Contract(
+            worksheets=[
+                Worksheet(
+                    name="Peers",
+                    columns=[
+                        Column(name="Participant ID", data_type="string"),
+                        Column(name="Sector", data_type="string"),
+                    ],
+                )
+            ]
+        )
+        excel_bytes = _build_grid_workbook(
+            {"Peers": [["Participant ID"], ["0001"]]}
+        )
+
+        sheet = contract.extract(excel_bytes)["Peers"]
+
+        assert sheet.rows == [(2, ("0001", None))]
+
+    def test_every_configured_sheet_is_returned_in_order(self):
+        """One SheetRows per worksheet, using each sheet's header_row."""
+        contract = Contract(
+            worksheets=[
+                Worksheet(
+                    name="Survey info",
+                    header_row=2,
+                    columns=[Column(name="Org", data_type="string")],
+                ),
+                Worksheet(
+                    name="Account signups",
+                    columns=[Column(name="Org", data_type="string")],
+                ),
+            ]
+        )
+        excel_bytes = _build_grid_workbook(
+            {
+                "Account signups": [["Org"], ["Org 2"]],
+                "Survey info": [["Last updated"], ["Org"], ["Org 1"]],
+            }
+        )
+
+        sheets = contract.extract(excel_bytes)
+
+        assert list(sheets) == ["Survey info", "Account signups"]
+        assert sheets["Survey info"].rows == [(3, ("Org 1",))]
+        assert sheets["Account signups"].rows == [(2, ("Org 2",))]

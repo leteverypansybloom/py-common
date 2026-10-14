@@ -19,9 +19,8 @@ from io import BytesIO
 from time import perf_counter
 
 import pandas as pd
-from openpyxl import load_workbook
 
-from py_common.contract import Contract, read_sheet
+from py_common.contract import Contract
 from py_common.errors import (
     IndeterminateCommitError,
     ServiceError,
@@ -255,7 +254,8 @@ class Pipeline:
 
         Looks up the primary worksheet by the name the contract
         validated, not wb.active: the workbook's active sheet has no
-        guaranteed relation to which sheet the contract expects.
+        guaranteed relation to which sheet the contract expects. Only
+        the columns the contract selects are written.
 
         The output is a pure function of the input bytes (no load
         timestamp), so a retry after a failed warehouse load writes
@@ -268,13 +268,12 @@ class Pipeline:
         Returns:
             Parquet-encoded bytes of the primary worksheet.
         """
-        wb = load_workbook(BytesIO(data), data_only=True)
-        primary = self.contract.worksheets[0]
-        ws = wb[primary.name]
-        headers, data_rows = read_sheet(ws, primary.header_row)
-        rows = [dict(zip(headers, values)) for _, values in data_rows]
-
-        df = pd.DataFrame(rows)
+        sheets = self.contract.extract(data)
+        primary = sheets[self.contract.worksheets[0].name]
+        df = pd.DataFrame(
+            [dict(zip(primary.columns, values)) for _, values in primary.rows],
+            columns=primary.columns,
+        )
         parquet_buffer = BytesIO()
         df.to_parquet(parquet_buffer, index=False)
         return parquet_buffer.getvalue()

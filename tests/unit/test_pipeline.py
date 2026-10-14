@@ -672,3 +672,33 @@ class TestPipelineToParquetHeadingNames:
         )
 
         assert frame.to_dict("records") == [{"Other": "a", "Other_2": "b"}]
+
+
+class TestPipelineToParquetColumnSelection:
+    """_to_parquet() writes only the columns the contract selects."""
+
+    def test_excluded_column_is_not_written(self) -> None:
+        """An excluded personal-data column never reaches Parquet."""
+        contract = Contract(
+            worksheets=[
+                Worksheet(
+                    name="Events",
+                    columns=[Column(name="name", data_type="string")],
+                    excluded=["email"],
+                )
+            ]
+        )
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Events"
+        ws.append(["name", "email"])
+        ws.append(["a", "a@example.org"])
+        buffer = BytesIO()
+        wb.save(buffer)
+        pipeline = Pipeline(Mock(), Mock(), Mock(), contract)
+
+        frame = pd.read_parquet(
+            BytesIO(pipeline._to_parquet(buffer.getvalue()))
+        )
+
+        assert list(frame.columns) == ["name"]

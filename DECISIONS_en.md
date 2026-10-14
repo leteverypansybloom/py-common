@@ -10,6 +10,29 @@ earlier entry as superseded.
 
 ## 2026-10-14 — Workbook layouts and a raw JSON load route
 
+### Contracts choose which columns are loaded
+
+A worksheet's `column_selection` is `"listed"` (the default) or
+`"all_except"`, and `excluded` names columns that are in the sheet
+but never loaded. In `listed` mode only the contract's columns are
+loaded, and an excluded column is not counted as unexpected. In
+`all_except` mode every column except the excluded ones is loaded,
+so a column added to a form is picked up without a contract change.
+`Contract.extract()` applies the selection; the Parquet conversion
+now uses it rather than reading the sheet itself.
+
+Most HWW sources hold far more columns than the analysis needs,
+including names, email addresses and contact details. Loading every
+column would copy that personal data into BigQuery for no reason,
+which works against the data minimisation the DPIA will expect.
+
+**Trade-off**: In `listed` mode a new column is not loaded until
+someone adds it to the contract; the header check reports it. In
+`all_except` mode a new personal-data column is loaded until someone
+excludes it. Benefit: each source can be set to whichever risk fits
+it, and the original file is still kept in `raw/` if a column is
+needed later.
+
 ### Every column gets a name; none are dropped
 
 Headings are read once, by `read_sheet()` in `contract.py`, and both

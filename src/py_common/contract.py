@@ -9,7 +9,7 @@ from datetime import date
 from io import BytesIO
 from typing import Any, Literal
 
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet as XlWorksheet
 
@@ -57,23 +57,63 @@ class Worksheet:
             Data starts on the row after it. Sheets laid out for
             people often put a title or "Last updated" line above
             the headings.
+        column_selection: Which columns are loaded. "listed" (the
+            default) loads only `columns`, and any other column in
+            the sheet is a mismatch unless it is in `excluded`.
+            "all_except" loads every column except `excluded`, so
+            new columns are picked up without a contract change.
+        excluded: Columns known to be in the sheet that are never
+            loaded, e.g. names or email addresses the analysis
+            doesn't need. Names are as read_sheet() gives them.
     """
 
     name: str
     columns: list[Column] = field(default_factory=list)
     header_row: int = 1
+    column_selection: Literal["listed", "all_except"] = "listed"
+    excluded: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         """Check settings that would otherwise fail confusingly later.
 
         Raises:
-            ValueError: header_row is less than 1.
+            ValueError: header_row is less than 1, column_selection
+                is unknown, or a column is both listed and excluded.
         """
         if self.header_row < 1:
             raise ValueError(
                 f"Worksheet '{self.name}': header_row must be 1 or "
                 f"more, got {self.header_row}"
             )
+        if self.column_selection not in ("listed", "all_except"):
+            raise ValueError(
+                f"Worksheet '{self.name}': column_selection must be "
+                f"'listed' or 'all_except', got "
+                f"{self.column_selection!r}"
+            )
+        both = sorted({c.name for c in self.columns} & set(self.excluded))
+        if both:
+            raise ValueError(
+                f"Worksheet '{self.name}': columns both listed and "
+                f"excluded: {', '.join(both)}"
+            )
+
+
+@dataclass
+class SheetRows:
+    """The columns and rows to load from one worksheet.
+
+    Attributes:
+        columns: Names of the columns to load. In "listed" mode this
+            is the contract's column order; in "all_except" mode it
+            is the sheet's order.
+        rows: (Excel row number, values lined up with `columns`) for
+            each non-empty data row. A listed column missing from
+            the sheet has None in every row.
+    """
+
+    columns: list[str]
+    rows: list[tuple[int, tuple[Any, ...]]]
 
 
 @dataclass
@@ -113,6 +153,78 @@ class Contract:
                 structure doesn't match it.
             ValidationError: Data violates contract rules.
         """
+        wb = self._open(excel_bytes, source_name)
+
+        primary_rows = 0
+        for index, ws_def in enumerate(self.worksheets):
+            ws = wb[ws_def.name]
+            rows = self._validate_worksheet(ws, ws_def, source_name)
+            if index == 0:
+                primary_rows = rows
+
+        return primary_rows
+
+    def extract(
+        self,
+        excel_bytes: bytes,
+        source_name: str = "workbook",
+    ) -> dict[str, SheetRows]:
+        """Read the columns and rows to load from every worksheet.
+
+        Applies each worksheet's header_row, heading names and column
+        selection. Does not validate: call validate() first.
+
+        Args:
+            excel_bytes: Raw Excel file bytes.
+            source_name: Filename for error messages.
+
+        Returns:
+            SheetRows for each configured worksheet, keyed by name,
+            in contract order.
+
+        Raises:
+            ContractError: Contract is misconfigured, the workbook
+                can't be parsed, or a worksheet is missing.
+        """
+        wb = self._open(excel_bytes, source_name)
+        sheets: dict[str, SheetRows] = {}
+        for ws_def in self.worksheets:
+            names, rows = read_sheet(wb[ws_def.name], ws_def.header_row)
+            index = {name: i for i, name in enumerate(names)}
+            if ws_def.column_selection == "listed":
+                selected = [col.name for col in ws_def.columns]
+            else:
+                skip = set(ws_def.excluded)
+                selected = [name for name in names if name not in skip]
+            sheets[ws_def.name] = SheetRows(
+                columns=selected,
+                rows=[
+                    (
+                        row_number,
+                        tuple(
+                            values[index[name]] if name in index else None
+                            for name in selected
+                        ),
+                    )
+                    for row_number, values in rows
+                ],
+            )
+        return sheets
+
+    def _open(self, excel_bytes: bytes, source_name: str) -> Workbook:
+        """Parse the workbook and check every worksheet is present.
+
+        Args:
+            excel_bytes: Raw Excel file bytes.
+            source_name: Filename for error messages.
+
+        Returns:
+            The openpyxl workbook.
+
+        Raises:
+            ContractError: Contract has no worksheets, the workbook
+                can't be parsed, or a configured worksheet is missing.
+        """
         if not self.worksheets:
             raise ContractError(
                 f"{source_name}: Contract has no worksheets configured"
@@ -130,9 +242,9 @@ class Contract:
                 f"{source_name}: Cannot parse Excel: {e}"
             ) from e
 
-        # Check every configured worksheet exists before validating
-        # any of them, so one missing sheet reports cleanly instead
-        # of a KeyError on the next lookup.
+        # Check every configured worksheet exists before reading any
+        # of them, so one missing sheet reports cleanly instead of a
+        # KeyError on the next lookup.
         missing = [
             ws_def.name
             for ws_def in self.worksheets
@@ -143,15 +255,7 @@ class Contract:
                 f"{source_name}: Missing worksheet(s) "
                 f"{', '.join(missing)}. Found: {', '.join(wb.sheetnames)}"
             )
-
-        primary_rows = 0
-        for index, ws_def in enumerate(self.worksheets):
-            ws = wb[ws_def.name]
-            rows = self._validate_worksheet(ws, ws_def, source_name)
-            if index == 0:
-                primary_rows = rows
-
-        return primary_rows
+        return wb
 
     def _validate_worksheet(
         self,
@@ -182,15 +286,16 @@ class Contract:
             if col_def.name not in headers:
                 errors.append(f"Missing column '{col_def.name}'")
 
-        expected = {col.name for col in ws_def.columns}
-        # read_sheet() has already turned every heading into text
-        # (headings can be numbers or dates too), so they compare and
-        # sort cleanly here.
-        unexpected = set(headers) - expected
-        if unexpected:
-            errors.append(
-                f"Unexpected columns: {', '.join(sorted(unexpected))}"
-            )
+        if ws_def.column_selection == "listed":
+            # read_sheet() has already turned every heading into text
+            # (headings can be numbers or dates too), so they compare
+            # and sort cleanly here.
+            expected = {col.name for col in ws_def.columns}
+            unexpected = set(headers) - expected - set(ws_def.excluded)
+            if unexpected:
+                errors.append(
+                    f"Unexpected columns: {', '.join(sorted(unexpected))}"
+                )
 
         if errors:
             raise ContractError(f"{header}: {'; '.join(errors)}")
