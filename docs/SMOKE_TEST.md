@@ -67,7 +67,8 @@ without changing the validation, storage or BigQuery logic.
 ### 2. A checksum identifies the exact file content
 
 The pipeline calculates a SHA-256 checksum, which is a unique fingerprint of
-the file contents. It looks in GCS for an `audit/<checksum>` marker:
+the file contents. It looks in GCS for an
+`audit/<warehouse identity>/<checksum>` marker:
 
 - If the marker exists, the file is skipped.
 - If it does not exist, processing continues.
@@ -118,7 +119,7 @@ source system to resend the file.
 The pipeline reads the `Events` sheet into a table-like structure and creates:
 
 ```text
-processed/<identity>/<checksum>/<filename>.xlsx.parquet
+processed/<warehouse identity>/<identity>/<checksum>/<filename>.xlsx.parquet
 ```
 
 It holds only the worksheet's own columns, so the same workbook always
@@ -128,9 +129,11 @@ Parquet is efficient for analytics and works well with BigQuery. The original
 Excel workbook remains unchanged in `raw/`, while the Parquet file is the
 processed, query-ready version.
 
-At present, the pipeline converts the first configured worksheet to Parquet.
-It can validate more than one worksheet, but does not yet create a separate
-Parquet output for every worksheet.
+The typed route converts the first configured worksheet to Parquet. To load
+several worksheets, either run one pipeline per worksheet (processed copies
+and duplicate markers are kept per warehouse, so they don't clash), or use the
+raw JSON route, which loads every configured worksheet into its own raw table
+(see `docs/RAW_TABLE_LAYOUT.md`).
 
 ### 7. Parquet is loaded through a BigQuery staging table
 

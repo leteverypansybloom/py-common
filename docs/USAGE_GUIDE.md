@@ -38,7 +38,17 @@ ingestion" repo, for example — should mostly be a `config.yaml`, a
 - You need the file's **structure and data checked** before it's
   trusted anywhere downstream — required worksheets, required and
   unexpected columns, nullability, basic types, uniqueness
-  (`contract.py`).
+  (`contract.py`). Each check can quarantine the file or, with
+  `on_mismatch="warn"`, record a warning and load it anyway.
+- Your workbooks are **laid out for people**: headings below a title
+  line (`header_row`), blank or repeated headings (named `col_B`,
+  `Other_2`), or columns of personal data you must not load
+  (`excluded`).
+- You want rows landed **as raw JSON for cleaning in Dataform**, one
+  raw table per worksheet (`output_format="raw_json"` with
+  `RawJsonWarehouse`; see [`RAW_TABLE_LAYOUT.md`](RAW_TABLE_LAYOUT.md)),
+  or merged into a **typed table** on key columns
+  (`BigQueryWarehouse`).
 - You need a **defensible audit trail** — who processed what, when,
   with what checksum and outcome — without extra work
   (`model.py`, written by `pipeline.py`).

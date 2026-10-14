@@ -63,10 +63,13 @@ make_fixtures(Path('tests/data/fixtures'))
 pytest tests/ -v
 ```
 
-Expect: seven `.xlsx` files under `tests/data/fixtures/` (one valid,
-six that each break a different validation rule — see
+Expect: eleven `.xlsx` files under `tests/data/fixtures/`. Seven are
+`events_*` files (one valid, six that each break a different
+validation rule) and four are `hww_*` files copying the layouts of the
+Healthy Working Wales workbooks. See
 [`tests/data/fixtures/README.md`](../tests/data/fixtures/README.md)
-for what each one tests), plus a `manifest.json` and that `README.md`.
+for what each one tests. There is also a `manifest.json` and that
+`README.md`.
 
 Every test should pass. The tests under `tests/integration/` need live
 GCP or SharePoint access; each one skips itself when credentials
@@ -222,7 +225,8 @@ for r in results:
 ```
 
 Expect a logged `Validation failed for ...` warning for each bad
-fixture, then one line per fixture:
+fixture, then one line per fixture. The `hww_*` files have no `Events`
+sheet, so this contract quarantines them too:
 
 ```
 events_duplicate.xlsx quarantined 0
@@ -232,14 +236,62 @@ events_missing_column.xlsx quarantined 0
 events_missing_sheet.xlsx quarantined 0
 events_missing_value.xlsx quarantined 0
 events_valid.xlsx loaded 2
+hww_header_mismatch.xlsx quarantined 0
+hww_header_row_2.xlsx quarantined 0
+hww_personal_data.xlsx quarantined 0
+hww_repeated_other.xlsx quarantined 0
 ```
 
-...and, under `tmp / "store"`, a `raw/` copy of every file (even the
-quarantined ones), a `quarantine/` copy of the six bad ones, a
-`processed/events_valid.xlsx/<checksum>/events_valid.xlsx.parquet`, and
-one JSON audit record per file under `audit/records/`. Stored copies
-are keyed `{identity}/{checksum}/{name}`, so an edited file lands next
-to its earlier version rather than clashing with it.
+...and, under `tmp / "store"`:
+
+- a `raw/` copy of every file, even the quarantined ones;
+- a `quarantine/` copy of the ten rejected ones;
+- `processed/fake-warehouse/events_valid.xlsx/<checksum>/events_valid.xlsx.parquet`;
+- one JSON audit record per file under `audit/records/`.
+
+Stored copies are keyed `{identity}/{checksum}/{name}`, so an edited
+file lands next to its earlier version rather than clashing with it.
+Processed copies are also keyed by the warehouse's `identity`, so
+pipelines reading different sheets of one workbook don't clash.
+
+### The raw JSON route
+
+To load rows as JSON for cleaning in Dataform instead, pass
+`output_format="raw_json"`. Here a contract keeps three columns of the
+peer-monitoring layout and excludes the name and email columns. The
+same `FakeWarehouse` shows what would be loaded:
+
+```python
+peers = Contract(worksheets=[Worksheet(
+    name="query (1)",
+    columns=[
+        Column("Participant ID", data_type="string", unique=True),
+        Column("Business Name", data_type="string"),
+        Column("Sector", data_type="string"),
+    ],
+    excluded=["First Name", "Email Address"],
+    on_mismatch="warn",
+)])
+
+warehouse = FakeWarehouse()
+raw = Pipeline(
+    source=LocalSource(fixtures_dir),
+    store=LocalObjectStore(tmp / "raw-store"),
+    warehouse=warehouse,
+    contract=peers,
+    output_format="raw_json",
+)
+item = next(i for i in raw.source.items()
+            if i.name == "hww_header_mismatch.xlsx")
+result = raw.process(item)
+print(result.outcome.value, result.warnings)
+```
+
+Expect `loaded`, plus one warning: `Sector` is missing and
+`Business Sector` is unexpected. Because the worksheet is in `"warn"`
+mode, the file loads anyway, with `Sector` empty. With the default
+`on_mismatch="quarantine"` it would be quarantined. What each raw row
+looks like is described in [`RAW_TABLE_LAYOUT.md`](RAW_TABLE_LAYOUT.md).
 
 The same flow is covered by the unit tests in
 `tests/unit/test_pipeline.py`, one test per outcome.
@@ -248,9 +300,10 @@ The same flow is covered by the unit tests in
 
 Run the same `pipeline.run()` again over the same folder. Expect
 `events_valid.xlsx` to come back `skipped` — its checksum was recorded
-under `audit/{checksum}` the first time it loaded (`Pipeline._audit()`),
+under `audit/{warehouse identity}/{checksum}` the first time it loaded
+(`Pipeline._audit()`),
 and `Pipeline.process()` checks that marker before re-validating
-(`Pipeline._is_duplicate()`). The six quarantined files, by contrast,
+(`Pipeline._is_duplicate()`). The ten quarantined files, by contrast,
 come back `quarantined` again, every time — a checksum marker is only
 written on a `LOADED` outcome, so a file that fails validation is
 re-read and re-validated on every run until it's fixed or removed from
@@ -306,7 +359,9 @@ README, "SharePoint source").
 - **Try it against real GCS and BigQuery** — `scripts/demo.py` runs
   the fixtures through `GCSObjectStore` and `BigQueryWarehouse` in a
   development project; read its header for the environment variables
-  it needs first. It writes to real cloud resources.
+  it needs first. It writes to real cloud resources. For the raw JSON
+  route, [`GCP_SETUP.md`](GCP_SETUP.md) walks through the buckets,
+  datasets, job and alerts.
 - **Decide if `py-common` is the right fit for your new source at
   all**, and how to add one if it needs an adapter that doesn't exist
   yet (a database, an API, a different file share) — see
