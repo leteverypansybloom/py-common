@@ -52,10 +52,27 @@ class Worksheet:
     Attributes:
         name: Worksheet name (must match Excel sheet name).
         columns: List of required columns.
+        header_row: Row holding the column headings (1 = first row).
+            Data starts on the row after it. Sheets laid out for
+            people often put a title or "Last updated" line above
+            the headings.
     """
 
     name: str
     columns: list[Column] = field(default_factory=list)
+    header_row: int = 1
+
+    def __post_init__(self) -> None:
+        """Check settings that would otherwise fail confusingly later.
+
+        Raises:
+            ValueError: header_row is less than 1.
+        """
+        if self.header_row < 1:
+            raise ValueError(
+                f"Worksheet '{self.name}': header_row must be 1 or "
+                f"more, got {self.header_row}"
+            )
 
 
 @dataclass
@@ -149,7 +166,7 @@ class Contract:
             source_name: Filename for error messages.
 
         Returns:
-            Row count (excluding header) if valid.
+            Number of data rows (below the heading row) if valid.
 
         Raises:
             ContractError: Column structure doesn't match ws_def.
@@ -158,7 +175,7 @@ class Contract:
         errors: list[str] = []
         header = f"{source_name} [{ws_def.name}]"
 
-        headers = [cell.value for cell in ws[1]]
+        headers, rows = read_sheet(ws, ws_def.header_row)
         for col_def in ws_def.columns:
             if col_def.name not in headers:
                 errors.append(f"Missing column '{col_def.name}'")
@@ -189,9 +206,7 @@ class Contract:
             col.name: set() for col in ws_def.columns if col.unique
         }
 
-        for row_idx, row in enumerate(
-            ws.iter_rows(min_row=2, values_only=True), start=2
-        ):
+        for row_idx, row in rows:
             for col_def in ws_def.columns:
                 col_idx = header_index.get(col_def.name)
                 value = (
@@ -238,5 +253,28 @@ class Contract:
                 )
             )
 
-        # Return row count (excluding header)
-        return ws.max_row - 1 if ws.max_row else 0
+        return len(rows)
+
+
+def read_sheet(
+    ws: XlWorksheet, header_row: int
+) -> tuple[list[Any], list[tuple[int, tuple[Any, ...]]]]:
+    """Read a worksheet's headings and the data rows below them.
+
+    Args:
+        ws: The openpyxl worksheet to read.
+        header_row: Row holding the headings (1 = first row).
+
+    Returns:
+        (headings, rows): the heading cell values, and each data row
+        as (Excel row number, cell values). Row numbers are the ones
+        shown in Excel, so errors can be traced back to the sheet.
+    """
+    grid = list(ws.iter_rows(min_row=header_row, values_only=True))
+    if not grid:
+        return [], []
+    rows = [
+        (header_row + offset, tuple(values))
+        for offset, values in enumerate(grid[1:], start=1)
+    ]
+    return list(grid[0]), rows

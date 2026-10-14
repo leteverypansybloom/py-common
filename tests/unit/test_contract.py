@@ -41,6 +41,31 @@ def _build_workbook(
     return buffer.getvalue()
 
 
+def _build_grid_workbook(sheets: dict[str, list[list[Any]]]) -> bytes:
+    """Build .xlsx bytes, writing each sheet's rows exactly as given.
+
+    Unlike _build_workbook, nothing is assumed about where the
+    headings go, so tests can put title lines above them or leave
+    cells blank.
+
+    Args:
+        sheets: Maps worksheet name to its rows, top to bottom.
+
+    Returns:
+        Raw .xlsx file bytes.
+    """
+    wb = Workbook()
+    wb.remove(wb.active)
+    for name, rows in sheets.items():
+        ws = wb.create_sheet(title=name)
+        for row_idx, row in enumerate(rows, start=1):
+            for col_idx, value in enumerate(row, start=1):
+                ws.cell(row=row_idx, column=col_idx, value=value)
+    buffer = BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
 def test_valid_fixture(temp_dir, events_contract):
     """Valid fixture passes all validations."""
     make_fixtures(temp_dir / "fixtures")
@@ -316,3 +341,89 @@ def test_bool_rejected_by_integer_column():
 
     with pytest.raises(ValidationError, match="expected integer"):
         contract.validate(excel_bytes, "bool.xlsx")
+
+
+class TestWorksheetHeaderRow:
+    """Worksheet.header_row says which row holds the headings."""
+
+    def test_header_row_defaults_to_first_row(self):
+        """Existing contracts keep reading headings from row 1."""
+        assert Worksheet(name="Events").header_row == 1
+
+    def test_header_row_below_one_is_rejected(self):
+        """A header_row of 0 is a configuration mistake."""
+        with pytest.raises(ValueError, match="header_row"):
+            Worksheet(name="Events", header_row=0)
+
+
+class TestContractValidateHeaderRow:
+    """validate() reads headings from the configured row."""
+
+    @pytest.fixture
+    def contract(self) -> Contract:
+        """Contract whose headings sit on row 2, under a title line."""
+        return Contract(
+            worksheets=[
+                Worksheet(
+                    name="Account signups",
+                    header_row=2,
+                    columns=[
+                        Column(name="Org", data_type="string"),
+                        Column(name="Size", data_type="string"),
+                    ],
+                )
+            ]
+        )
+
+    def test_headings_on_row_two_are_found(self, contract):
+        """A "Last updated" line above the headings is skipped.
+
+        Args:
+            contract: Contract fixture with header_row=2.
+        """
+        excel_bytes = _build_grid_workbook(
+            {
+                "Account signups": [
+                    ["Last updated: 02/03/2026"],
+                    ["Org", "Size"],
+                    ["Org 1", "1000+"],
+                    ["Org 2", "10-49"],
+                ]
+            }
+        )
+
+        rows = contract.validate(excel_bytes, "signups.xlsx")
+
+        assert rows == 2
+
+    def test_errors_report_excel_row_numbers(self, contract):
+        """Row numbers in errors match what Excel shows.
+
+        Args:
+            contract: Contract fixture with header_row=2.
+        """
+        excel_bytes = _build_grid_workbook(
+            {
+                "Account signups": [
+                    ["Last updated: 02/03/2026"],
+                    ["Org", "Size"],
+                    ["Org 1", 1000],
+                ]
+            }
+        )
+
+        with pytest.raises(ValidationError, match="Row 3: 'Size'"):
+            contract.validate(excel_bytes, "signups.xlsx")
+
+    def test_wrong_header_row_reports_missing_columns(self, contract):
+        """Headings on row 1 don't satisfy a header_row=2 contract.
+
+        Args:
+            contract: Contract fixture with header_row=2.
+        """
+        excel_bytes = _build_grid_workbook(
+            {"Account signups": [["Org", "Size"], ["Org 1", "1000+"]]}
+        )
+
+        with pytest.raises(ContractError, match="Missing column 'Org'"):
+            contract.validate(excel_bytes, "signups.xlsx")

@@ -21,7 +21,7 @@ from time import perf_counter
 import pandas as pd
 from openpyxl import load_workbook
 
-from py_common.contract import Contract
+from py_common.contract import Contract, read_sheet
 from py_common.errors import (
     IndeterminateCommitError,
     ServiceError,
@@ -269,13 +269,10 @@ class Pipeline:
             Parquet-encoded bytes of the primary worksheet.
         """
         wb = load_workbook(BytesIO(data), data_only=True)
-        primary_sheet_name = self.contract.worksheets[0].name
-        ws = wb[primary_sheet_name]
-        headers = [cell.value for cell in ws[1]]
-        rows = [
-            dict(zip(headers, row))
-            for row in ws.iter_rows(min_row=2, values_only=True)
-        ]
+        primary = self.contract.worksheets[0]
+        ws = wb[primary.name]
+        headers, data_rows = read_sheet(ws, primary.header_row)
+        rows = [dict(zip(headers, values)) for _, values in data_rows]
 
         df = pd.DataFrame(rows)
         parquet_buffer = BytesIO()

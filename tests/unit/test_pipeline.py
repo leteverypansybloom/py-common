@@ -605,3 +605,38 @@ class TestPipelineRetryAfterWarehouseFailure:
 
         assert first[0].outcome == first_outcome
         assert second[0].outcome == Outcome.LOADED, second[0].errors
+
+
+class TestPipelineToParquetHeaderRow:
+    """_to_parquet() reads headings from the contract's header_row."""
+
+    def test_title_line_above_headings_is_not_a_column(self) -> None:
+        """Columns come from row 2 when header_row=2."""
+        contract = Contract(
+            worksheets=[
+                Worksheet(
+                    name="Events",
+                    header_row=2,
+                    columns=[
+                        Column(name="name", data_type="string"),
+                        Column(name="count", data_type="integer"),
+                    ],
+                )
+            ]
+        )
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Events"
+        ws.append(["Last updated: 02/03/2026"])
+        ws.append(["name", "count"])
+        ws.append(["a", 1])
+        buffer = BytesIO()
+        wb.save(buffer)
+        pipeline = Pipeline(Mock(), Mock(), Mock(), contract)
+
+        frame = pd.read_parquet(
+            BytesIO(pipeline._to_parquet(buffer.getvalue()))
+        )
+
+        assert list(frame.columns) == ["name", "count"]
+        assert frame.to_dict("records") == [{"name": "a", "count": 1}]
