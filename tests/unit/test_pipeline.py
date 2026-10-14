@@ -911,3 +911,127 @@ class TestPipelineKeysPerDestination:
             if key.startswith("audit/records/")
         )
         assert record["warehouse"] == "p.d.a"
+
+
+class TestPipelineOutputFormat:
+    """output_format chooses Parquet or raw JSON rows for the load."""
+
+    @staticmethod
+    def _two_sheet_contract() -> Contract:
+        """Contract for "Account signups" and "Survey info" sheets.
+
+        Returns:
+            Contract.
+        """
+        return Contract(
+            worksheets=[
+                Worksheet(
+                    name="Account signups",
+                    columns=[Column(name="Org", data_type="string")],
+                ),
+                Worksheet(
+                    name="Survey info",
+                    columns=[Column(name="Org", data_type="string")],
+                ),
+            ]
+        )
+
+    @staticmethod
+    def _two_sheet_workbook() -> bytes:
+        """Workbook with two sign-ups and one survey response.
+
+        Returns:
+            .xlsx bytes.
+        """
+        wb = Workbook()
+        signups = wb.active
+        signups.title = "Account signups"
+        signups.append(["Org"])
+        signups.append(["Org 1"])
+        signups.append(["Org 2"])
+        survey = wb.create_sheet("Survey info")
+        survey.append(["Org"])
+        survey.append(["Org 3"])
+        buffer = BytesIO()
+        wb.save(buffer)
+        return buffer.getvalue()
+
+    def _raw_pipeline(self, store: InMemoryStore) -> Pipeline:
+        """Pipeline in raw_json mode over the two-sheet workbook.
+
+        Args:
+            store: Object store.
+
+        Returns:
+            Pipeline.
+        """
+        source = Mock()
+        source.download.return_value = self._two_sheet_workbook()
+        warehouse = Mock()
+        warehouse.identity = "p.raw.signups+survey"
+        return Pipeline(
+            source,
+            store,
+            warehouse,
+            self._two_sheet_contract(),
+            output_format="raw_json",
+        )
+
+    def test_default_is_parquet(self) -> None:
+        """Existing pipelines keep loading Parquet."""
+        pipeline = Pipeline(Mock(), Mock(), Mock(), Mock())
+
+        assert pipeline.output_format == "parquet"
+
+    def test_unknown_format_is_rejected(self) -> None:
+        """A typo fails when the pipeline is built."""
+        with pytest.raises(ValueError, match="output_format"):
+            Pipeline(Mock(), Mock(), Mock(), Mock(), output_format="csv")
+
+    def test_raw_json_loads_rows_from_every_sheet(self) -> None:
+        """The warehouse gets NDJSON for all sheets and their total."""
+        pipeline = self._raw_pipeline(InMemoryStore())
+        item = SourceItem("hww.xlsx", "ID1", "v1", 10)
+
+        result = pipeline.process(item)
+
+        assert result.outcome == Outcome.LOADED, result.errors
+        assert result.rows_processed == 3
+        call = pipeline.warehouse.load.call_args
+        assert call.kwargs["rows"] == 3
+        sheets = [
+            json.loads(line)["sheet_name"]
+            for line in call.kwargs["data"].decode().splitlines()
+        ]
+        assert sheets == ["Account signups", "Account signups", "Survey info"]
+
+    def test_raw_json_processed_copy_is_ndjson(self) -> None:
+        """The stored copy is the NDJSON the warehouse was given."""
+        store = InMemoryStore()
+        pipeline = self._raw_pipeline(store)
+        item = SourceItem("hww.xlsx", "ID1", "v1", 10)
+        data = pipeline.source.download.return_value
+
+        pipeline.process(item)
+
+        key = (
+            f"processed/p.raw.signups+survey/ID1/{digest(data)}/"
+            "hww.xlsx.ndjson"
+        )
+        assert (
+            store.objects[key]
+            == pipeline.warehouse.load.call_args.kwargs["data"]
+        )
+
+    def test_raw_json_retry_after_failure_loads(self) -> None:
+        """Identical NDJSON on retry: no processed/ conflict."""
+        store = InMemoryStore()
+        pipeline = self._raw_pipeline(store)
+        pipeline.warehouse.load.side_effect = [RuntimeError("boom"), None]
+        item = SourceItem("hww.xlsx", "ID1", "v1", 10)
+
+        first = pipeline.process(item)
+        second = pipeline.process(item)
+
+        assert first.outcome == Outcome.FAILED
+        assert second.outcome == Outcome.LOADED, second.errors

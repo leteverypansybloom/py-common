@@ -5,9 +5,9 @@ Orchestrates:
 2. Download and hash each file
 3. Validate against contract
 4. Store raw file in object store
-5. Convert to Parquet
+5. Convert to Parquet, or to JSON rows for a raw table
 6. Load into warehouse staging
-7. Merge into final table
+7. Merge or insert into the destination table(s)
 8. Record audit entry
 """
 
@@ -17,6 +17,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from io import BytesIO
 from time import perf_counter
+from typing import Literal
 
 import pandas as pd
 
@@ -29,6 +30,7 @@ from py_common.errors import (
 )
 from py_common.model import AuditRecord, Outcome, Result, SourceItem, digest
 from py_common.ports import ObjectStore, Source, Warehouse
+from py_common.raw import to_ndjson
 
 logger = logging.getLogger("py_common.pipeline")
 
@@ -42,12 +44,30 @@ class Pipeline:
         store: Object store for raw and processed files.
         warehouse: Warehouse for staging and final tables.
         contract: Workbook validation rules.
+        output_format: What the warehouse is given. "parquet" (the
+            default) is the primary worksheet as Parquet, for
+            BigQueryWarehouse. "raw_json" is every configured
+            worksheet as newline-delimited JSON rows, for
+            RawJsonWarehouse.
     """
 
     source: Source
     store: ObjectStore
     warehouse: Warehouse
     contract: Contract
+    output_format: Literal["parquet", "raw_json"] = "parquet"
+
+    def __post_init__(self) -> None:
+        """Reject an unknown output_format when the pipeline is built.
+
+        Raises:
+            ValueError: output_format is not "parquet" or "raw_json".
+        """
+        if self.output_format not in ("parquet", "raw_json"):
+            raise ValueError(
+                f"output_format must be 'parquet' or 'raw_json', "
+                f"got {self.output_format!r}"
+            )
 
     def run(self) -> list[Result]:
         """Process all current files at source.
@@ -129,15 +149,17 @@ class Pipeline:
                 logger.warning("Contract warning: %s", warning)
 
             self._store_raw(item, data, checksum)
-            parquet_bytes = self._to_parquet(data)
-            self._store_processed(item, checksum, parquet_bytes)
+            processed, rows_processed = self._convert(
+                item, data, checksum, rows_processed
+            )
+            self._store_processed(item, checksum, processed)
 
             warehouse_key = f"{item.identity}_{checksum[:8]}"
             outcome = self._load_to_warehouse(
                 item,
                 warehouse_key,
                 checksum,
-                parquet_bytes,
+                processed,
                 rows_processed,
                 errors,
             )
@@ -276,6 +298,31 @@ class Pipeline:
         """
         self.store.put(f"raw/{self._version_key(item, checksum)}", data)
 
+    def _convert(
+        self,
+        item: SourceItem,
+        data: bytes,
+        checksum: str,
+        validated_rows: int,
+    ) -> tuple[bytes, int]:
+        """Convert the workbook into what the warehouse loads.
+
+        Args:
+            item: SourceItem being processed.
+            data: Raw Excel bytes.
+            checksum: SHA-256 of data.
+            validated_rows: Row count validate() returned for the
+                primary worksheet.
+
+        Returns:
+            (bytes to load, rows the warehouse should find in them).
+            For Parquet that is the primary worksheet's rows; for raw
+            JSON it is the rows of every configured worksheet.
+        """
+        if self.output_format == "raw_json":
+            return to_ndjson(self.contract.extract(data), item, checksum)
+        return self._to_parquet(data), validated_rows
+
     def _to_parquet(self, data: bytes) -> bytes:
         """Convert the primary worksheet to Parquet bytes.
 
@@ -306,9 +353,9 @@ class Pipeline:
         return parquet_buffer.getvalue()
 
     def _store_processed(
-        self, item: SourceItem, checksum: str, parquet_bytes: bytes
+        self, item: SourceItem, checksum: str, processed: bytes
     ) -> None:
-        """Store the converted Parquet bytes.
+        """Store the converted bytes (Parquet or NDJSON).
 
         Keyed by destination as well as content: pipelines reading
         different sheets of the same workbook produce different
@@ -317,30 +364,31 @@ class Pipeline:
         Args:
             item: SourceItem being processed.
             checksum: SHA-256 of the source bytes.
-            parquet_bytes: Parquet-encoded data to store.
+            processed: Converted bytes to store.
         """
+        suffix = ".ndjson" if self.output_format == "raw_json" else ".parquet"
         key = (
             f"processed/{self.warehouse.identity}/"
-            f"{self._version_key(item, checksum)}.parquet"
+            f"{self._version_key(item, checksum)}{suffix}"
         )
-        self.store.put(key, parquet_bytes)
+        self.store.put(key, processed)
 
     def _load_to_warehouse(
         self,
         item: SourceItem,
         warehouse_key: str,
         checksum: str,
-        parquet_bytes: bytes,
+        processed: bytes,
         rows_processed: int,
         errors: list[str],
     ) -> Outcome:
-        """Load Parquet bytes into the warehouse.
+        """Load the converted bytes into the warehouse.
 
         Args:
             item: SourceItem being processed (for logging).
             warehouse_key: Unique identifier for this load.
             checksum: SHA-256 of the source bytes.
-            parquet_bytes: Converted Parquet data to load.
+            processed: Converted Parquet or NDJSON data to load.
             rows_processed: Expected row count for verification.
             errors: Errors list to append to on failure (mutated).
 
@@ -356,7 +404,7 @@ class Pipeline:
             self.warehouse.load(
                 key=warehouse_key,
                 checksum=checksum,
-                data=parquet_bytes,
+                data=processed,
                 rows=rows_processed,
             )
             return Outcome.LOADED
