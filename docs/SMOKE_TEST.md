@@ -6,6 +6,34 @@ pipeline.
 
 Run it only against development GCS and BigQuery resources.
 
+## Before you run it (py-common 0.2.0)
+
+1. **Audit table columns.** 0.2.0 records `destination` and
+   `source_version` in the audit table. The smoke test checks for
+   them and stops with the `ALTER TABLE` to run if they're missing;
+   `python scripts/demo.py --migrate` adds them for you (safe to run
+   twice). The same migration is in `docs/GCP_SETUP.md`, section 2.
+2. **Environment.** `GCP_PROJECT_ID`, `GCS_RAW_BUCKET` (the store
+   bucket) and `BQ_DATASET`, and credentials
+   (`gcloud auth application-default login`) that can write to both.
+3. **Old smoke-test tables.** `events_final` can stay. If an earlier
+   run left `events_final_staging`, delete it: 0.2.0 stages into a
+   new `events_final_stg_...` table per load and drops it afterwards.
+4. **Optional, before deploying anything:** dry-run the SQL the
+   adapters generate against the same project:
+
+   ```bash
+   GCP_PROJECT_ID=my-sandbox pytest -m integration tests/integration/test_bq_dry_run.py
+   ```
+
+Then, from the repository root:
+
+```bash
+python scripts/demo.py --migrate
+```
+
+It prints `ok:` for each check and stops at the first `FAIL:`.
+
 ## How the smoke-test Excel files are created
 
 The demo creates two local Excel files in a uniquely named folder, for
@@ -42,15 +70,17 @@ that invalid input is caught and isolated before it reaches BigQuery.
 
 ## What each test demonstrates
 
-| Test | Expected result | What it proves |
+| Step | Expected result | What it proves |
 | --- | --- | --- |
-| Unit tests | All tests pass locally | Core logic behaves as expected without GCP. |
-| Valid Excel file | `loaded 2` | The pipeline can validate, convert, store and load two rows. |
-| GCS check | Raw `.xlsx` and processed `.parquet` objects exist | The original and processed versions are retained. |
-| BigQuery check | Two new `DEMO-...` rows appear | The data reached the final destination table. |
-| `_loaded_at` check | Both rows have a timestamp matching the audit entry | BigQuery records when the data was committed. |
-| Rerun unchanged file | `skipped 0` | The same file content is not loaded twice. |
-| Invalid workbook | `quarantined 0` | Invalid data is retained for investigation and does not reach BigQuery. |
+| 0. Audit schema | `destination`, `source_version` present | The table matches 0.2.0 (or `--migrate` fixed it). |
+| 1. Valid file, typed route | `loaded 2`; raw and processed copies; two `DEMO-...` rows; one audit row naming `events_final` | Validate, convert, store, MERGE and audit work end to end. |
+| 2. Rerun unchanged file | `skipped 0` | The store marker skips a repeat. |
+| 3. Markers deleted, rerun | `skipped 0`, still one audit row | BigQuery's own audit check stops a second load even when the store marker is lost (the main 0.2.0 fix). |
+| 4. Invalid workbook | `quarantined 0`, copy under `quarantine/` | Invalid data is kept for investigation and never reaches BigQuery. |
+| 5. Valid file, raw JSON route | `loaded 2`, two rows in `smoke_events_raw` | The raw route works live (it hadn't run live before). |
+| 6. Markers deleted, rerun | `skipped 0`, still two raw rows | The same generation is never inserted twice. |
+| 7. Same bytes, new version | `loaded 2`, four raw rows over two `source_generation`s | A revert becomes the latest generation instead of being skipped. |
+| 8. Staging clean-up | No `_stg_` table left for this file | Per-load staging tables are dropped after the load. |
 
 ## The journey through the system
 
@@ -74,7 +104,9 @@ the file contents. It looks in GCS for an
 - If it does not exist, processing continues.
 
 This prevents accidental double loading when the pipeline is rerun with an
-unchanged file.
+unchanged file. The marker is only a cache: BigQuery checks its own audit
+table inside the commit transaction as well, so a lost marker can't cause a
+second load (step 3 of the smoke test deletes the markers to prove it).
 
 ### 3. The Excel workbook is validated against a contract
 
@@ -137,11 +169,13 @@ raw JSON route, which loads every configured worksheet into its own raw table
 
 ### 7. Parquet is loaded through a BigQuery staging table
 
-The Parquet data is first loaded into:
+The Parquet data is first loaded into a staging table of its own:
 
 ```text
-events_final_staging
+events_final_stg_<checksum[:12]>_<random>
 ```
+
+It expires after a day and is dropped as soon as the load finishes.
 
 The pipeline checks that the staging table has the expected number of rows
 before it updates the final table. This provides an early check that the
@@ -199,8 +233,9 @@ BigQuery receives a warehouse audit record for successful loads.
 
 The GCS lock is a real exclusive lock (a lock object under `locks/` in the
 bucket). A second run started while one is active fails with a `RuntimeError`.
-If a run is killed without releasing the lock, delete the lock object named in
-the error once you have confirmed no run is active.
+The lock is a one-hour lease: if a run is killed without releasing it, the
+first run after the lease expires takes it over. To carry on sooner, delete
+the lock object named in the error once you have confirmed no run is active.
 
 ## Where the loaded data is stored
 
@@ -216,11 +251,11 @@ row becomes a row in that table:
 metadata about each successful load, including filename, checksum, row count,
 outcome and time.
 
-`events_final_staging` is used temporarily while loading. It is not intended
-for users or downstream analysis.
+The `events_final_stg_...` tables exist only during a load. They are not
+intended for users or downstream analysis.
 
 ```text
-Excel -> raw GCS -> processed Parquet in GCS -> events_final_staging -> events_final
+Excel -> raw GCS -> processed Parquet in GCS -> events_final_stg_... -> events_final
                                                           \
                                                            -> audit metadata
 ```
