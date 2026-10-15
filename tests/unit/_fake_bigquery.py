@@ -123,6 +123,9 @@ class FakeBigQueryClient:
             p.name: p.value
             for p in getattr(job_config, "query_parameters", None) or []
         }
+        if "HAVING" in sql:
+            # Duplicate/NULL merge-key check: staged keys are clean.
+            return _Job(self._job_id(), rows=[])
         if "BEGIN TRANSACTION" not in sql:
             match = re.search(r"COUNT\(\*\).*FROM `([^`]+)`", sql, re.S)
             if match:

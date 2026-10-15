@@ -23,7 +23,7 @@ from py_common.adapters._bq_jobs import (
     run_query,
     wait_for_load,
 )
-from py_common.errors import ServiceError
+from py_common.errors import ContractError, ServiceError, ValidationError
 from py_common.model import SourceItem
 
 logger = logging.getLogger("py_common.adapters.bigquery")
@@ -224,8 +224,7 @@ class BigQueryWarehouse:
         logger.debug(f"Verified {actual_rows} rows in staging")
 
         # Step 4: Build the MERGE using the schema BigQuery just
-        # inferred for staging, restricted to key_columns actually
-        # present in this load's data.
+        # inferred for staging.
         staging_table = self.client.get_table(staging_full_id)
         columns = [field.name for field in staging_table.schema]
         if LOADED_AT_COLUMN in columns:
@@ -234,9 +233,18 @@ class BigQueryWarehouse:
                 "column; that name is reserved for the load timestamp "
                 "the warehouse sets"
             )
-        key_columns = [c for c in self.key_columns if c in columns]
+        # Every configured key must be there: merging on fewer keys
+        # overwrites unrelated rows, and on none appends duplicates.
+        missing = [c for c in self.key_columns if c not in columns]
+        if missing:
+            raise ContractError(
+                f"{key}: key column(s) {', '.join(missing)} not in the "
+                f"data; staging has {', '.join(columns)}"
+            )
+        key_columns = self.key_columns
 
         if key_columns:
+            self._check_keys(staging_full_id, key_columns, key)
             merge_sql = self._build_merge_sql(
                 staging_full_id, final_full_id, key_columns, columns
             )
@@ -270,6 +278,52 @@ class BigQueryWarehouse:
             self.client, transaction_sql, job_config_txn, key
         )
         return committed(job, result, key)
+
+    def _check_keys(
+        self, staging_full_id: str, key_columns: list[str], key: str
+    ) -> None:
+        """Refuse a file whose merge keys repeat or are NULL.
+
+        A key repeated in staging makes BigQuery reject the MERGE,
+        and a NULL key never matches, so the row would be inserted
+        again on every load. Both are problems with the file, so they
+        raise ValidationError (quarantine) rather than failing the
+        load for a retry that can't succeed.
+
+        Args:
+            staging_full_id (str): Fully-qualified staging table ID.
+            key_columns (list[str]): Merge key columns.
+            key (str): Load key, for messages.
+
+        Raises:
+            ValidationError: Some key repeats or is NULL; up to five
+                are named.
+        """
+        keys = ", ".join(f"`{c}`" for c in key_columns)
+        nulls = " OR ".join(f"`{c}` IS NULL" for c in key_columns)
+        sql = (
+            f"SELECT {keys}, COUNT(*) AS n, COUNTIF({nulls}) AS null_keys\n"
+            f"FROM `{staging_full_id}`\n"
+            f"GROUP BY {keys}\n"
+            f"HAVING COUNT(*) > 1 OR COUNTIF({nulls}) > 0\n"
+            "LIMIT 5"
+        )
+        _, rows = run_query(
+            self.client, sql, bigquery.QueryJobConfig(), f"{key} key check"
+        )
+        if not rows:
+            return
+        found = "; ".join(
+            ", ".join(
+                f"{column}={value}" for column, value in zip(key_columns, row)
+            )
+            + f" ({row[len(key_columns)]} rows)"
+            for row in rows
+        )
+        raise ValidationError(
+            f"{key}: duplicate or NULL merge keys in "
+            f"({', '.join(key_columns)}): {found}"
+        )
 
     def _build_merge_sql(
         self,

@@ -231,9 +231,11 @@ exact; where nothing exists, that's stated plainly rather than implied.
   pass it on automatically: the caller hands it to the warehouse when
   constructing it — `BigQueryWarehouse(..., key_columns=contract.key_columns)`.
   Forget that, and the warehouse appends instead of merging (see
-  [2.4](#24-publish--writing-to-the-destination-safely)). Uniqueness
-  checking *within* a workbook uses each column's own `unique` flag,
-  not `key_columns`.
+  [2.4](#24-publish--writing-to-the-destination-safely)). Each key
+  column must be a listed, `nullable=False` column of the first
+  worksheet (`Contract` refuses anything else when it is built), and
+  `Contract.validate()` checks the key columns together are unique
+  per row, as well as each column's own `unique` flag.
 - **No minimum row count check.** A workbook with a valid header row
   and zero data rows validates successfully and reports
   `rows_processed = 0` — the pipeline has no way to notice that a daily
@@ -273,7 +275,10 @@ exact; where nothing exists, that's stated plainly rather than implied.
   without its audit record. The final-table write is a `MERGE` on the
   `key_columns` passed to the constructor (update matching rows,
   insert new ones — `BigQueryWarehouse._build_merge_sql()`), or a
-  plain append when no key columns are given.
+  plain append when no key columns are given. A key column missing
+  from the data is a `ContractError`, and duplicate or NULL keys in
+  staging are a `ValidationError` naming up to five of them, found
+  before the `MERGE`; both quarantine the file.
 - **The one thing to get right as a caller:** pass
   `key_columns=contract.key_columns` when you construct
   `BigQueryWarehouse`. If you don't, re-loading a file whose checksum

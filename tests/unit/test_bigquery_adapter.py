@@ -34,6 +34,10 @@ def _jobs(count_job: Mock):
     """
 
     def query(sql: str, **_: object) -> Mock:
+        if "HAVING" in sql:
+            clean = Mock(job_id="keys-1")
+            clean.result.return_value = []  # no duplicate keys
+            return clean
         if "BEGIN TRANSACTION" not in sql:
             return count_job
         commit = Mock(job_id="commit-1")

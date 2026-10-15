@@ -134,13 +134,50 @@ class Contract:
     """Workbook schema and validation rules.
 
     Attributes:
-        key_columns: Column names used for deduplication
-                     on warehouse merge. Empty means append.
+        key_columns: Columns of the primary (first) worksheet that
+            identify a row, used to MERGE into the warehouse. Each
+            must be a listed, non-nullable column, and together they
+            must be unique within a file. Empty means append.
         worksheets: List of required worksheets.
     """
 
     key_columns: list[str] = field(default_factory=list)
     worksheets: list[Worksheet] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        """Check key_columns can actually key a MERGE.
+
+        A key the data doesn't have used to be dropped silently, and
+        a NULL key never matches in a MERGE, so both turned upserts
+        into duplicate inserts. Refuse them when the contract is
+        built instead.
+
+        Raises:
+            ValueError: A key column isn't a listed column of the
+                primary worksheet, is nullable, or there are key
+                columns but no worksheets.
+        """
+        if not self.key_columns:
+            return
+        if not self.worksheets:
+            raise ValueError(
+                "Contract has key_columns but no worksheets to take "
+                "them from"
+            )
+        primary = self.worksheets[0]
+        listed = {column.name: column for column in primary.columns}
+        for key in self.key_columns:
+            column = listed.get(key)
+            if column is None:
+                raise ValueError(
+                    f"Key column '{key}' is not a listed column of the "
+                    f"primary worksheet '{primary.name}'"
+                )
+            if column.nullable:
+                raise ValueError(
+                    f"Key column '{key}' of worksheet '{primary.name}' "
+                    "is nullable; key columns need nullable=False"
+                )
 
     def validate(
         self,
@@ -177,7 +214,11 @@ class Contract:
         primary_rows = 0
         for index, ws_def in enumerate(self.worksheets):
             ws = wb[ws_def.name]
-            rows = self._validate_worksheet(ws, ws_def, source_name, warnings)
+            # Keys belong to the primary worksheet (see __post_init__).
+            keys = self.key_columns if index == 0 else []
+            rows = self._validate_worksheet(
+                ws, ws_def, source_name, warnings, keys
+            )
             if index == 0:
                 primary_rows = rows
 
@@ -282,6 +323,7 @@ class Contract:
         ws_def: Worksheet,
         source_name: str,
         warnings: list[str],
+        key_columns: list[str] | None = None,
     ) -> int:
         """Validate one worksheet against its Worksheet definition.
 
@@ -291,6 +333,8 @@ class Contract:
             source_name: Filename for error messages.
             warnings: Where problems go when ws_def.on_mismatch is
                 "warn" (mutated).
+            key_columns: Columns whose values together must be unique
+                per row (the contract's merge key); empty for none.
 
         Returns:
             Number of non-empty data rows (below the heading row) if
@@ -341,7 +385,35 @@ class Contract:
         # possible in "warn" mode); don't report it again on every row.
         present = [c for c in ws_def.columns if c.name in header_index]
 
+        # The composite merge key must be unique, or the warehouse
+        # MERGE fails ("must match at most one source row"). A key
+        # column missing from the sheet was reported above.
+        keys = [k for k in key_columns or [] if k in header_index]
+        if len(keys) != len(key_columns or []):
+            keys = []
+        first_seen: dict[tuple[Any, ...], int] = {}
+
         for row_idx, row in rows:
+            if keys:
+                key_values = tuple(
+                    (
+                        row[header_index[k]]
+                        if header_index[k] < len(row)
+                        else None
+                    )
+                    for k in keys
+                )
+                # A NULL key is reported as "required" below.
+                if not any(_is_blank(v) for v in key_values):
+                    if key_values in first_seen:
+                        row_errors.append(
+                            f"Row {row_idx}: Duplicate key {key_values} "
+                            f"in ({', '.join(keys)}), first on row "
+                            f"{first_seen[key_values]}"
+                        )
+                    else:
+                        first_seen[key_values] = row_idx
+
             for col_def in present:
                 col_idx = header_index[col_def.name]
                 value = row[col_idx] if col_idx < len(row) else None
