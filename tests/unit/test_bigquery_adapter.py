@@ -55,7 +55,10 @@ def _staging_table(*column_names: str) -> Mock:
     iterable with `.name` attributes rather than a bare Mock().
     """
     table = Mock()
-    table.schema = [SimpleNamespace(name=name) for name in column_names]
+    table.schema = [
+        SimpleNamespace(name=name, field_type="STRING")
+        for name in column_names
+    ]
     return table
 
 

@@ -15,7 +15,6 @@ requires-python = ">=3.11"
 dependencies = [
     "openpyxl>=3.1,<4",
     "pyyaml>=6.0,<7",
-    "pandas>=2.0,<3",
     "pyarrow>=15,<27",
 ]
 
@@ -31,6 +30,9 @@ dev = [
     # mypy --strict needs type stubs for untyped runtime deps, or it
     # stops at the import line before checking any real code.
     "types-PyYAML>=6.0",
+    # Tests read Parquet back with pandas; the library itself writes
+    # it with pyarrow and a contract-typed schema.
+    "pandas>=2.0,<3",
     "pandas-stubs>=2.0,<3",
     "types-openpyxl>=3.0.0",
     "types-requests>=2.31.0",
@@ -81,7 +83,7 @@ ignore_missing_imports = true
 # The Google Cloud client libraries ship without type information,
 # so mypy --strict would stop at the import line (review finding M14).
 [[tool.mypy.overrides]]
-module = ["google.cloud.*", "google.api_core.*"]
+module = ["google.cloud.*", "google.api_core.*", "pyarrow", "pyarrow.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

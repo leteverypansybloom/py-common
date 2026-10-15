@@ -15,11 +15,8 @@ import json
 import logging
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
-from io import BytesIO
 from time import perf_counter
 from typing import Literal
-
-import pandas as pd
 
 from py_common.contract import Contract
 from py_common.errors import (
@@ -29,6 +26,7 @@ from py_common.errors import (
     VersionMismatch,
 )
 from py_common.model import AuditRecord, Outcome, Result, SourceItem, digest
+from py_common.parquet import to_parquet
 from py_common.ports import ObjectStore, Source, Warehouse
 from py_common.raw import to_ndjson
 
@@ -141,16 +139,16 @@ class Pipeline:
                     start_time,
                 )
 
+            self._store_raw(item, data, checksum)
+            processed, rows_processed = self._convert(
+                item, data, checksum, rows_processed, warnings
+            )
+
             # Logged at WARNING so an alert can be raised on them: in
             # "warn" mode the file loads, so nothing else would show
             # that the layout or data has changed.
             for warning in warnings:
                 logger.warning("Contract warning: %s", warning)
-
-            self._store_raw(item, data, checksum)
-            processed, rows_processed = self._convert(
-                item, data, checksum, rows_processed
-            )
             self._store_processed(item, checksum, processed)
 
             warehouse_key = f"{item.identity}_{checksum[:8]}"
@@ -356,6 +354,7 @@ class Pipeline:
         data: bytes,
         checksum: str,
         validated_rows: int,
+        warnings: list[str] | None = None,
     ) -> tuple[bytes, int]:
         """Convert the workbook into what the warehouse loads.
 
@@ -365,6 +364,8 @@ class Pipeline:
             checksum: SHA-256 of data.
             validated_rows: Row count validate() returned for the
                 primary worksheet.
+            warnings: Where Parquet conversion reports values loaded
+                as NULL (mutated).
 
         Returns:
             (bytes to load, rows the warehouse should find in them).
@@ -373,9 +374,14 @@ class Pipeline:
         """
         if self.output_format == "raw_json":
             return to_ndjson(self.contract.extract(data), item, checksum)
-        return self._to_parquet(data), validated_rows
+        return self._to_parquet(data, item.name, warnings), validated_rows
 
-    def _to_parquet(self, data: bytes) -> bytes:
+    def _to_parquet(
+        self,
+        data: bytes,
+        source_name: str = "workbook",
+        warnings: list[str] | None = None,
+    ) -> bytes:
         """Convert the primary worksheet to Parquet bytes.
 
         Looks up the primary worksheet by the name the contract
@@ -388,21 +394,23 @@ class Pipeline:
         identical bytes to the same processed/ key. The warehouse
         stamps _loaded_at when it commits.
 
+        Column types come from the contract (py_common.parquet), not
+        from the values, so mixed values in a "warn" sheet load (bad
+        ones as NULL, with a warning) and an empty column keeps its
+        type.
+
         Args:
             data: Raw Excel bytes.
+            source_name: File name, for warnings.
+            warnings: Where values loaded as NULL are reported
+                (mutated).
 
         Returns:
             Parquet-encoded bytes of the primary worksheet.
         """
+        primary = self.contract.worksheets[0]
         sheets = self.contract.extract(data)
-        primary = sheets[self.contract.worksheets[0].name]
-        df = pd.DataFrame(
-            [dict(zip(primary.columns, values)) for _, values in primary.rows],
-            columns=primary.columns,
-        )
-        parquet_buffer = BytesIO()
-        df.to_parquet(parquet_buffer, index=False)
-        return parquet_buffer.getvalue()
+        return to_parquet(sheets[primary.name], primary, source_name, warnings)
 
     def _store_processed(
         self, item: SourceItem, checksum: str, processed: bytes

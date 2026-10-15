@@ -12,6 +12,7 @@ RAP Compliance:
 import logging
 from datetime import datetime, timezone
 from io import BytesIO
+from typing import Any
 
 from google.api_core.exceptions import GoogleAPICallError, NotFound
 from google.cloud import bigquery
@@ -31,6 +32,10 @@ logger = logging.getLogger("py_common.adapters.bigquery")
 #: Final-table column set by the warehouse at commit time. Reserved:
 #: source data may not contain it.
 LOADED_AT_COLUMN = "_loaded_at"
+
+#: Legacy SQL type names the API may report, mapped to the names
+#: Parquet loads produce, so a schema diff compares like with like.
+_TYPE_ALIASES = {"INT64": "INTEGER", "FLOAT64": "FLOAT", "BOOL": "BOOLEAN"}
 
 
 class BigQueryWarehouse:
@@ -243,6 +248,8 @@ class BigQueryWarehouse:
             )
         key_columns = self.key_columns
 
+        self._reconcile_final_table(staging_table.schema, final_full_id, key)
+
         if key_columns:
             self._check_keys(staging_full_id, key_columns, key)
             merge_sql = self._build_merge_sql(
@@ -278,6 +285,86 @@ class BigQueryWarehouse:
             self.client, transaction_sql, job_config_txn, key
         )
         return committed(job, result, key)
+
+    def _reconcile_final_table(
+        self, staging_schema: list[Any], final_full_id: str, key: str
+    ) -> None:
+        """Make the final table able to take staging's columns.
+
+        - No final table: create it from the staging schema plus
+          _loaded_at.
+        - New columns in staging (e.g. picked up by "all_except"):
+          add them, nullable, so earlier rows read NULL.
+        - A column whose type changed, or that the data no longer
+          has: refuse the file. Either would break the MERGE with an
+          opaque error, and neither can be fixed safely by code.
+
+        Args:
+            staging_schema (list[Any]): Staging table's SchemaFields.
+            final_full_id (str): Fully-qualified final table ID.
+            key (str): Load key, for messages.
+
+        Raises:
+            ContractError: A column changed type or was removed; the
+                message lists every difference.
+        """
+        try:
+            final = self.client.get_table(final_full_id)
+        except NotFound:
+            logger.info("Creating final table %s from staging", final_full_id)
+            table = bigquery.Table(
+                final_full_id,
+                schema=[
+                    *(
+                        bigquery.SchemaField(f.name, f.field_type)
+                        for f in staging_schema
+                    ),
+                    bigquery.SchemaField(LOADED_AT_COLUMN, "TIMESTAMP"),
+                ],
+            )
+            self.client.create_table(table, exists_ok=True)
+            return
+
+        final_types = {
+            f.name: _type(f.field_type)
+            for f in final.schema
+            if f.name != LOADED_AT_COLUMN
+        }
+        staging_types = {f.name: _type(f.field_type) for f in staging_schema}
+        changed = [
+            f"{name}: {final_types[name]} -> {kind}"
+            for name, kind in staging_types.items()
+            if name in final_types and final_types[name] != kind
+        ]
+        removed = [name for name in final_types if name not in staging_types]
+        if changed or removed:
+            problems = []
+            if changed:
+                problems.append(f"type changed: {', '.join(changed)}")
+            if removed:
+                problems.append(f"removed: {', '.join(removed)}")
+            raise ContractError(
+                f"{key}: data no longer matches {final_full_id} "
+                f"({'; '.join(problems)})"
+            )
+
+        for name, kind in staging_types.items():
+            if name in final_types:
+                continue
+            logger.warning(
+                "Adding column %s %s to %s for %s",
+                name,
+                kind,
+                final_full_id,
+                key,
+            )
+            run_query(
+                self.client,
+                f"ALTER TABLE `{final_full_id}` "
+                f"ADD COLUMN IF NOT EXISTS `{name}` {kind}",
+                bigquery.QueryJobConfig(),
+                f"{key} schema update",
+            )
 
     def _check_keys(
         self, staging_full_id: str, key_columns: list[str], key: str
@@ -419,3 +506,16 @@ class BigQueryWarehouse:
                 ) from e
         except GoogleAPICallError as e:
             raise ServiceError(f"Cannot read {staging_full_id}: {e}") from e
+
+
+def _type(field_type: str) -> str:
+    """Normalise a BigQuery type name for comparison.
+
+    Args:
+        field_type (str): SchemaField.field_type.
+
+    Returns:
+        str: The type, upper case, with legacy aliases resolved.
+    """
+    upper = field_type.upper()
+    return _TYPE_ALIASES.get(upper, upper)

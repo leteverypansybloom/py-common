@@ -179,15 +179,16 @@ instead. Of the gaps listed at the time:
   file.
 - **Raw tables are created by the code**, partitioned by day.
 
-Two gaps remain, for the typed route only:
+Two former gaps of the typed route are closed in 0.2.0:
 
-- **An integer column with a blank cell may fail at the merge.**
-  pandas would likely turn that column into decimals, and BigQuery
-  won't insert decimals into an INT64 column. This hasn't been run
-  yet; test it with the `events_missing_value` fixture against a
-  nullable integer column.
-- **The final typed tables are not created by the code.** They have
-  to be created with their schema beforehand.
+- **Column types come from the contract.** Parquet is written with
+  the schema the contract declares (`py_common.parquet`), so an
+  integer column with blanks stays INT64, and a value that doesn't
+  fit a "warn" column loads as NULL with a warning.
+- **The final typed table is created by the code** from the staging
+  schema if it doesn't exist. A new column is added; a column whose
+  type changed or that disappeared quarantines the file with the
+  difference listed.
 
 ---
 
@@ -205,8 +206,8 @@ than the choice between JSON and typed columns.
   files. py-common's contract check only reads Excel.
 - **It's slow and memory-hungry.** The workbook is loaded fully into
   memory, then parsed a second time to create the Parquet file.
-  Validation checks each cell in a Python loop, and pandas then
-  builds a 6M-row table in memory. Expect very long runs and many GB
+  Validation checks each cell in a Python loop, and the converter
+  then builds a 6M-row table in memory. Expect very long runs and many GB
   of memory, if it fits at all.
 - **One bad row rejects the whole file.** With 50 rows a month,
   fixing a file by hand is quick. With 6M rows a day, a few bad rows

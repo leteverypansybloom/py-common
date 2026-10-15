@@ -238,8 +238,7 @@ Core:
 
 - openpyxl >= 3.1, < 4 — Read Excel
 - pyyaml >= 6.0, < 7 — YAML configuration
-- pandas >= 2.0, < 3 — Excel → DataFrame conversion
-- pyarrow >= 15, < 27 — Parquet output
+- pyarrow >= 15, < 27 — Parquet output, typed from the contract
 
 Every runtime dependency has an upper bound, so a fresh install
 never picks up a major version the code hasn't been tested against.

@@ -248,8 +248,8 @@ sets `_loaded_at` inside the commit transaction, to the audit record's
 timestamp. Matched rows get it refreshed on update. A source column
 named `_loaded_at` is refused.
 
-**Trade-off**: Parquet is only byte-identical while the pandas and
-pyarrow versions stay the same; upgrading them between a failed load
+**Trade-off**: Parquet is only byte-identical while the pyarrow
+version stays the same; upgrading them between a failed load
 and its retry can still cause one conflict. `_loaded_at` now means
 "committed to BigQuery" rather than "converted". Benefit: failed loads
 retry cleanly, and each row's `_loaded_at` joins to its audit entry.
@@ -411,6 +411,19 @@ Or: Raises exception and rolls back everything. No partial writes.
 **Benefit**: Guarantee: if load() succeeds, the data is committed
 and audited. If it raises ServiceError, nothing was written; if it
 raises IndeterminateCommitError, the outcome is unknown.
+
+### Parquet types come from the contract (0.2.0)
+
+The typed route used to let pandas infer each Parquet column's type
+from the values. A "warn" worksheet with `1` and `"NA"` in one column
+then failed conversion (`ArrowInvalid`) and was retried forever, and
+a column empty this month was staged with a different type than last
+month. `py_common.parquet.to_parquet()` now writes the schema the
+contract declares (undeclared "all_except" columns as strings) and
+loads a value that doesn't fit as NULL, with a warning.
+`BigQueryWarehouse` compares the staged schema with the final table:
+it creates a missing final table, adds new nullable columns, and
+quarantines a file whose column types changed or columns disappeared.
 
 ### Warehouse.load() is idempotent (0.2.0)
 
