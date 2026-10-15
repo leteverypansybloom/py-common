@@ -343,8 +343,9 @@ class RawJsonWarehouse:
                 field="ingested_at",
             )
             # The "latest upload" query partitions by source_file and
-            # filters on source_generation; clustering on them lets
-            # BigQuery prune blocks instead of scanning every upload.
+            # filters on source_generation. Clustering on them lets
+            # BigQuery prune blocks for queries that filter on them
+            # directly (not for a window over the whole table).
             table.clustering_fields = CLUSTERING_FIELDS
             self.client.create_table(table, exists_ok=True)
 

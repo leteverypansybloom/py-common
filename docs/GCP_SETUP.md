@@ -494,12 +494,19 @@ dashboard looks wrong. Set up four, all sent to the team's
 notification channel, for example the team mailbox or a Teams
 channel's email address:
 
-| Alert | Log text matched | Fires when |
+The job and service log JSON (`configure_json_logging()`, section 5),
+so the log text is in `jsonPayload.message`, not `textPayload`, and
+each file ends with one summary line carrying `jsonPayload.outcome`
+(an ERROR for a failed file, a WARNING for a quarantined one,
+whatever path led there). Match on those fields:
+
+| Alert | Filter (after the resource part below) | Fires when |
 |---|---|---|
-| Failed run | `"Processing error for"`, `"Pipeline run failed"` or `"Freshness check failed"` | A file FAILED, a run failed or was refused by the lock, or the freshness check couldn't run |
-| Header or data warning | `"Contract warning:"` | A `"warn"` worksheet loaded with a mismatch |
-| Quarantined file | `"Validation failed for"` | A `"quarantine"` worksheet rejected a file |
-| Missing monthly file | `"Missing monthly file:"` | From the 8th of the month, a monthly source with nothing loaded since the 1st; repeats daily until it loads |
+| Failed file | `jsonPayload.outcome="failed"` | Any file FAILED, from any cause (service error, unknown commit, audit write, ...) |
+| Failed run | `severity>=ERROR AND (jsonPayload.message:"Pipeline run failed" OR jsonPayload.message:"Freshness check failed")` | A run failed or was refused by the lock, or the freshness check couldn't run |
+| Header or data warning | `jsonPayload.message:"Contract warning:"` | A `"warn"` worksheet loaded with a mismatch, or a value loaded as NULL |
+| Quarantined file | `jsonPayload.outcome="quarantined"` | A file was rejected, by the contract or the warehouse |
+| Missing monthly file | `jsonPayload.message:"Missing monthly file:"` | From the 8th of the month, a monthly source with nothing loaded since the 1st; repeats daily until it loads |
 
 Each is a log-based alert. This one is saved as
 `contract-warning.json` and created with
@@ -512,7 +519,7 @@ Each is a log-based alert. This one is saved as
   "conditions": [{
     "displayName": "Contract warning logged",
     "conditionMatchedLog": {
-      "filter": "((resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"<CLOUD_RUN_JOB_NAME>\") OR (resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"<CLOUD_RUN_SERVICE_NAME>\")) AND textPayload:\"Contract warning:\""
+      "filter": "((resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"<CLOUD_RUN_JOB_NAME>\") OR (resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"<CLOUD_RUN_SERVICE_NAME>\")) AND jsonPayload.message:\"Contract warning:\""
     }
   }],
   "alertStrategy": {"notificationRateLimit": {"period": "3600s"}},
@@ -522,7 +529,15 @@ Each is a log-based alert. This one is saved as
 
 The filter matches the job's logs and the service's: a job logs as
 `cloud_run_job`, a service as `cloud_run_revision`. Without section 6,
-drop the service half. Repeat with the other log texts. The same
+drop the service half. Repeat with the other filters. If a job
+logs plain text instead (no `configure_json_logging()`), use
+`textPayload:"..."` with the message texts; the outcome filters need
+JSON logging.
+
+**Test each alert once** before relying on it: run the smoke test
+(`docs/SMOKE_TEST.md`), whose invalid workbook produces a
+`quarantined` summary line, and confirm the notification arrives.
+In the Logs Explorer, the alert's filter should return that line. The same
 alerts can be created in the console under *Logging → Logs Explorer →
 Create alert*.
 

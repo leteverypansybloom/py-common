@@ -175,6 +175,9 @@ def parse_upload(data: Mapping[str, Any]) -> Upload:
         message = data["message"]
         notification = json.loads(base64.b64decode(message["data"]))
         attributes = message.get("attributes") or {}
+        for field in ("bucket", "name"):
+            if not isinstance(notification.get(field), str):
+                raise ValueError(f"notification {field} is not text")
         return Upload(
             bucket=notification["bucket"],
             name=notification["name"],

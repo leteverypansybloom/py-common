@@ -21,8 +21,13 @@ so the SQL that reads them doesn't have to guess.
 | `ingested_at` | TIMESTAMP | When the load committed. All rows of one file share it, and it equals the audit record's `timestamp`. |
 
 Tables are partitioned by day of `ingested_at` and clustered on
-`source_file, source_generation`, so the "latest upload" query below
-reads only the blocks it needs instead of every upload ever loaded.
+`source_file, source_generation`. Clustering only cuts the bytes a
+query reads when it filters on those columns with plain comparisons
+(e.g. `WHERE source_file = 'x.xlsx'`). The "latest upload" query
+below uses a window function over every row, so it still reads the
+whole table; check a query's bytes processed before relying on
+clustering, and for large tables consider an incremental Dataform
+model or a "latest" view driven by the audit table.
 
 Rows are only ever inserted. Each monthly upload of a file adds all
 of that file's rows again, under a new `source_generation`, and earlier

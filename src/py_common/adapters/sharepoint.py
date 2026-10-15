@@ -530,6 +530,15 @@ class SharePointSource:
             entries.extend(e for e in page if isinstance(e, dict))
             link = body.get("@odata.nextLink")
             next_url = link if isinstance(link, str) else None
+            # The bearer token goes with every request, so only follow
+            # a link back to the Graph endpoint we were given.
+            if next_url is not None and not next_url.startswith(
+                f"{self._graph_url}/"
+            ):
+                raise ServiceError(
+                    "Graph nextLink points outside "
+                    f"{self._graph_url}; not following it"
+                )
         return entries
 
     def _get_json(self, url: str) -> dict[str, Any]:

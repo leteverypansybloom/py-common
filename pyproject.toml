@@ -38,7 +38,7 @@ dev = [
     "types-requests>=2.31.0",
     # SharePoint adapter unit tests import requests (for its
     # exception types) even though they never touch the network.
-    "requests>=2.31.0",
+    "requests>=2.32.4,<3",
 ]
 gcp = [
     "google-cloud-storage>=2.10,<4",
@@ -48,7 +48,7 @@ gcp = [
 # Authentication is injected (see adapters/sharepoint.py), so no
 # identity library is pinned here until IT approves a credential flow.
 sharepoint = [
-    "requests>=2.31.0",
+    "requests>=2.32.4,<3",
 ]
 
 [tool.setuptools.packages.find]

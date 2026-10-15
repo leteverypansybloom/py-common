@@ -91,7 +91,10 @@ class TestSchema:
 
 
 class TestCoercion:
-    """Values that don't fit become NULL with a warning."""
+    """In "warn" mode, values that don't fit become NULL with a warning.
+
+    In "quarantine" mode they raise (test_second_review_fixes.py).
+    """
 
     def test_int_and_na_in_one_column_does_not_raise(self) -> None:
         """Regression: pandas inference raised ArrowInvalid here."""
@@ -118,7 +121,9 @@ class TestCoercion:
             [(2, (123, 4.0, 3, None))],
         )
 
-        table = _read(to_parquet(rows, _sheet(), warnings=warnings))
+        table = _read(
+            to_parquet(rows, _sheet(on_mismatch="warn"), warnings=warnings)
+        )
 
         assert table.to_pylist() == [
             {"name": "123", "count": 4, "score": 3.0, "held_on": None}
@@ -137,7 +142,11 @@ class TestCoercion:
         warnings: list[str] = []
 
         table = _read(
-            to_parquet(_rows(tuple(row.values())), _sheet(), warnings=warnings)
+            to_parquet(
+                _rows(tuple(row.values())),
+                _sheet(on_mismatch="warn"),
+                warnings=warnings,
+            )
         )
 
         assert table.column(column).to_pylist() == [None]
@@ -147,7 +156,7 @@ class TestCoercion:
         warnings: list[str] = []
         rows = _rows(*[("a", "NA", None, None)] * 7)
 
-        to_parquet(rows, _sheet(), warnings=warnings)
+        to_parquet(rows, _sheet(on_mismatch="warn"), warnings=warnings)
 
         assert len(warnings) == 1
         assert (

@@ -17,6 +17,8 @@ from openpyxl.worksheet.worksheet import Worksheet as XlWorksheet
 
 from py_common.errors import ContractError, ValidationError
 
+_INT64_MIN, _INT64_MAX = -(2**63), 2**63 - 1
+
 # Maps a Column.data_type to the Python type(s) a cell value must be
 # an instance of, and the word used in error messages. bool is
 # excluded everywhere because Python's bool is a subclass of int and
@@ -300,7 +302,16 @@ class Contract:
                 # Read-only mode trusts the sheet's stored dimensions,
                 # which some tools write wrongly; read what is there.
                 ws.reset_dimensions()
-                names, rows = read_sheet(ws, ws_def.header_row)
+                try:
+                    names, rows = read_sheet(ws, ws_def.header_row)
+                except Exception as e:
+                    # Read-only mode parses cells lazily, so a corrupt
+                    # value surfaces here, not when the file opens.
+                    # It is a problem with the file: quarantine it.
+                    raise ContractError(
+                        f"{source_name} [{ws_def.name}]: Cannot read "
+                        f"worksheet: {e}"
+                    ) from e
                 if check:
                     self._check_formulas(
                         uncached.get(ws_def.name, []),
@@ -520,6 +531,18 @@ class Contract:
                     valid = isinstance(
                         value, expected_type
                     ) and not isinstance(value, bool)
+                    if (
+                        valid
+                        and col_def.data_type == "integer"
+                        and not _INT64_MIN <= value <= _INT64_MAX
+                    ):
+                        # BigQuery's INT64 can't hold it; it would
+                        # otherwise load as NULL.
+                        row_errors.append(
+                            f"Row {row_idx}: '{col_def.name}' is outside "
+                            "the INT64 range"
+                        )
+                        continue
                     if not valid:
                         row_errors.append(
                             f"Row {row_idx}: '{col_def.name}' "
@@ -611,7 +634,12 @@ def read_sheet(
             base = str(heading)
         name = base
         suffix = 2
-        while name in names or (name != base and name in written):
+        # A synthesised name (col_B) must not take a heading the
+        # sheet writes itself, any more than a renamed repeat may.
+        synthesised = _is_blank(heading)
+        while name in names or (
+            (name != base or synthesised) and name in written
+        ):
             name = f"{base}_{suffix}"
             suffix += 1
         names.append(name)

@@ -27,6 +27,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from py_common.contract import SheetRows, Worksheet, _is_blank
+from py_common.errors import ValidationError
 
 #: Arrow type for each Column.data_type. Columns not declared in the
 #: contract ("all_except" picks them up) are written as strings.
@@ -62,8 +63,7 @@ def to_parquet(
         source_name: File name, for warnings.
         warnings: Where to append one warning per column with values
             that couldn't be converted (mutated). They are loaded as
-            NULL. In "quarantine" mode validation has already
-            rejected such files, so this is the "warn" mode path.
+            NULL. In "quarantine" mode they raise instead.
 
     Returns:
         Parquet bytes, columns in sheet.columns order.
@@ -81,6 +81,20 @@ def to_parquet(
                 columns[index].append(None)
                 bad.setdefault(index, []).append((row_number, value))
 
+    if bad and worksheet.on_mismatch == "quarantine":
+        # Validation should already have rejected these; never load a
+        # value as NULL on a sheet that asked for strictness.
+        raise ValidationError(
+            "; ".join(
+                _warning(
+                    f"{source_name} [{worksheet.name}]",
+                    sheet.columns[index],
+                    types[index],
+                    failures,
+                ).replace("; loaded as NULL", "")
+                for index, failures in bad.items()
+            )
+        )
     if warnings is not None:
         for index, failures in bad.items():
             warnings.append(

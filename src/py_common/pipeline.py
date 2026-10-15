@@ -131,7 +131,15 @@ class Pipeline:
         Args:
             result: The file's final result.
         """
-        logger.info(
+        # Alerts match on the outcome field (docs/GCP_SETUP.md,
+        # section 7), so a failure is also an ERROR whatever path led
+        # to it, and a quarantine a WARNING.
+        level = {
+            Outcome.FAILED: logging.ERROR,
+            Outcome.QUARANTINED: logging.WARNING,
+        }.get(result.outcome, logging.INFO)
+        logger.log(
+            level,
             "%s %s: %d rows in %.2fs",
             result.item.name,
             result.outcome.value,
@@ -204,9 +212,15 @@ class Pipeline:
                 )
 
             self._store_raw(item, data, checksum)
-            processed, rows_processed = self._convert(
-                item, sheets, checksum, warnings
-            )
+            try:
+                processed, rows_processed = self._convert(
+                    item, sheets, checksum, warnings
+                )
+            except ValidationError as e:
+                errors = self._quarantine_invalid(item, data, checksum, e)
+                return self._make_result(
+                    item, Outcome.QUARANTINED, checksum, 0, errors, start_time
+                )
 
             # Logged at WARNING so an alert can be raised on them: in
             # "warn" mode the file loads, so nothing else would show
