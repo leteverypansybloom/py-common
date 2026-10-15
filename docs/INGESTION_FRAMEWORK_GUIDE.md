@@ -282,9 +282,16 @@ exact; where nothing exists, that's stated plainly rather than implied.
   before the `MERGE`; both quarantine the file.
 - **The one thing to get right as a caller:** pass
   `key_columns=contract.key_columns` when you construct
-  `BigQueryWarehouse`. If you don't, re-loading a file whose checksum
-  changed (say, a formula recalculated) appends every row again
-  instead of updating them.
+  `BigQueryWarehouse`. If you don't, every new upload of a file
+  appends its rows again instead of updating them.
+- **Cumulative files** (each upload holds every current row, with new
+  rows added and some earlier rows changed) should also pass
+  `mark_deleted_rows=True`. A row that disappears from a file's newest
+  upload then gets `_deleted_at` set rather than staying in the table
+  looking current; if it comes back, `_deleted_at` is cleared. Only
+  rows from that same file (`_source_file`) are affected, so several
+  files can feed one table. Rows are never physically deleted:
+  reports and Dataform should filter `WHERE _deleted_at IS NULL`.
 - A BigQuery failure during `load()` is raised as `ServiceError`
   (BigQuery reported the job failed, so nothing committed) or
   `IndeterminateCommitError` (waiting for the commit failed and the

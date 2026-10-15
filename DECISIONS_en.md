@@ -437,8 +437,29 @@ error between the two used to mean a second load on retry (review
 C2). Now the warehouse's own audit table, committed atomically with
 the data, is the authority and the marker is only a cache.
 
-The raw JSON route identifies a file by identity + version, the
-typed route by content checksum: see docs/RAW_TABLE_LAYOUT.md.
+Both routes identify a file by identity + version (the upload),
+not its bytes, so restoring an earlier upload loads it again; and
+each destination table is checked and audited on its own, so adding
+a table to a raw pipeline loads only that table. See
+docs/RAW_TABLE_LAYOUT.md.
+
+### Deleted rows are marked, not removed (0.2.0)
+
+Cumulative files (each upload has every current row) can drop rows.
+`BigQueryWarehouse(mark_deleted_rows=True)` sets `_deleted_at` on
+rows that came from a file (`_source_file`) and aren't in its newest
+upload, and clears it if they come back. Rows are kept so history
+and audit stay intact; consumers filter `_deleted_at IS NULL`.
+Scoping to the source file lets several files feed one table without
+one file "deleting" another's rows.
+
+### Empty sheets are rejected by default (0.2.0)
+
+An empty upload usually means an export went wrong, and on the raw
+route it would leave the previous upload's rows looking current; on
+a typed table with `mark_deleted_rows` it would mark everything
+deleted. So a sheet with no rows quarantines the file unless its
+contract sets `allow_empty=True`.
 
 ### RAP Principles: Reproducibility
 

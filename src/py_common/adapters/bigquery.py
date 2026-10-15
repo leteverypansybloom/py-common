@@ -18,6 +18,7 @@ from google.api_core.exceptions import GoogleAPICallError, NotFound
 from google.cloud import bigquery
 
 from py_common.adapters._bq_jobs import (
+    CommitPart,
     commit_parameters,
     commit_script,
     committed,
@@ -32,9 +33,16 @@ from py_common.model import SourceItem
 
 logger = logging.getLogger("py_common.adapters.bigquery")
 
-#: Final-table column set by the warehouse at commit time. Reserved:
-#: source data may not contain it.
+#: Final-table column set by the warehouse at commit time.
 LOADED_AT_COLUMN = "_loaded_at"
+
+#: With mark_deleted_rows: when a row stopped appearing in its file
+#: (NULL while it is still there), and which file it came from.
+DELETED_AT_COLUMN = "_deleted_at"
+SOURCE_FILE_COLUMN = "_source_file"
+
+#: Columns the warehouse manages. Source data may not contain them.
+METADATA_COLUMNS = (LOADED_AT_COLUMN, DELETED_AT_COLUMN, SOURCE_FILE_COLUMN)
 
 #: Legacy SQL type names the API may report, mapped to the names
 #: Parquet loads produce, so a schema diff compares like with like.
@@ -58,6 +66,8 @@ class BigQueryWarehouse:
         key_columns (list[str]): Columns identifying a unique logical
             row, used to upsert into the final table. Empty means
             append-only (no deduplication on reprocess).
+        mark_deleted_rows (bool): Mark rows that a file's newest
+            upload no longer contains (see __init__).
         client (bigquery.Client): BigQuery client.
     """
 
@@ -68,6 +78,7 @@ class BigQueryWarehouse:
         table_id: str,
         audit_table_id: str = "audit",
         key_columns: list[str] | None = None,
+        mark_deleted_rows: bool = False,
     ) -> None:
         """Initialize BigQuery adapter.
 
@@ -79,18 +90,33 @@ class BigQueryWarehouse:
             key_columns (list[str] | None): Contract.key_columns used
                 to MERGE (upsert) into the final table. None or empty
                 means append-only.
+            mark_deleted_rows (bool): For files that are a complete,
+                cumulative list (each upload holds every current row).
+                A row that came from a file and isn't in that file's
+                newest upload gets _deleted_at set to the load time,
+                and a row that comes back has it cleared. Rows are
+                never physically deleted, and only rows from the same
+                source file (_source_file) are affected, so several
+                files can feed one table. Needs key_columns.
 
         Returns:
             None
 
         Raises:
-            None (credential errors raised on first operation)
+            ValueError: mark_deleted_rows without key_columns (rows
+                can't be matched without a key).
         """
+        if mark_deleted_rows and not key_columns:
+            raise ValueError(
+                "mark_deleted_rows needs key_columns: rows are matched "
+                "on their key to tell which ones are gone"
+            )
         self.project_id = project_id
         self.dataset_id = dataset_id
         self.table_id = table_id
         self.audit_table_id = audit_table_id
         self.key_columns = key_columns or []
+        self.mark_deleted_rows = mark_deleted_rows
         self.client = bigquery.Client(project=project_id)
 
     @property
@@ -133,9 +159,9 @@ class BigQueryWarehouse:
 
         Step 4's check makes load() idempotent: a retry after a
         commit whose confirmation was lost (or whose store marker
-        was never written) writes nothing. The same content under a
-        new source version is also skipped: a MERGE of identical
-        rows would change nothing but _loaded_at.
+        was never written) writes nothing. It matches this upload
+        (load key + source version), not the bytes, so a new upload
+        that restores earlier content is applied again.
 
         The staging load (steps 1-2) is not part of the transaction:
         a failure there simply leaves nothing to merge. The staging
@@ -241,13 +267,14 @@ class BigQueryWarehouse:
         # inferred for staging.
         staging_table = self.client.get_table(staging_full_id)
         columns = [field.name for field in staging_table.schema]
-        if LOADED_AT_COLUMN in columns:
+        reserved = [c for c in METADATA_COLUMNS if c in columns]
+        if reserved:
             # A problem with the file, so quarantine (ContractError),
             # not a retry that can never succeed.
             raise ContractError(
-                f"Source data for {key} has a '{LOADED_AT_COLUMN}' "
-                "column; that name is reserved for the load timestamp "
-                "the warehouse sets"
+                f"Source data for {key} has column(s) "
+                f"{', '.join(reserved)}; those names are reserved for "
+                "columns the warehouse sets"
             )
         # Every configured key must be there: merging on fewer keys
         # overwrites unrelated rows, and on none appends duplicates.
@@ -277,21 +304,20 @@ class BigQueryWarehouse:
             )
 
         # Steps 4-5: check, MERGE and audit as one script transaction
-        # (see docstring above). The typed route dedups on content:
-        # destination + checksum.
-        transaction_sql = commit_script(
-            [merge_sql], audit_full_id, dedup_columns=["checksum"]
+        # (see docstring above). "Already loaded" means this upload
+        # (file + version), so a restore of earlier content loads.
+        parts = [CommitPart(final_full_id, [merge_sql], rows)]
+        params = commit_parameters(
+            key, checksum, parts, item, datetime.now(timezone.utc)
         )
-        job_config_txn = bigquery.QueryJobConfig(
-            query_parameters=commit_parameters(
-                key,
-                checksum,
-                rows,
-                self.identity,
-                item,
-                datetime.now(timezone.utc),
+        if self.mark_deleted_rows:
+            params.append(
+                bigquery.ScalarQueryParameter(
+                    "source_file", "STRING", item.identity
+                )
             )
-        )
+        transaction_sql = commit_script(parts, audit_full_id)
+        job_config_txn = bigquery.QueryJobConfig(query_parameters=params)
         job, result = run_query(
             self.client, transaction_sql, job_config_txn, key
         )
@@ -330,7 +356,7 @@ class BigQueryWarehouse:
                         bigquery.SchemaField(f.name, f.field_type)
                         for f in staging_schema
                     ),
-                    bigquery.SchemaField(LOADED_AT_COLUMN, "TIMESTAMP"),
+                    *self._metadata_fields(),
                 ],
             )
             self.client.create_table(table, exists_ok=True)
@@ -339,8 +365,9 @@ class BigQueryWarehouse:
         final_types = {
             f.name: _type(f.field_type)
             for f in final.schema
-            if f.name != LOADED_AT_COLUMN
+            if f.name not in METADATA_COLUMNS
         }
+        present = {f.name for f in final.schema}
         staging_types = {f.name: _type(f.field_type) for f in staging_schema}
         changed = [
             f"{name}: {final_types[name]} -> {kind}"
@@ -359,9 +386,18 @@ class BigQueryWarehouse:
                 f"({'; '.join(problems)})"
             )
 
-        for name, kind in staging_types.items():
-            if name in final_types:
-                continue
+        # Metadata columns first (e.g. mark_deleted_rows turned on for
+        # an existing table), then new source columns.
+        missing = [
+            (f.name, f.field_type)
+            for f in self._metadata_fields()
+            if f.name not in present
+        ] + [
+            (name, kind)
+            for name, kind in staging_types.items()
+            if name not in final_types
+        ]
+        for name, kind in missing:
             logger.warning(
                 "Adding column %s %s to %s for %s",
                 name,
@@ -376,6 +412,19 @@ class BigQueryWarehouse:
                 bigquery.QueryJobConfig(),
                 f"{key} schema update",
             )
+
+    def _metadata_fields(self) -> list[bigquery.SchemaField]:
+        """Columns the warehouse adds to the final table.
+
+        Returns:
+            list[bigquery.SchemaField]: _loaded_at, plus _deleted_at
+                and _source_file with mark_deleted_rows.
+        """
+        fields = [bigquery.SchemaField(LOADED_AT_COLUMN, "TIMESTAMP")]
+        if self.mark_deleted_rows:
+            fields.append(bigquery.SchemaField(DELETED_AT_COLUMN, "TIMESTAMP"))
+            fields.append(bigquery.SchemaField(SOURCE_FILE_COLUMN, "STRING"))
+        return fields
 
     def _check_keys(
         self, staging_full_id: str, key_columns: list[str], key: str
@@ -453,6 +502,20 @@ class BigQueryWarehouse:
             f"T.`{c}` = S.`{c}`" for c in columns if c not in key_columns
         ]
         assignments.append(f"T.`{LOADED_AT_COLUMN}` = @timestamp")
+        deleted = ""
+        if self.mark_deleted_rows:
+            # A row that is back in the file is current again.
+            assignments.append(f"T.`{DELETED_AT_COLUMN}` = NULL")
+            assignments.append(f"T.`{SOURCE_FILE_COLUMN}` = @source_file")
+            # Gone from this file's newest upload: mark it, once.
+            # Only rows from this file, so other files feeding the
+            # same table are untouched.
+            deleted = (
+                f"\nWHEN NOT MATCHED BY SOURCE "
+                f"AND T.`{SOURCE_FILE_COLUMN}` = @source_file "
+                f"AND T.`{DELETED_AT_COLUMN}` IS NULL "
+                f"THEN UPDATE SET T.`{DELETED_AT_COLUMN}` = @timestamp"
+            )
         set_clause = ", ".join(assignments)
 
         return (
@@ -461,24 +524,31 @@ class BigQueryWarehouse:
             f"ON {on_clause}\n"
             f"WHEN MATCHED THEN UPDATE SET {set_clause}\n"
             f"WHEN NOT MATCHED THEN {self._insert_clause(columns)}"
+            f"{deleted}"
         )
 
-    @staticmethod
-    def _insert_clause(columns: list[str]) -> str:
-        """Build the MERGE INSERT clause, adding _loaded_at.
+    def _insert_clause(self, columns: list[str]) -> str:
+        """Build the MERGE INSERT clause, adding the metadata columns.
 
         Args:
             columns (list[str]): Column names in the staging table.
 
         Returns:
-            str: "INSERT (...) VALUES (...)" copying staging columns
-                and setting _loaded_at to @timestamp.
+            str: "INSERT (...) VALUES (...)" copying staging columns,
+                setting _loaded_at to @timestamp and, with
+                mark_deleted_rows, _deleted_at to NULL and
+                _source_file to @source_file.
         """
+        extra_columns = [LOADED_AT_COLUMN]
+        extra_values = ["@timestamp"]
+        if self.mark_deleted_rows:
+            extra_columns += [DELETED_AT_COLUMN, SOURCE_FILE_COLUMN]
+            extra_values += ["NULL", "@source_file"]
         insert_columns = ", ".join(
-            f"`{c}`" for c in [*columns, LOADED_AT_COLUMN]
+            f"`{c}`" for c in [*columns, *extra_columns]
         )
         insert_values = ", ".join(
-            [*(f"S.`{c}`" for c in columns), "@timestamp"]
+            [*(f"S.`{c}`" for c in columns), *extra_values]
         )
         return f"INSERT ({insert_columns}) VALUES ({insert_values})"
 

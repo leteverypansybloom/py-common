@@ -5,7 +5,6 @@ stateful fake client (_fake_bigquery.py), so the warehouse's own
 audit check is what decides, not a Mock's return value.
 """
 
-import hashlib
 from collections.abc import Iterator
 from contextlib import contextmanager
 from io import BytesIO
@@ -258,13 +257,28 @@ class TestDedupKey:
         assert raw.upload(A, "1") == Outcome.SKIPPED
         assert raw.rows == 2
 
-    def test_typed_same_content_new_version_is_skipped(
+    def test_typed_restore_to_earlier_content_is_loaded(
         self, typed: Harness
     ) -> None:
-        """MERGE route: identical bytes change nothing, so skip them."""
+        """gen1 = A, gen2 = B, gen3 = A: the restore loads, so A's
+        values win again (both routes key on the upload, not bytes)."""
+        outcomes = [
+            typed.upload(A, "1"),
+            typed.upload(B, "2"),
+            typed.upload(A, "3"),
+        ]
+
+        assert outcomes == [Outcome.LOADED] * 3
+        assert [r["source_version"] for r in typed.client.audit] == [
+            "1",
+            "2",
+            "3",
+        ]
+
+    def test_typed_same_upload_twice_is_skipped(self, typed: Harness) -> None:
         typed.upload(A, "1")
 
-        assert typed.upload(A, "2") == Outcome.SKIPPED
+        assert typed.upload(A, "1") == Outcome.SKIPPED
         assert len(typed.client.audit) == 1
 
     def test_audit_row_names_destination_and_version(
@@ -274,7 +288,8 @@ class TestDedupKey:
         harness.upload(A, "7")
 
         [row] = harness.client.audit
-        assert row["destination"] == harness.pipeline.warehouse.identity
+        # One table per warehouse here, so the table is the identity.
+        assert row["destination"] == harness.table
         assert row["source_version"] == "7"
         assert row["outcome"] == "LOADED"
 
@@ -290,7 +305,7 @@ class TestCommitScriptSql:
         sql = self._script(harness)
         begin = sql.index("BEGIN TRANSACTION")
         check = sql.index("SELECT COUNT(*) > 0")
-        write = sql.index("IF NOT already_loaded THEN")
+        write = sql.index("IF NOT already_loaded_0 THEN")
         commit = sql.index("COMMIT TRANSACTION")
         assert begin < check < write < commit
 
@@ -299,37 +314,18 @@ class TestCommitScriptSql:
     ) -> None:
         sql = self._script(harness)
         check = sql[sql.index("SELECT COUNT(*) > 0") :].split(");")[0]
-        assert "destination = @destination" in check
+        # Both routes: this table + this upload (file and version),
+        # never the bytes, so a restore of earlier content loads.
+        assert "destination = @destination_0" in check
+        assert "filename = @filename" in check
+        assert "source_version = @source_version" in check
         assert "outcome = 'LOADED'" in check
-        if harness.route == "raw":
-            assert "filename = @filename" in check
-            assert "source_version = @source_version" in check
-            assert "checksum" not in check
-        else:
-            assert "checksum = @checksum" in check
+        assert "checksum" not in check
 
     def test_status_is_selected_after_the_block(
         self, harness: Harness
     ) -> None:
         sql = self._script(harness)
         assert sql.rstrip().endswith(
-            "SELECT IF(already_loaded, 'ALREADY_LOADED', 'LOADED') "
-            "AS status;"
+            "SELECT IF(any_loaded, 'LOADED', 'ALREADY_LOADED') AS status;"
         )
-
-
-def test_legacy_checksum_marker_still_skips_raw_route() -> None:
-    """Markers written before the upgrade keep preventing reloads.
-
-    Old raw-route markers are keyed by checksum and the old audit
-    rows have no destination, so without this the first run after
-    upgrading would insert every file in the landing folder again.
-    """
-    raw = Harness("raw")
-    checksum = hashlib.sha256(A).hexdigest()
-    raw.store.objects[
-        f"audit/{raw.pipeline.warehouse.identity}/{checksum}"
-    ] = b"processed"
-
-    assert raw.upload(A, "1") == Outcome.SKIPPED
-    assert raw.rows == 0

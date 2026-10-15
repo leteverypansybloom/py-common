@@ -98,12 +98,14 @@ CREATE TABLE IF NOT EXISTS \`$PROJECT.$RAW_DATASET.audit\` (
 The audit table is what makes a load happen at most once. Each
 warehouse checks it inside the same transaction that writes the
 rows, and writes nothing if it already has a `LOADED` row for this
-`destination` (the warehouse's identity) and file: the same
-`checksum` for `BigQueryWarehouse`, the same `filename` (load key)
-and `source_version` for `RawJsonWarehouse`. The `audit/` markers in
-the store bucket are only a cache in front of it.
+`destination` table and this upload (the same `filename`, which is
+the load key, and `source_version`). There is one audit row per
+destination table: a `RawJsonWarehouse` writing three raw tables
+records three. The `audit/` markers in the store bucket are only a
+cache in front of it.
 
-**Upgrading from 0.1.x.** Add the two columns (safe to run twice):
+**An existing 0.1.x audit table** needs the two new columns (safe to
+run twice):
 
 ```bash
 bq query --use_legacy_sql=false "
@@ -112,11 +114,9 @@ ALTER TABLE \`$PROJECT.$RAW_DATASET.audit\`
   ADD COLUMN IF NOT EXISTS source_version STRING"
 ```
 
-Rows written before the upgrade have `destination` NULL, and count as
-"not loaded here". So keep the store bucket's existing `audit/`
-markers: they still stop files loaded before the upgrade from being
-loaded again (for the raw JSON route the pipeline checks the old
-checksum-keyed marker as well as the new one).
+Rows written before the upgrade have `destination` NULL and count as
+"not loaded here", so files already loaded by 0.1.x would load again.
+Start 0.2.0 with a fresh dataset and store bucket where you can.
 
 The raw tables themselves are created by `RawJsonWarehouse` on first
 load, partitioned by day of `ingested_at` and clustered on
@@ -596,9 +596,8 @@ FROM loads CROSS JOIN month"
 - **Add a source after its first file has loaded.** The view can't
   name a raw table that doesn't exist yet.
 - **What counts as arrived:** a file that loaded. A quarantined upload
-  doesn't count (its own alert has fired). On the raw JSON route a new
-  upload always loads, even with the same bytes as last month's; on
-  the typed route identical content is skipped and so doesn't count.
+  doesn't count (its own alert has fired). A new upload always
+  loads, even with the same bytes as last month's, so it counts.
 
 The view also gives each source's "last updated" date, which the
 dashboard can show. Dataform can publish it with the cleaned tables,

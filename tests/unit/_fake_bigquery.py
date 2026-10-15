@@ -5,8 +5,9 @@ run unmodified: tables, staging loads, and the commit script. The
 script is not executed as SQL, but its parts that carry the
 idempotency semantics are interpreted from the SQL text itself:
 
-- the audit columns compared in the "already loaded?" check
-  (every `col = @param` inside the EXISTS/COUNT subquery);
+- per destination table, the audit columns compared in its
+  "already loaded?" check (every `col = @param` in the COUNT
+  subquery);
 - each `INSERT INTO target ... FROM staging` / `MERGE INTO target
   USING staging` moves the staged row count into the target;
 - `INSERT INTO audit (cols) VALUES (@params)` records an audit row.
@@ -152,48 +153,60 @@ class FakeBigQueryClient:
         return job
 
     def _run_commit_script(self, sql: str, params: dict[str, Any]) -> str:
-        """Interpret the commit script's idempotency-bearing parts."""
-        check = re.search(
-            r"SELECT COUNT\(\*\) > 0\s+FROM `[^`]+`\s+WHERE (.*?)\);",
+        """Interpret the commit script's idempotency-bearing parts.
+
+        Each destination table has its own block: a SET of
+        already_loaded_<i> from a COUNT(*) check, then an IF holding
+        that table's writes and audit row. Blocks are evaluated in
+        order, as BigQuery would, so a later block sees audit rows an
+        earlier block added.
+        """
+        blocks = re.findall(
+            r"SET (already_loaded_\d+) = \(\s*SELECT COUNT\(\*\) > 0"
+            r"\s+FROM `[^`]+`\s+WHERE (.*?)\);\s*"
+            r"IF NOT \1 THEN(.*?)END IF;",
             sql,
             re.S,
         )
-        assert check, "commit script has no already-loaded check"
-        compared = re.findall(r"(\w+) = @(\w+)", check.group(1))
-        literal = re.findall(r"(\w+) = '(\w+)'", check.group(1))
+        assert blocks, "commit script has no already-loaded check"
+        any_loaded = False
+        for _, condition, body in blocks:
+            compared = re.findall(r"(\w+) = @(\w+)", condition)
+            literal = re.findall(r"(\w+) = '(\w+)'", condition)
 
-        def matches(row: dict[str, Any]) -> bool:
-            return all(
-                row.get(col) == params[param] for col, param in compared
-            ) and all(row.get(col) == value for col, value in literal)
+            def matches(row: dict[str, Any]) -> bool:
+                return all(
+                    row.get(col) == params[param] for col, param in compared
+                ) and all(row.get(col) == value for col, value in literal)
 
-        if any(matches(row) for row in self.audit):
-            return "ALREADY_LOADED"
+            if any(matches(row) for row in self.audit):
+                continue
 
-        for target, staging in re.findall(
-            r"(?:INSERT INTO|MERGE INTO) `([^`]+)`[^;]*?"
-            r"(?:FROM|USING) `([^`]+)`",
-            sql,
-            re.S,
-        ):
-            self.rows[target] = self.rows.get(target, 0) + self.staged.get(
-                staging, 0
+            for target, staging in re.findall(
+                r"(?:INSERT INTO|MERGE INTO) `([^`]+)`[^;]*?"
+                r"(?:FROM|USING) `([^`]+)`",
+                body,
+                re.S,
+            ):
+                self.rows[target] = self.rows.get(target, 0) + self.staged.get(
+                    staging, 0
+                )
+
+            audit_insert = re.search(
+                r"INSERT INTO `[^`]+audit` \(([^)]*)\)\s*VALUES \(([^)]*)\)",
+                body,
             )
-
-        audit_insert = re.search(
-            r"INSERT INTO `[^`]+audit` \(([^)]*)\)\s*VALUES \(([^)]*)\)",
-            sql,
-        )
-        assert audit_insert, "commit script records no audit row"
-        columns = [c.strip() for c in audit_insert.group(1).split(",")]
-        values = [v.strip() for v in audit_insert.group(2).split(",")]
-        self.audit.append(
-            {
-                col: params[val[1:]] if val.startswith("@") else val
-                for col, val in zip(columns, values)
-            }
-        )
-        return "LOADED"
+            assert audit_insert, "commit block records no audit row"
+            columns = [c.strip() for c in audit_insert.group(1).split(",")]
+            values = [v.strip() for v in audit_insert.group(2).split(",")]
+            self.audit.append(
+                {
+                    col: params[val[1:]] if val.startswith("@") else val
+                    for col, val in zip(columns, values)
+                }
+            )
+            any_loaded = True
+        return "LOADED" if any_loaded else "ALREADY_LOADED"
 
 
 def _full_id(table: Any) -> str:

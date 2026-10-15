@@ -22,6 +22,11 @@ What it checks (see docs/SMOKE_TEST.md):
   7. The same bytes as a new version load again (a revert must
      become the latest generation).
   8. No per-load staging table is left behind.
+  Typed route, a later upload of the same file:
+  9. One row changed and one row removed: the change is applied and
+     the removed row is marked deleted (_deleted_at), not dropped.
+  10. The original file uploaded again (a restore): it loads, its
+      values win, and the removed row is current again.
 
 In PowerShell, first confirm these are set:
     $env:GCP_PROJECT_ID
@@ -175,7 +180,11 @@ def main() -> None:
     )
     store = GCSObjectStore(PROJECT, BUCKET)
     typed = BigQueryWarehouse(
-        PROJECT, DATASET, TYPED_TABLE, key_columns=contract.key_columns
+        PROJECT,
+        DATASET,
+        TYPED_TABLE,
+        key_columns=contract.key_columns,
+        mark_deleted_rows=True,
     )
     typed_pipeline = Pipeline(LocalSource(input_dir), store, typed, contract)
 
@@ -292,6 +301,44 @@ def main() -> None:
         if "_stg_" in t.table_id and checksum[:12] in t.table_id
     ]
     check(not leftovers, f"no staging tables left ({leftovers or 'none'})")
+
+    def typed_rows() -> dict:
+        """event_id -> (attendees, deleted?) for this run's rows."""
+        return {
+            row["event_id"]: (row["attendees"], row["_deleted_at"] is not None)
+            for row in client.query(
+                f"SELECT event_id, attendees, _deleted_at "
+                f"FROM `{PROJECT}.{DATASET}.{TYPED_TABLE}` "
+                f"WHERE event_id LIKE 'DEMO-{run_id}%'"
+            ).result()
+        }
+
+    first_id, second_id = f"DEMO-{run_id}-001", f"DEMO-{run_id}-002"
+    original = valid_file.read_bytes()
+
+    print("\n9. Typed route: same file, one row changed, one removed")
+    workbook = load_workbook(valid_file)
+    sheet = workbook["Events"]
+    sheet["C2"] = 15
+    sheet.delete_rows(3)
+    workbook.save(valid_file)
+    results = run(typed_pipeline, "run 9")
+    check(results[0].outcome == Outcome.LOADED, "new version LOADED")
+    rows_now = typed_rows()
+    print(f"  {rows_now}")
+    check(rows_now[first_id] == (15, False), "changed row updated")
+    check(rows_now[second_id][1], "removed row marked deleted")
+
+    print("\n10. Typed route: original file uploaded again (a restore)")
+    valid_file.write_bytes(original)
+    stat = valid_file.stat()
+    os.utime(valid_file, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000))
+    results = run(typed_pipeline, "run 10")
+    check(results[0].outcome == Outcome.LOADED, "restore LOADED")
+    rows_now = typed_rows()
+    print(f"  {rows_now}")
+    check(rows_now[first_id] == (10, False), "original value back")
+    check(rows_now[second_id] == (20, False), "removed row current again")
 
     print("\nSmoke test passed.")
 

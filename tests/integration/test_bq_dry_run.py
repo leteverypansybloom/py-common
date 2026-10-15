@@ -120,6 +120,13 @@ def _statements(dataset: str) -> list[tuple[str, Any]]:
         BigQueryWarehouse(PROJECT, dataset, "events").load(
             "k", CHECKSUM, b"PAR1", 1, ITEM
         )
+        BigQueryWarehouse(
+            PROJECT,
+            dataset,
+            "events",
+            key_columns=["id"],
+            mark_deleted_rows=True,
+        ).load("k", CHECKSUM, b"PAR1", 1, ITEM)
     with patch("py_common.adapters.bigquery_raw.bigquery.Client") as cls:
         cls.return_value = recorder
         RawJsonWarehouse(PROJECT, dataset, {"S": "raw_s"}).load(
@@ -163,6 +170,8 @@ def _create_tables(client: Any, dataset: str, sql: list[str]) -> None:
             schema = [
                 *TYPED_STAGING,
                 bigquery.SchemaField("_loaded_at", "TIMESTAMP"),
+                bigquery.SchemaField("_deleted_at", "TIMESTAMP"),
+                bigquery.SchemaField("_source_file", "STRING"),
             ]
         elif table.startswith("events_stg_"):
             schema = TYPED_STAGING
@@ -186,6 +195,9 @@ def test_every_generated_statement_passes_a_dry_run(
         "commit script": any("BEGIN TRANSACTION" in s for s, _ in statements),
         "key check": any("HAVING" in s for s, _ in statements),
         "schema update": any("ALTER TABLE" in s for s, _ in statements),
+        "deleted-row marking": any(
+            "NOT MATCHED BY SOURCE" in s for s, _ in statements
+        ),
     }
     assert all(kinds.values()), kinds
     _create_tables(client, dataset, [s for s, _ in statements])

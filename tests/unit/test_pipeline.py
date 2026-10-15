@@ -496,9 +496,11 @@ class TestPipelineStorageKeysAreVersioned:
             contract: Contract fixture.
         """
         old, new = _workbook([("a", 1)]), _workbook([("a", 2)])
-        item = SourceItem("events.xlsx", "ID1", "v1", 10)
-        self._pipeline(old, store, contract).process(item)
-        self._pipeline(new, store, contract).process(item)
+        # An edited file is a new version at the source.
+        v1 = SourceItem("events.xlsx", "ID1", "v1", 10)
+        v2 = SourceItem("events.xlsx", "ID1", "v2", 10)
+        self._pipeline(old, store, contract).process(v1)
+        self._pipeline(new, store, contract).process(v2)
 
         assert store.objects[f"raw/ID1/{digest(old)}/events.xlsx"] == old
         assert store.objects[f"raw/ID1/{digest(new)}/events.xlsx"] == new

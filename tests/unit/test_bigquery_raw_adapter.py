@@ -438,14 +438,18 @@ class TestRawJsonWarehouseLoad:
         params = {p.name for p in config.query_parameters}
         assert "ingested_at) SELECT" in sql
         assert "@timestamp FROM" in sql
+        # Shared parameters, plus a destination and row count for
+        # each of the two mapped tables (one audit row per table).
         assert params == {
             "filename",
             "checksum",
-            "destination",
             "source_version",
-            "row_count",
             "outcome",
             "timestamp",
+            "destination_0",
+            "row_count_0",
+            "destination_1",
+            "row_count_1",
         }
 
     def test_failed_transaction_raises_service_error(

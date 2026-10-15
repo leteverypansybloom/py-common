@@ -253,9 +253,7 @@ class Pipeline:
             if outcome in (Outcome.LOADED, Outcome.SKIPPED):
                 # The warehouse has the file either way: record that
                 # in the marker cache before anything else can fail.
-                self.store.put(
-                    self._loaded_marker_key(item, checksum), b"processed"
-                )
+                self.store.put(self._loaded_marker_key(item), b"processed")
             if outcome == Outcome.SKIPPED:
                 rows_processed = 0
 
@@ -318,67 +316,41 @@ class Pipeline:
         Raises:
             ServiceError: The marker could not be read.
         """
-        keys = [self._loaded_marker_key(item, checksum)]
-        if self.output_format == "raw_json":
-            # Raw-route markers written before identity + version
-            # keys (0.1.x) are keyed by checksum, and the audit rows
-            # from then have no destination, so only this marker
-            # stops those files being inserted again after an
-            # upgrade. See docs/RAW_TABLE_LAYOUT.md.
-            keys.append(self._content_marker_key(checksum))
-        for key in keys:
-            if self.store.get(key):
-                logger.info(
-                    "Skipping %s: already loaded (marker %s)",
-                    item.name,
-                    key,
-                    extra=_fields(),
-                )
-                return True
+        key = self._loaded_marker_key(item)
+        if self.store.get(key):
+            logger.info(
+                "Skipping %s: already loaded (marker %s)",
+                item.name,
+                key,
+                extra=_fields(),
+            )
+            return True
         return False
 
-    def _loaded_marker_key(self, item: SourceItem, checksum: str) -> str:
-        """Key of the marker saying this file was loaded here.
+    def _loaded_marker_key(self, item: SourceItem) -> str:
+        """Key of the marker saying this upload was loaded here.
 
         Scoped to the destination (warehouse identity): one workbook
         can feed several pipelines, one per worksheet or table, and
         the first to load it must not make the others skip it.
 
-        Within a destination it follows the warehouse's own dedup
-        rule. Typed (Parquet) route: the content checksum, as a
-        MERGE of identical rows changes nothing. Raw JSON route: the
-        source identity and version, because an insert-only table
-        must take every new generation, even one that repeats
-        earlier content (a revert), or "latest generation" goes
-        stale.
+        Within a destination it follows the warehouses' own dedup
+        rule: the upload (source identity and version), not its
+        bytes. Every new upload loads, even one that repeats earlier
+        content: a restore must win again on the typed route, and be
+        the latest generation on the raw route.
 
         Args:
             item: SourceItem being processed.
-            checksum: SHA-256 of the source bytes.
 
         Returns:
-            "audit/{warehouse}/{checksum}" (typed) or
-            "audit/{warehouse}/versions/{sha256(identity)}/{version}"
-            (raw JSON).
+            "audit/{warehouse}/versions/{sha256(identity)}/{version}".
         """
-        if self.output_format == "raw_json":
-            identity = digest(item.identity.encode())
-            return (
-                f"audit/{self.warehouse.identity}/versions/"
-                f"{identity}/{item.version}"
-            )
-        return self._content_marker_key(checksum)
-
-    def _content_marker_key(self, checksum: str) -> str:
-        """Checksum-keyed marker: the typed route's, and 0.1.x's.
-
-        Args:
-            checksum: SHA-256 of the source bytes.
-
-        Returns:
-            "audit/{warehouse identity}/{checksum}".
-        """
-        return f"audit/{self.warehouse.identity}/{checksum}"
+        identity = digest(item.identity.encode())
+        return (
+            f"audit/{self.warehouse.identity}/versions/"
+            f"{identity}/{item.version}"
+        )
 
     @staticmethod
     def _version_key(item: SourceItem, checksum: str) -> str:

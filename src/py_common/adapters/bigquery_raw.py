@@ -27,6 +27,7 @@ from google.api_core.exceptions import GoogleAPICallError, NotFound
 from google.cloud import bigquery
 
 from py_common.adapters._bq_jobs import (
+    CommitPart,
     commit_parameters,
     commit_script,
     committed,
@@ -151,11 +152,12 @@ class RawJsonWarehouse:
            load's own ({table}_stg_{checksum[:12]}_{random},
            expiring in a day; dropped afterwards)
         4. Verify the staged row count matches `rows`
-        5. In one script transaction: if the audit table already has
-           a LOADED row for this destination, load key and source
-           version, do nothing; otherwise insert every sheet's rows
-           into its raw table and record the audit entry. Commit, or
-           roll back everything.
+        5. In one script transaction, for each raw table: if the
+           audit table already has a LOADED row for that table, this
+           load key and source version, skip it; otherwise insert the
+           sheet's rows and record the table's audit row. Commit, or
+           roll back everything. Checking per table means adding a
+           table to this warehouse later loads only the new table.
 
         The raw route dedups on the source file's identity and
         version (the pipeline's load key starts with the identity),
@@ -173,8 +175,8 @@ class RawJsonWarehouse:
                 part of the dedup key and the audit row.
 
         Returns:
-            bool: True if the rows were written, False if this file
-                version was already loaded here.
+            bool: True if any table was written, False if every
+                table already had this file version.
 
         Raises:
             ValueError: A line is not valid JSON or names a sheet
@@ -245,7 +247,7 @@ class RawJsonWarehouse:
         Returns:
             bool: As load().
         """
-        staged = 0
+        staged: dict[str, int] = {}
         for sheet, lines in by_sheet.items():
             table_id = self.tables[sheet]
             self._ensure_raw_table(table_id)
@@ -264,27 +266,24 @@ class RawJsonWarehouse:
                 job_config=job_config,
             )
             wait_for_load(load_job, key)
-            staged += load_job.output_rows or 0
+            staged[sheet] = load_job.output_rows or 0
             logger.debug("Staged %s for %s", sheet, key)
 
-        if staged != rows:
+        total = sum(staged.values())
+        if total != rows:
             raise ValueError(
-                f"Row count mismatch: expected {rows}, got {staged}"
+                f"Row count mismatch: expected {rows}, got {total}"
             )
 
+        parts = self._commit_parts(staging, staged)
         job_config_txn = bigquery.QueryJobConfig(
             query_parameters=commit_parameters(
-                key,
-                checksum,
-                rows,
-                self.identity,
-                item,
-                datetime.now(timezone.utc),
+                key, checksum, parts, item, datetime.now(timezone.utc)
             )
         )
         job, result = run_query(
             self.client,
-            self._transaction_sql(staging),
+            commit_script(parts, self._full_id(self.audit_table_id)),
             job_config_txn,
             key,
         )
@@ -347,31 +346,42 @@ class RawJsonWarehouse:
             table.clustering_fields = CLUSTERING_FIELDS
             self.client.create_table(table, exists_ok=True)
 
-    def _transaction_sql(self, staging: dict[str, str]) -> str:
-        """Build the script inserting every sheet plus the audit row.
+    def _commit_parts(
+        self, staging: dict[str, str], staged: dict[str, int]
+    ) -> list[CommitPart]:
+        """One commit part per raw table: its insert and row count.
+
+        Every mapped table gets a part, so each gets its own "already
+        loaded?" check and audit row (see _bq_jobs.commit_script()):
+        adding a table to this warehouse later loads only the new
+        table, and a sheet with no rows (allowed by its contract) is
+        still recorded, with row_count 0 and no insert.
 
         Args:
             staging (dict[str, str]): Sheet -> its staging table, for
-                every sheet with staged rows, in order.
+                every sheet with rows.
+            staged (dict[str, int]): Sheet -> rows staged.
 
         Returns:
-            str: A BigQuery script with one transaction (see
-                _bq_jobs.commit_script()).
+            list[CommitPart]: In mapping order.
         """
-        inserts = [
-            f"INSERT INTO `{self._full_id(self.tables[sheet])}` "
-            f"({_COLUMNS}, ingested_at) "
-            f"SELECT {_COLUMNS}, @timestamp "
-            f"FROM `{staging_full_id}`"
-            for sheet, staging_full_id in staging.items()
+        return [
+            CommitPart(
+                destination=self._full_id(table_id),
+                writes=(
+                    [
+                        f"INSERT INTO `{self._full_id(table_id)}` "
+                        f"({_COLUMNS}, ingested_at) "
+                        f"SELECT {_COLUMNS}, @timestamp "
+                        f"FROM `{staging[sheet]}`"
+                    ]
+                    if sheet in staging
+                    else []
+                ),
+                rows=staged.get(sheet, 0),
+            )
+            for sheet, table_id in self.tables.items()
         ]
-        # Identity (in the load key) + version, not checksum: see
-        # load().
-        return commit_script(
-            inserts,
-            self._full_id(self.audit_table_id),
-            dedup_columns=["filename", "source_version"],
-        )
 
     def _full_id(self, table_id: str) -> str:
         """Fully-qualify a table name in this dataset.

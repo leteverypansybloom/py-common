@@ -76,6 +76,12 @@ class Worksheet:
             load as empty, and row-level problems (wrong type,
             missing required value, duplicate) are warnings too, left
             for the cleaning layer to deal with row by row.
+        allow_empty: Whether a sheet with headings but no data rows
+            is valid. False (the default) rejects the file whatever
+            on_mismatch says: an empty upload usually means an export
+            went wrong, and loading it would leave the previous
+            upload's rows looking current. Set True for a sheet where
+            "nothing this time" is genuinely possible.
     """
 
     name: str
@@ -84,6 +90,7 @@ class Worksheet:
     column_selection: Literal["listed", "all_except"] = "listed"
     excluded: list[str] = field(default_factory=list)
     on_mismatch: Literal["quarantine", "warn"] = "quarantine"
+    allow_empty: bool = False
 
     def __post_init__(self) -> None:
         """Check settings that would otherwise fail confusingly later.
@@ -326,6 +333,15 @@ class Contract:
                     self._validate_worksheet(
                         names, rows, ws_def, source_name, warnings, keys
                     )
+                    # After the column checks, so a wrong header_row or
+                    # missing columns are reported as such first.
+                    if not rows and not ws_def.allow_empty:
+                        raise ContractError(
+                            f"{source_name} [{ws_def.name}]: no data rows "
+                            "below the headings. If an empty sheet is "
+                            "valid for this source, set allow_empty=True "
+                            "on its Worksheet."
+                        )
                 sheets[ws_def.name] = _select(names, rows, ws_def)
             return sheets
         finally:

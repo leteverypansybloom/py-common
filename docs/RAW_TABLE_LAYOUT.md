@@ -56,11 +56,17 @@ not by its content:
   the upload that was just withdrawn.
 - Two different files with identical bytes both load, each under its
   own `source_file`.
+- Each raw table is tracked separately. Adding a sheet and table to
+  an existing pipeline loads the new table from the next run, without
+  loading the existing tables again.
 
-Files loaded before py-common 0.2.0 were deduplicated by content
-alone, so a revert to content loaded before the upgrade is still
-skipped. To load it, delete its `audit/<warehouse>/<checksum>` marker
-in the store bucket and run again.
+**Empty sheets.** A sheet with headings but no rows is rejected (the
+file is quarantined) unless its contract sets `allow_empty=True`.
+Without this, an upload that came out empty would insert nothing,
+and the "latest upload" query below would keep returning the
+previous upload's rows. Only set `allow_empty=True` for a sheet where
+"nothing this time" is a real answer, and bear in mind the query
+below still returns the last upload that had rows.
 
 ## Payload keys
 
@@ -84,7 +90,14 @@ Keys are column names as py-common reads them from the heading row
   all.
 - **Every loaded column is present on every row.** An empty cell is
   JSON `null`, not a missing key. In `"warn"` mode a listed column
-  missing from the sheet is `null` on every row.
+  missing from the sheet is `null` on every row. So if a column is
+  renamed in the workbook, the old key is still there, `null` on
+  every row, and the new name isn't loaded at all (with
+  `column_selection="listed"`). The payload alone can't tell this
+  from a column that is genuinely empty: a Dataform assertion that
+  fails when a column you rely on is `null` on every row of the
+  latest upload catches it. The `Contract warning` log line (and the
+  header/data warning alert) names the missing column.
 - **Empty rows are skipped,** so a gap in `row_number` means blank rows
   in the sheet.
 

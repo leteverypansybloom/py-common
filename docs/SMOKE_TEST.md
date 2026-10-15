@@ -16,9 +16,11 @@ Run it only against development GCS and BigQuery resources.
 2. **Environment.** `GCP_PROJECT_ID`, `GCS_RAW_BUCKET` (the store
    bucket) and `BQ_DATASET`, and credentials
    (`gcloud auth application-default login`) that can write to both.
-3. **Old smoke-test tables.** `events_final` can stay. If an earlier
-   run left `events_final_staging`, delete it: 0.2.0 stages into a
-   new `events_final_stg_...` table per load and drops it afterwards.
+3. **Start with a fresh dataset** (or delete `events_final`,
+   `smoke_events_raw`, any `events_final_staging` and the `audit`
+   rows from earlier runs). 0.2.0 adds `_deleted_at` and
+   `_source_file` to `events_final` itself, stages each load into its
+   own `events_final_stg_...` table and drops it afterwards.
 4. **Optional, before deploying anything:** dry-run the SQL the
    adapters generate against the same project:
 
@@ -81,6 +83,8 @@ that invalid input is caught and isolated before it reaches BigQuery.
 | 6. Markers deleted, rerun | `skipped 0`, still two raw rows | The same generation is never inserted twice. |
 | 7. Same bytes, new version | `loaded 2`, four raw rows over two `source_generation`s | A revert becomes the latest generation instead of being skipped. |
 | 8. Staging clean-up | No `_stg_` table left for this file | Per-load staging tables are dropped after the load. |
+| 9. Same file, one row changed, one removed (typed) | `loaded 1`; the changed row has the new value; the removed row has `_deleted_at` set | Cumulative files update rows, and rows that disappear are marked deleted rather than left looking current. |
+| 10. Original file again (typed) | `loaded 2`; the original value is back; the removed row's `_deleted_at` is cleared | Restoring an earlier upload applies it again instead of being skipped. |
 
 ## The journey through the system
 
@@ -260,8 +264,12 @@ Excel -> raw GCS -> processed Parquet in GCS -> events_final_stg_... -> events_f
                                                            -> audit metadata
 ```
 
-The smoke-test table has four columns because the source workbook contains
-`event_id`, `employer_id` and `attendees`, and BigQuery adds `_loaded_at` when
-it commits the load. A source column called `_loaded_at` is refused.
+The smoke-test table has six columns: the workbook's `event_id`,
+`employer_id` and `attendees`, plus three the warehouse sets. `_loaded_at`
+is when the row was last loaded; `_source_file` is the file it came from;
+`_deleted_at` is NULL while the row is in that file's newest upload, and
+set when a later upload no longer has it (`mark_deleted_rows=True`, which
+the smoke test turns on). Current rows are `WHERE _deleted_at IS NULL`.
+Source columns with those three names are refused.
 If a real workbook has additional columns, they should also be designed into
 the BigQuery destination table.

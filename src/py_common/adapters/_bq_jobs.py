@@ -17,6 +17,7 @@ find out what really happened before anything is reported.
 
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -166,66 +167,101 @@ AUDIT_COLUMNS = (
 )
 
 
-def commit_script(
-    writes: list[str], audit_full_id: str, dedup_columns: list[str]
-) -> str:
+@dataclass(frozen=True)
+class CommitPart:
+    """What one destination table gets in a commit.
+
+    Attributes:
+        destination: Fully-qualified table ID; the audit row's
+            `destination` and the scope of its "already loaded?"
+            check.
+        writes: DML statements (no trailing semicolon) writing this
+            table's rows, e.g. a MERGE or INSERT ... SELECT.
+        rows: Rows this table gets, for its audit row.
+    """
+
+    destination: str
+    writes: list[str]
+    rows: int
+
+
+#: Audit columns besides destination that identify "this upload":
+#: the load key (which starts with the source identity) and the
+#: source version. Not the checksum: a new upload whose bytes repeat
+#: an earlier one (a restore) must load again.
+DEDUP_COLUMNS = ("filename", "source_version")
+
+
+def commit_script(parts: list[CommitPart], audit_full_id: str) -> str:
     """Build the idempotent commit script shared by both warehouses.
 
-    Inside one transaction: check the audit table for a LOADED row
-    for this destination matching `dedup_columns`; if there is none,
-    run `writes` and record the audit row. The check is inside the
-    transaction so the BigQuery audit table, committed atomically
-    with the data, is what decides, whatever the store marker says.
+    One transaction. For each destination table: check the audit
+    table for a LOADED row for this table and this upload; if there
+    is none, run the table's writes and record its audit row. The
+    check is inside the transaction so the BigQuery audit table,
+    committed atomically with the data, is what decides, whatever
+    the store marker says. Checking per table means a table added to
+    a warehouse later loads without reloading the others.
 
     The status is selected after the transaction block, so it is the
     script's last statement and therefore the job's result.
 
     Args:
-        writes: DML statements (no trailing semicolon) writing the
-            data, e.g. a MERGE or INSERT ... SELECT.
+        parts: One per destination table, in order.
         audit_full_id: Fully-qualified audit table ID.
-        dedup_columns: Audit columns, besides destination, that
-            identify "this file already loaded here". Each is
-            compared with the query parameter of the same name.
 
     Returns:
         A BigQuery script whose result is one row, one column
-        `status`: 'LOADED' or 'ALREADY_LOADED'.
+        `status`: 'LOADED' if any table was written, otherwise
+        'ALREADY_LOADED'.
     """
-    match = "".join(f"\n      AND {c} = @{c}" for c in dedup_columns)
-    statements = "".join(f"    {w};\n" for w in writes)
+    match = "".join(f"\n      AND {c} = @{c}" for c in DEDUP_COLUMNS)
     columns = ", ".join(AUDIT_COLUMNS)
-    values = ", ".join(f"@{c}" for c in AUDIT_COLUMNS)
+    declares = "".join(
+        f"DECLARE already_loaded_{i} BOOL DEFAULT FALSE;\n"
+        for i in range(len(parts))
+    )
+    blocks = []
+    for i, part in enumerate(parts):
+        values = ", ".join(
+            f"@{c}_{i}" if c in ("destination", "row_count") else f"@{c}"
+            for c in AUDIT_COLUMNS
+        )
+        statements = "".join(f"    {w};\n" for w in part.writes)
+        blocks.append(
+            f"  SET already_loaded_{i} = (\n"
+            "    SELECT COUNT(*) > 0\n"
+            f"    FROM `{audit_full_id}`\n"
+            f"    WHERE destination = @destination_{i}"
+            f"{match}\n"
+            "      AND outcome = 'LOADED'\n"
+            "  );\n"
+            f"  IF NOT already_loaded_{i} THEN\n"
+            f"{statements}"
+            f"    INSERT INTO `{audit_full_id}` ({columns}) "
+            f"VALUES ({values});\n"
+            "    SET any_loaded = TRUE;\n"
+            "  END IF;\n"
+        )
     return (
-        "DECLARE already_loaded BOOL DEFAULT FALSE;\n"
+        f"{declares}"
+        "DECLARE any_loaded BOOL DEFAULT FALSE;\n"
         "BEGIN\n"
         "  BEGIN TRANSACTION;\n"
-        "  SET already_loaded = (\n"
-        "    SELECT COUNT(*) > 0\n"
-        f"    FROM `{audit_full_id}`\n"
-        "    WHERE destination = @destination"
-        f"{match}\n"
-        "      AND outcome = 'LOADED'\n"
-        "  );\n"
-        "  IF NOT already_loaded THEN\n"
-        f"{statements}"
-        f"    INSERT INTO `{audit_full_id}` ({columns}) "
-        f"VALUES ({values});\n"
-        "  END IF;\n"
+        f"{''.join(blocks)}"
         "  COMMIT TRANSACTION;\n"
         "EXCEPTION WHEN ERROR THEN\n"
         "  ROLLBACK TRANSACTION;\n"
         "  RAISE USING MESSAGE = @@error.message;\n"
         "END;\n"
-        "SELECT IF(already_loaded, 'ALREADY_LOADED', 'LOADED') AS status;"
+        "SELECT IF(any_loaded, 'LOADED', 'ALREADY_LOADED') AS status;"
     )
 
 
 def commit_parameters(
     key: str,
     checksum: str,
-    rows: int,
-    destination: str,
+    parts: list[CommitPart],
     item: SourceItem,
     timestamp: datetime,
 ) -> list[bigquery.ScalarQueryParameter]:
@@ -234,26 +270,36 @@ def commit_parameters(
     Args:
         key: Load key, recorded as the audit filename.
         checksum: SHA-256 of the source file.
-        rows: Row count loaded.
-        destination: The warehouse's identity.
+        parts: The same parts given to commit_script().
         item: Source file loaded (for its version).
         timestamp: Commit timestamp (audit timestamp, _loaded_at /
             ingested_at).
 
     Returns:
-        One parameter per AUDIT_COLUMNS entry.
+        The shared parameters, plus destination_<i> and row_count_<i>
+        for each part.
     """
-    return [
+    params = [
         bigquery.ScalarQueryParameter("filename", "STRING", key),
         bigquery.ScalarQueryParameter("checksum", "STRING", checksum),
-        bigquery.ScalarQueryParameter("destination", "STRING", destination),
         bigquery.ScalarQueryParameter(
             "source_version", "STRING", item.version
         ),
-        bigquery.ScalarQueryParameter("row_count", "INTEGER", rows),
         bigquery.ScalarQueryParameter("outcome", "STRING", "LOADED"),
         bigquery.ScalarQueryParameter("timestamp", "TIMESTAMP", timestamp),
     ]
+    for i, part in enumerate(parts):
+        params.append(
+            bigquery.ScalarQueryParameter(
+                f"destination_{i}", "STRING", part.destination
+            )
+        )
+        params.append(
+            bigquery.ScalarQueryParameter(
+                f"row_count_{i}", "INTEGER", part.rows
+            )
+        )
+    return params
 
 
 def committed(job: Any, rows: list[Any], what: str) -> bool:

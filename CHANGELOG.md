@@ -19,16 +19,27 @@ loaded into BigQuery twice, whatever fails and wherever it fails.
   shows the file already loaded. Custom warehouses must add the
   parameter, return a bool, and should make the same in-transaction
   check (see `ports.Warehouse`).
-- **Audit table schema.** Two new columns, `destination STRING` and
-  `source_version STRING`. Run the `ALTER TABLE ... ADD COLUMN IF NOT
-  EXISTS` in `docs/GCP_SETUP.md` (section 2) before deploying.
-  Earlier rows have `destination` NULL and count as "not loaded here";
-  keep the store bucket's `audit/` markers, which still prevent
-  reloads of files loaded before the upgrade.
-- **Raw JSON dedup is by source identity + version, not content.** A
-  new generation always loads, even if its bytes repeat an earlier
-  one (so a revert becomes the latest). The raw route's store marker
-  and `processed/` copy keys include the version.
+- **Audit table schema.** Two new columns, `destination STRING` (the
+  destination table) and `source_version STRING`. Create the table as
+  in `docs/GCP_SETUP.md` (section 2), or add the columns to an
+  existing one with the `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`
+  given there. Rows from 0.1.x have `destination` NULL and count as
+  "not loaded here", so start with a fresh dataset where possible.
+- **"Already loaded" means this upload, on both routes.** A file is
+  identified by its source identity and version (e.g. GCS
+  generation), not its bytes: every new upload loads, even if it
+  repeats an earlier one, so a restore (A, then B, then A again)
+  puts A back. The same upload never loads twice. Store markers are
+  `audit/{warehouse}/versions/{sha256(identity)}/{version}`; raw-route
+  `processed/` copies include the version.
+- **One audit row per destination table.** `RawJsonWarehouse` checks
+  and records each raw table separately, so adding a table to its
+  mapping loads only that table. A mapped sheet with no rows still
+  gets an audit row (`row_count` 0).
+- **Empty worksheets are rejected** (quarantined) unless the
+  `Worksheet` sets `allow_empty=True`, whatever `on_mismatch` says.
+- **`_deleted_at` and `_source_file` are reserved** typed-table
+  column names, like `_loaded_at`.
 - **Warehouse `ServiceError` is `FAILED` (retried), not
   `QUARANTINED`.** A `ValidationError` from the warehouse is
   quarantined.
@@ -57,6 +68,11 @@ loaded into BigQuery twice, whatever fails and wherever it fails.
 - `py_common.logging.configure_json_logging()`: Cloud Logging JSON
   with `run_id`, `warehouse`, `item_identity`, `version`, `checksum`
   and `bq_job_id` fields, and one summary line per file.
+- `BigQueryWarehouse(mark_deleted_rows=True)`: for cumulative files,
+  rows missing from a file's newest upload get `_deleted_at` set
+  (and cleared if they come back); only rows from the same file
+  (`_source_file`) are affected. Rows are never physically deleted.
+- `Worksheet(allow_empty=True)` for sheets where no rows is valid.
 - `GCSObjectStore(lease_seconds=3600)`: the run lock is a lease that
   a later run takes over, atomically, once it has expired.
 - `BigQueryWarehouse` creates a missing final table and adds new
@@ -90,12 +106,14 @@ loaded into BigQuery twice, whatever fails and wherever it fails.
   starts a new one, and the lock lease isn't renewed or fenced. The
   in-transaction audit check stops ordinary retries loading twice,
   but two commits racing each other could both pass it.
-- **Typed route: restoring earlier content (A → B → A) is skipped**,
-  and the MERGE never deletes rows removed from the source.
-- **Raw route: an empty replacement inserts nothing**, so "latest
-  generation" still shows the previous upload's rows.
-- **Changing a `RawJsonWarehouse` table mapping** changes its
-  identity, so files already loaded load again.
+- **Uploads are applied in the order they're processed.** If an
+  older version of a file is processed after a newer one, its values
+  win on the typed route.
+- **A renamed column in a `"warn"` sheet** loads as its old name with
+  `null` on every row; Dataform can't tell it from an empty column.
+  The warning is logged and kept in the audit JSON, not in BigQuery.
+- **Re-pointing a raw table at a different sheet** (swapping the
+  mapping) doesn't reload files that table already had.
 - Only each landing file's current version is loaded; there is no
   replay command.
 
