@@ -138,26 +138,32 @@ class JsonFormatter(logging.Formatter):
 
 
 def configure_json_logging(
-    level: int = logging.INFO, stream: TextIO | None = None
+    level: int = logging.INFO,
+    stream: TextIO | None = None,
+    replace: bool = True,
 ) -> logging.Handler:
     """Send all logging to `stream` as Cloud-Logging-compatible JSON.
 
-    Call once at start-up (e.g. in a Cloud Run job's main). Replaces
-    any handler an earlier call installed, so calling it twice
-    doesn't duplicate lines.
+    Call once at start-up (e.g. in a Cloud Run job's main). By
+    default the root logger's other handlers (such as one added by
+    logging.basicConfig()) are removed, so each line is written once,
+    as JSON. Calling it twice never duplicates lines.
 
     Args:
         level: Root logger level. Defaults to INFO, so BigQuery job
             IDs and per-file summaries are kept.
         stream: Where to write. Defaults to stdout, which Cloud Run
             forwards to Cloud Logging.
+        replace: Remove the root logger's existing handlers first.
+            Pass False to keep them; only an earlier JSON handler of
+            ours is replaced then.
 
     Returns:
         The handler installed on the root logger.
     """
     root = logging.getLogger()
     for existing in list(root.handlers):
-        if isinstance(existing.formatter, JsonFormatter):
+        if replace or isinstance(existing.formatter, JsonFormatter):
             root.removeHandler(existing)
     handler = logging.StreamHandler(stream or sys.stdout)
     handler.setFormatter(JsonFormatter())

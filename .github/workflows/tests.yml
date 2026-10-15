@@ -48,6 +48,9 @@ jobs:
         run: |
           # --skip-editable: py-common itself isn't on PyPI.
           pip-audit --skip-editable
+          # The pinned set deployments install (Dockerfile). Fully
+          # pinned, so it is audited as listed, without resolving.
+          pip-audit -r constraints.txt --no-deps --disable-pip
 
       - name: Run tests
         run: |

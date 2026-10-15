@@ -379,19 +379,29 @@ class TestBigQueryWarehouseLoad:
         Raises:
             AssertionError: If ServiceError not raised
         """
-        mock_bq_client.get_table.return_value = _staging_table("event_id")
+        # The final table already has _loaded_at, so no ALTER TABLE
+        # runs and the only query is the commit transaction.
+        staging = _staging_table("event_id")
+        final = _staging_table("event_id", "_loaded_at")
+        mock_bq_client.get_table.side_effect = lambda table_id: (
+            staging if "_stg_" in table_id else final
+        )
         mock_load_job = Mock(output_rows=1)
         mock_load_job.result.return_value = None
         mock_bq_client.load_table_from_file.return_value = mock_load_job
 
-        mock_txn_job = Mock()
+        mock_txn_job = Mock(job_id="txn-1")
         mock_txn_job.result.side_effect = Exception("audit insert failed")
         mock_txn_job.state = "DONE"
-        mock_txn_job.error_result = {"message": "audit insert failed"}
+        mock_txn_job.error_result = {
+            "reason": "invalidQuery",
+            "message": "audit insert failed",
+        }
 
         mock_bq_client.query.side_effect = [mock_txn_job]
 
-        with pytest.raises(ServiceError, match="audit insert failed"):
+        # Reason and job ID, not BigQuery's message (it can quote data).
+        with pytest.raises(ServiceError, match="txn-1.*invalidQuery"):
             warehouse.load(
                 key="test.xlsx",
                 checksum="abc123",
@@ -399,6 +409,8 @@ class TestBigQueryWarehouseLoad:
                 rows=1,
                 item=ITEM,
             )
+        [call] = mock_bq_client.query.call_args_list
+        assert "BEGIN TRANSACTION" in call.args[0]
 
 
 class TestBigQueryWarehouseMergeSql:

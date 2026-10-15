@@ -148,28 +148,26 @@ exact; where nothing exists, that's stated plainly rather than implied.
   for a live SharePoint library with a real history it means listing
   the whole library on every run once `SharePointSource` exists.
 - Re-processing is prevented differently: not by a source-side cursor,
-  but by a **content hash** check after download. `Pipeline.process()`
-  (`src/py_common/pipeline.py`) computes a SHA-256 of the
-  downloaded bytes and skips the file if that exact checksum was
-  already recorded as `LOADED` into the same destination
-  (`store.get(f"audit/{warehouse.identity}/{checksum}")`; the raw
-  JSON route keys this marker on the file's identity and version
-  instead). The marker is a cache: each warehouse makes the same
-  check against its BigQuery `audit` table inside the commit
-  transaction, so a lost marker can't cause a second load.
-  This is a genuinely good property — a file that is re-saved with
-  identical contents is correctly skipped, which is stricter than
-  tools that key off "last modified" alone — but it is not a
-  *watermark*: the pipeline still has to list and often download every
-  file, every run, to find that out.
+  but by recording each **upload** once it has loaded. An upload is
+  the file's identity plus its version (the GCS generation,
+  SharePoint eTag or local modification time and size).
+  `Pipeline.process()` (`src/py_common/pipeline.py`) checks a marker
+  for the upload before downloading anything
+  (`audit/{warehouse identity}/versions/{sha256(identity)}/{version}`),
+  and each warehouse makes the same check against its BigQuery
+  `audit` table inside the commit transaction, which is the
+  authority: a lost marker can't cause a second load. A new upload
+  always loads, even if its bytes repeat an earlier one (a restore).
+  It is not a *watermark*: the pipeline still lists every file on
+  every run, though it only downloads uploads it hasn't loaded.
 - Version safety at download time: `SourceItem.version`
   (`src/py_common/model.py`) is compared between discovery and
   download; if a file changed in between, `download()` raises
   `VersionMismatch` (`adapters/local.py`) and the pipeline records
   the file as `SKIPPED` rather than processing a half-written file
   (`pipeline.py`).
-- The **landing zone** is real: every file that passes the checksum
-  check is written unchanged to `raw/{identity}/{checksum}/{name}` — a
+- The **landing zone** is real: every new upload is written
+  unchanged to `raw/{identity}/{checksum}/{name}` — a
   valid file just after validation (`Pipeline._store_raw()`), and a
   file that fails validation to both `raw/` and `quarantine/` under the
   same key
@@ -237,10 +235,10 @@ exact; where nothing exists, that's stated plainly rather than implied.
   worksheet (`Contract` refuses anything else when it is built), and
   `Contract.validate()` checks the key columns together are unique
   per row, as well as each column's own `unique` flag.
-- **No minimum row count check.** A workbook with a valid header row
-  and zero data rows validates successfully and reports
-  `rows_processed = 0` — the pipeline has no way to notice that a daily
-  export came back empty.
+- **Empty sheets are rejected; there is no other row-count check.**
+  A sheet with headings but no data rows quarantines the file unless
+  its `Worksheet` sets `allow_empty=True`. Nothing checks for "far
+  fewer rows than last month".
 - **No data profiling** step anywhere — profiling (understanding a new
   source's volumes, nulls, duplicates before writing its contract) is
   a manual, pre-project activity today, not a `py-common` feature.
@@ -270,8 +268,8 @@ exact; where nothing exists, that's stated plainly rather than implied.
   count, merge on key columns, record audit,
   commit-or-roll-back-everything.
 - `BigQueryWarehouse.load()` (`adapters/bigquery.py`) delivers that.
-  It loads Parquet into a truncated staging table and verifies the
-  row count, then runs the final-table write and the audit `INSERT`
+  It loads Parquet into a staging table of its own (one per load,
+  dropped afterwards) and verifies the row count, then runs the final-table write and the audit `INSERT`
   as **one BigQuery script transaction**, so data never commits
   without its audit record. The final-table write is a `MERGE` on the
   `key_columns` passed to the constructor (update matching rows,
@@ -298,9 +296,10 @@ exact; where nothing exists, that's stated plainly rather than implied.
   job's final state couldn't be confirmed by re-reading it).
   `Pipeline` records both as `FAILED`, so they are retried, and moves
   on to the next file.
-- **No delete handling policy** exists or is documented — if a row
-  disappears from a source export, nothing in `py-common` decides
-  whether that should be propagated, ignored, or flagged.
+- **Deleted rows:** on the typed route, `mark_deleted_rows=True`
+  sets `_deleted_at` on rows missing from a file's newest upload;
+  without it they stay as they were. On the raw route nothing is
+  deleted, and reading the latest upload leaves removed rows out.
 - **Retry and backoff exist only in the SharePoint adapter.**
   `SharePointSource` retries Graph throttling (429, honouring
   `Retry-After`) and transient 5xx errors, up to 4 attempts with
@@ -478,13 +477,13 @@ behaviour doesn't match the promise), **Missing** (nothing exists).
 | Full-load support | **Have** | `LocalSource.items()` always lists everything (`adapters/local.py`). |
 | Incremental-load support | Missing | No cursor/watermark; see [2.2](#22-capture--getting-the-bytes-in-once-safely). |
 | CDC support | N/A | No database sources exist; correctly out of scope for now. |
-| File change detection | Partial | Content-hash dedup exists (`pipeline.py`); no delta/change-token query against the source itself. |
+| File change detection | Partial | Each upload (identity + version) is loaded once (`pipeline.py`, plus the warehouse audit check); no delta/change-token query against the source itself. |
 | Scheduling and orchestration | Missing | No scheduler, no orchestrator config; `deploy/` is empty. |
 | Event triggering | Partial | `runner.handle_upload()` runs the pipeline for an upload's landing folder from a Cloud Run service behind Eventarc; the trigger itself is set up by hand (`GCP_SETUP.md`, section 6). |
 | Queueing / buffering | N/A | Not needed at current file volumes. |
 | Rate limiting / throttling | Partial | `SharePointSource` honours Graph `Retry-After` on 429; nothing else does. |
 | Retries and backoff | Partial | `SharePointSource` retries 429/5xx and network errors (bounded, exponential); other external calls are single attempts. |
-| Idempotency and deduplication | **Have** | Content-hash dedup at pipeline level (`Pipeline._is_duplicate()`), plus a warehouse `MERGE` on `key_columns` (`BigQueryWarehouse`) — provided the caller passes `key_columns`; see [2.4](#24-publish--writing-to-the-destination-safely). |
+| Idempotency and deduplication | **Have** | Each upload (identity + version) loads at most once per destination table: a marker cache in the store (`Pipeline._is_duplicate()`) and an audit check inside the BigQuery commit transaction. Typed tables also `MERGE` on `key_columns` (`BigQueryWarehouse`), and `Pipeline` refuses a warehouse whose keys differ from the contract's; see [2.4](#24-publish--writing-to-the-destination-safely). |
 | Checkpointing | Partial | File-level: a crash loses at most one file's work (results are appended per file). No run-level checkpoint. |
 | Delivery ledger / receipts | Partial | The audit record *is* a delivery ledger for BigQuery; no equivalent receipt concept for external destination APIs (none exist yet). |
 | Quarantine / dead-letter storage | **Have** (file-level) | `pipeline.py`, `quarantine/{identity}/{checksum}/{name}` key, with the original file also kept in `raw/`. Row-level quarantine belongs in the Dataform layer for the raw JSON route. |

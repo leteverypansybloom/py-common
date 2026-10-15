@@ -209,8 +209,9 @@ def handle_upload(
 
     Returns:
         One Result per file in the folder; empty if the event was
-        ignored (unreadable, not a new object, or a folder with no
-        pipeline).
+        ignored (unreadable, not a new object, a folder with no
+        pipeline, or a bucket other than the one that pipeline's
+        GCSSource reads).
 
     Raises:
         RunFailed: A file FAILED; the event should be retried.
@@ -235,6 +236,19 @@ def handle_upload(
             "Ignoring upload %s: no pipeline reads folder %r",
             where,
             upload.folder,
+        )
+        return []
+    # Pipelines are found by folder, so also check the bucket: an
+    # event from another bucket (a second notification on the same
+    # topic, say) with a matching folder name mustn't start a run.
+    bucket = getattr(pipeline.source, "bucket_name", None)
+    if isinstance(bucket, str) and bucket != upload.bucket:
+        logger.warning(
+            "Ignoring upload %s: the pipeline for folder %r reads "
+            "bucket %r",
+            where,
+            upload.folder,
+            bucket,
         )
         return []
 

@@ -138,7 +138,7 @@ time*, but the problem still has to be caught later.
 | **Is the bad month's data kept?** | Yes, in BigQuery, so it can be queried | Yes, as the original file in the GCS `raw/` and `quarantine/` folders, but not in BigQuery |
 | **Effect on the visualisation** | Out of date if the assertion stops the refresh. Silently wrong if the assertion misses something | Out of date (last good month) until the file is fixed. Never silently wrong |
 | **Who finds out, and when** | Whoever looks at Dataform's assertion failures, possibly days later | The file owner can be told immediately with exact errors, once alerting is added (see below) |
-| **Deduplication / reloads** | Each new version of a file is appended; the SQL keeps only the latest version | Exact repeat files are skipped by checksum. Rows are updated by key columns, so no duplicates |
+| **Deduplication / reloads** | Each new version of a file is appended; the SQL keeps only the latest version | Each upload loads once; a new upload always loads. Rows are updated by key columns, so no duplicates |
 | **Audit trail** | Load job logs only | Audit record written in the same transaction as the data |
 | **Effort to build** | New Cloud Run service, Eventarc, Dataform repository, SQL checks for each table | Mostly built already. Needs one contract per table |
 | **Copes with frequent or deliberate schema changes** | Very well, which is its main strength | Poorly: every change means editing the contract |
@@ -285,7 +285,7 @@ One approach doesn't have to fit every feed:
   Its row-by-row Python reading is fine at these volumes.
 - **Large feeds:** the same raw table layout and Dataform checks, but
   not py-common's Excel reading. Reuse py-common's outer parts if
-  useful (finding source files, skipping repeats by checksum, keeping
+  useful (finding source files, loading each upload once, keeping
   the original file, the audit trail and the run lock), and load with
   a BigQuery load job straight from the file (steps 1–4 above).
 

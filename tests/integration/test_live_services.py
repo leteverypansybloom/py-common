@@ -1,9 +1,8 @@
-"""Integration tests for live cloud services.
+"""Integration test for a live SharePoint folder.
 
-These tests require:
-- Read access to a SharePoint test folder (Graph Sites.Selected)
-- A GCP project with Secret Manager and BigQuery
-- Valid credentials in the environment
+Requires read access to a SharePoint test folder (Graph
+Sites.Selected) and a Graph token in the environment. The live GCP
+checks are in test_bq_dry_run.py and test_end_to_end_gcs_bq.py.
 
 Marked @pytest.mark.integration and skipped by default.
 Run after cloud infrastructure is ready.
@@ -14,8 +13,7 @@ SHAREPOINT_SITE_PATH=/sites/DataSite \\
 SHAREPOINT_LIBRARY=Documents \\
 SHAREPOINT_FOLDER=Test \\
 SHAREPOINT_TEST_ACCESS_TOKEN=... \\
-GCP_PROJECT=... \\
-pytest tests/integration/ -m integration
+pytest tests/integration/test_live_services.py -m integration
 ```
 
 SHAREPOINT_TEST_ACCESS_TOKEN is a short-lived Graph token obtained
@@ -67,30 +65,3 @@ def test_sharepoint_connectivity() -> None:
     assert items, f"No Excel files found in {config.describe()}"
     data = source.download(items[0])
     assert len(data) == items[0].size_bytes
-
-
-@pytest.mark.integration
-def test_gcs_object_store():
-    """Verify write to Google Cloud Storage.
-
-    Requires GCP_PROJECT, GCS_BUCKET environment variables.
-    """
-    pytest.skip("GCS adapter not yet implemented")
-
-
-@pytest.mark.integration
-def test_bigquery_warehouse():
-    """Verify load to BigQuery staging and final tables.
-
-    Requires GCP_PROJECT, BIGQUERY_DATASET environment variables.
-    """
-    pytest.skip("BigQuery adapter not yet implemented")
-
-
-@pytest.mark.integration
-def test_end_to_end_local_to_bigquery():
-    """Full pipeline: local files → BigQuery.
-
-    Once cloud adapters are implemented, this tests the entire flow.
-    """
-    pytest.skip("Integration adapters not yet implemented")

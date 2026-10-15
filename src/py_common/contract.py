@@ -6,6 +6,7 @@ and business rules. Validation is deterministic and repeatable.
 
 import posixpath
 import zipfile
+import zlib
 from dataclasses import dataclass, field
 from datetime import date
 from io import BytesIO
@@ -19,6 +20,27 @@ from openpyxl.worksheet.worksheet import Worksheet as XlWorksheet
 from py_common.errors import ContractError, ValidationError
 
 _INT64_MIN, _INT64_MAX = -(2**63), 2**63 - 1
+
+#: Default size limits for an uploaded workbook (see Contract). The
+#: monthly HWW workbooks are well under 1 MB; these only stop a
+#: pathological or malicious file before it is parsed.
+DEFAULT_MAX_FILE_BYTES = 50 * 1024 * 1024
+DEFAULT_MAX_UNCOMPRESSED_BYTES = 500 * 1024 * 1024
+
+#: What openpyxl and zipfile raise for a workbook they can't read.
+#: Anything else (MemoryError, a bug) is not the file's fault, so it
+#: isn't turned into a quarantine. defusedxml's refusals (entity
+#: expansion, external entities) are ValueErrors.
+_PARSE_ERRORS: tuple[type[BaseException], ...] = (
+    ValueError,
+    KeyError,
+    IndexError,
+    TypeError,
+    EOFError,
+    zipfile.BadZipFile,
+    zlib.error,
+    ElementTree.ParseError,
+)
 
 # Maps a Column.data_type to the Python type(s) a cell value must be
 # an instance of, and the word used in error messages. bool is
@@ -151,10 +173,19 @@ class Contract:
             must be a listed, non-nullable column, and together they
             must be unique within a file. Empty means append.
         worksheets: List of required worksheets.
+        max_file_bytes: Largest workbook accepted, as uploaded. A
+            larger one is rejected (quarantined) before it is parsed.
+        max_uncompressed_bytes: Largest total size of the workbook's
+            parts once unzipped, read from the zip directory before
+            anything is extracted. Guards against "zip bombs": a
+            small file that would expand to fill memory. Lower both
+            to fit the job's memory if needed.
     """
 
     key_columns: list[str] = field(default_factory=list)
     worksheets: list[Worksheet] = field(default_factory=list)
+    max_file_bytes: int = DEFAULT_MAX_FILE_BYTES
+    max_uncompressed_bytes: int = DEFAULT_MAX_UNCOMPRESSED_BYTES
 
     def __post_init__(self) -> None:
         """Check key_columns can actually key a MERGE.
@@ -167,8 +198,15 @@ class Contract:
         Raises:
             ValueError: A key column isn't a listed column of the
                 primary worksheet, is nullable, or there are key
-                columns but no worksheets.
+                columns but no worksheets; or a size limit isn't
+                positive.
         """
+        for name in ("max_file_bytes", "max_uncompressed_bytes"):
+            if getattr(self, name) <= 0:
+                raise ValueError(
+                    f"Contract {name} must be positive, got "
+                    f"{getattr(self, name)}"
+                )
         if not self.key_columns:
             return
         if not self.worksheets:
@@ -199,9 +237,11 @@ class Contract:
     ) -> dict[str, SheetRows]:
         """Validate the workbook and read its rows, in one parse.
 
-        The workbook is opened once, read-only (streamed, not built
-        into a full in-memory grid), and each worksheet's rows are
-        both checked against the contract and selected for loading.
+        The workbook is opened once, read-only (openpyxl streams the
+        sheet XML rather than building cell objects for formatting),
+        and each worksheet's rows are both checked against the
+        contract and selected for loading. The selected rows are held
+        in memory, which is why Contract has size limits.
         Every worksheet in `self.worksheets` is looked up by name,
         never the workbook's active sheet, which has no relation to
         what the contract expects.
@@ -312,14 +352,20 @@ class Contract:
                 ws.reset_dimensions()
                 try:
                     names, rows = read_sheet(ws, ws_def.header_row)
-                except Exception as e:
+                except _PARSE_ERRORS as e:
                     # Read-only mode parses cells lazily, so a corrupt
                     # value surfaces here, not when the file opens.
                     # It is a problem with the file: quarantine it.
+                    # The parser's message can quote the cell's text
+                    # (personal data, possibly), so only its type is
+                    # given, and the original isn't chained into
+                    # tracebacks.
                     raise ContractError(
                         f"{source_name} [{ws_def.name}]: Cannot read "
-                        f"worksheet: {e}"
-                    ) from e
+                        f"worksheet ({type(e).__name__}): a cell's "
+                        "stored value is invalid, or the file was "
+                        "saved by an unsupported tool"
+                    ) from None
                 if check:
                     self._check_formulas(
                         uncached.get(ws_def.name, []),
@@ -402,6 +448,7 @@ class Contract:
             raise ContractError(
                 f"{source_name}: Contract has no worksheets configured"
             )
+        self._check_size(excel_bytes, source_name)
 
         try:
             wb = load_workbook(
@@ -431,6 +478,34 @@ class Contract:
                 f"{', '.join(missing)}. Found: {', '.join(wb.sheetnames)}"
             )
         return wb
+
+    def _check_size(self, excel_bytes: bytes, source_name: str) -> None:
+        """Refuse a workbook too big to parse safely.
+
+        Args:
+            excel_bytes: Raw Excel file bytes.
+            source_name: Filename for error messages.
+
+        Raises:
+            ContractError: The file, or its unzipped parts, exceed the
+                contract's limits.
+        """
+        if len(excel_bytes) > self.max_file_bytes:
+            raise ContractError(
+                f"{source_name}: file is {len(excel_bytes):,} bytes, over "
+                f"the contract's max_file_bytes ({self.max_file_bytes:,})"
+            )
+        try:
+            with zipfile.ZipFile(BytesIO(excel_bytes)) as archive:
+                unpacked = sum(info.file_size for info in archive.infolist())
+        except zipfile.BadZipFile:
+            return  # not a zip: load_workbook reports it
+        if unpacked > self.max_uncompressed_bytes:
+            raise ContractError(
+                f"{source_name}: unzips to {unpacked:,} bytes, over the "
+                "contract's max_uncompressed_bytes "
+                f"({self.max_uncompressed_bytes:,})"
+            )
 
     def _validate_worksheet(
         self,

@@ -71,6 +71,8 @@ described in
   (`on_mismatch`)
 - Names every column: blank headings become `col_B`, repeated ones
   `Other_2`
+- Refuses oversized files before parsing them (`max_file_bytes`,
+  `max_uncompressed_bytes`, which also stops "zip bombs")
 - Deterministic; same file always produces same result
 
 **ObjectStore** (protocol)
@@ -92,8 +94,12 @@ described in
 
 **Pipeline**
 - Orchestrates the workflow
-- Handles deduplication (by checksum, per destination) and error
-  recording
+- Loads each upload once: an upload is the file's identity and
+  version (GCS generation, SharePoint eTag, local modification time),
+  checked per destination table; a new upload always loads
+- Records errors and refuses inconsistent configuration when built
+  (warehouse keys that differ from the contract's, a raw table
+  mapping that doesn't match the contract's sheets)
 - Returns list of Result objects (one per file), with any warnings
 
 ### Concurrency
@@ -113,8 +119,11 @@ proceeds. The other gets a `RuntimeError` naming the holder.
   old holder. `lease_seconds` must exceed the Cloud Run job or
   service timeout.
 - Release only deletes the lock this run created.
-- The Cloud Run Job's service account needs create and delete
-  permission on objects in the bucket.
+- The service account needs to create objects in the store bucket,
+  and to delete them only under `locks/` (`docs/GCP_SETUP.md`,
+  section 3). If releasing the lock fails, the run's results stand:
+  the failure is logged (`Could not release lock`) and the lock
+  waits for its lease to expire.
 
 ### SharePoint source
 
@@ -242,17 +251,22 @@ The agreed order, with reasoning, is in
 Core:
 
 - openpyxl >= 3.1, < 4 — Read Excel
+- defusedxml >= 0.7.1, < 1 — Lets openpyxl refuse XML entity attacks
+  in uploaded workbooks
 - pyyaml >= 6.0, < 7 — YAML configuration
-- pyarrow >= 15, < 27 — Parquet output, typed from the contract
+- pyarrow >= 23.0.1, < 27 — Parquet output, typed from the contract
 
 Every runtime dependency has an upper bound, so a fresh install
-never picks up a major version the code hasn't been tested against.
+never picks up a major version the code hasn't been tested against,
+and lower bounds that exclude releases with known advisories.
+`constraints.txt` pins the whole runtime set for deployments: the
+`Dockerfile` builds with it, and CI audits it with pip-audit.
 
 Optional extras (`pip install -e ".[gcp]"` etc.):
 
 - `gcp`: google-cloud-storage >= 2.10, < 4; google-cloud-bigquery
   >= 3.13, < 4; google-api-core >= 2.11, < 3
-- `sharepoint`: requests >= 2.32.4, < 3 (authentication library to follow IT's decision)
+- `sharepoint`: requests >= 2.33.0, < 3 (authentication library to follow IT's decision)
 - `dev`: pytest, black, ruff, mypy, pre-commit, detect-secrets and
   type stubs
 

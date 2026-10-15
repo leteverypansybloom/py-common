@@ -19,6 +19,7 @@ from py_common.adapters.bigquery import BigQueryWarehouse
 HAS_CREDENTIALS = "GOOGLE_APPLICATION_CREDENTIALS" in os.environ
 
 
+@pytest.mark.integration
 @pytest.mark.skipif(
     not HAS_CREDENTIALS, reason="GCP credentials not available"
 )

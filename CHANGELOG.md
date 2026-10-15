@@ -61,6 +61,26 @@ loaded into BigQuery twice, whatever fails and wherever it fails.
 - **`check_freshness()` accepts only `project.dataset.view`.**
 - **pandas is no longer a runtime dependency** (Parquet is written
   with pyarrow); it moved to the `dev` extra.
+- **`Pipeline` checks its configuration when built** and raises
+  `ConfigError`: a `BigQueryWarehouse` must merge on the contract's
+  `key_columns`, and a `RawJsonWarehouse` must map exactly the
+  contract's worksheets.
+- **Oversized workbooks are quarantined before parsing:**
+  `Contract(max_file_bytes=50 MiB, max_uncompressed_bytes=500 MiB)`
+  by default.
+- **An already-loaded upload is skipped before it is downloaded**, so
+  its `Result` and audit record have no checksum.
+- **`configure_json_logging()` removes the root logger's other
+  handlers** by default; `replace=False` keeps them.
+- **`handle_upload()` ignores an upload to another bucket** than the
+  one the folder's `GCSSource` reads.
+- **Error messages leave out text that can quote data:** BigQuery
+  failures are reported by job ID, status and reason (details: `bq
+  show -j <job id>`), and an unreadable sheet by the parser's error
+  type only.
+- **Dependency floors:** `pyarrow>=23.0.1` and `requests>=2.33.0`
+  (pip-audit advisories on the old floors); `defusedxml` is now a
+  runtime dependency.
 
 ### Added
 
@@ -81,6 +101,9 @@ loaded into BigQuery twice, whatever fails and wherever it fails.
   SQL statement against a sandbox project.
 - `py_common.__all__` lists the supported API; `ConfigError` moved to
   `py_common.errors` (still importable from `py_common.config`).
+- `constraints.txt`: the pinned runtime set for deployments. The
+  `Dockerfile` builds with it (as a non-root user, on a digest-pinned
+  base image), and CI audits it.
 
 ### Fixed
 
@@ -98,6 +121,13 @@ loaded into BigQuery twice, whatever fails and wherever it fails.
   datetimes become UTC and `Decimal` a JSON number in raw rows, typed
   row counts come from the load job, `gs://` is stripped only as a
   prefix.
+- Releasing the run lock never raises: a failure is logged
+  (`Could not release lock`) and the run's results stand.
+- A lock whose times have no time zone is refused, not a `TypeError`.
+- Waiting for a staging load is bounded (600 s); a load still running
+  is cancelled and the file FAILED for a retry.
+- Only parser errors in a worksheet quarantine the file; anything
+  else (e.g. `MemoryError`) fails it.
 
 ### Known limitations
 
@@ -116,11 +146,24 @@ loaded into BigQuery twice, whatever fails and wherever it fails.
   mapping) doesn't reload files that table already had.
 - Only each landing file's current version is loaded; there is no
   replay command.
+- **A feed is identified by its file name.** On the raw route,
+  "latest upload" is per `source_file`, so a cumulative feed uploaded
+  under a new name each time returns duplicate current rows; on the
+  typed route, `mark_deleted_rows` never marks the old name's rows.
+  Keep one object name per feed (see `docs/RAW_TABLE_LAYOUT.md`).
+- **Restoring an earlier upload on the typed route can fail** with
+  `ObjectStoreConflict` if the contract or pyarrow changed since it
+  first loaded: its processed copy's key has no version or contract
+  fingerprint.
 
 ### Tooling
 
 - Dependencies have upper bounds; CI tests Python 3.11 and 3.12,
-  runs ruff/black/mypy before pytest, and runs `pip-audit`.
+  runs ruff/black/mypy before pytest, and runs `pip-audit` on the
+  installed set and on `constraints.txt`.
+- Pre-commit hooks match CI's versions (black 26.10.1, ruff 0.17.0,
+  mypy 2.4.0), and the mypy hook passes in its own environment.
+- Every live-cloud test is marked `integration`.
 
 ## 0.1.0
 

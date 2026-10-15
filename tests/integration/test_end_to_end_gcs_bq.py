@@ -14,6 +14,7 @@ from py_common.model import SourceItem
 HAS_CREDENTIALS = "GOOGLE_APPLICATION_CREDENTIALS" in os.environ
 
 
+@pytest.mark.integration
 @pytest.mark.skipif(not HAS_CREDENTIALS, reason="No GCP credentials")
 class TestEndToEndWorkflow:
     """Full pipeline: Create data → GCS → BigQuery."""

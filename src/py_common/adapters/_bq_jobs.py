@@ -13,6 +13,11 @@ they come from:
 Waiting can fail after the server has committed, so an exception
 from job.result() alone proves nothing. The job is re-read by ID to
 find out what really happened before anything is reported.
+
+BigQuery's error messages can quote the data that failed (e.g. "Could
+not parse 'x' as INT64"), and these errors reach logs and audit
+records. So they are reported by job ID, status code and reason only,
+with the full text left in BigQuery's job history (`bq show -j`).
 """
 
 import logging
@@ -31,6 +36,48 @@ logger = logging.getLogger("py_common.adapters.bigquery")
 
 #: Seconds to wait for one BigQuery job before re-checking its state.
 JOB_TIMEOUT_SECONDS = 600.0
+
+
+def describe_error(error: Any) -> str:
+    """Name a BigQuery failure without its free-text message.
+
+    Args:
+        error: An exception, or a job's error_result dict.
+
+    Returns:
+        e.g. "BadRequest 400 (invalid)" or "invalidQuery at query":
+        the type, HTTP status and BigQuery reasons, which never
+        contain data, but not the message, which can.
+    """
+    if isinstance(error, dict):
+        reason = str(error.get("reason") or "error")
+        location = error.get("location")
+        return f"{reason} at {location}" if location else reason
+    if isinstance(error, GoogleAPICallError):
+        reasons = sorted(
+            {
+                str(detail["reason"])
+                for detail in (error.errors or [])
+                if isinstance(detail, dict) and detail.get("reason")
+            }
+        )
+        code = f" {error.code}" if error.code else ""
+        detail = f" ({', '.join(reasons)})" if reasons else ""
+        return f"{type(error).__name__}{code}{detail}"
+    return type(error).__name__
+
+
+def _cause(error: BaseException) -> BaseException | None:
+    """The exception to chain from: none if its text may hold data.
+
+    Args:
+        error: What was caught.
+
+    Returns:
+        `error`, or None for a Google API error, whose message (shown
+        in tracebacks) can quote cell values.
+    """
+    return None if isinstance(error, GoogleAPICallError) else error
 
 
 def run_query(
@@ -81,19 +128,27 @@ def run_query(
     except Exception as e:
         raise IndeterminateCommitError(
             f"BigQuery job {job.job_id} for {what} finished, but its "
-            f"result could not be read: {e}"
-        ) from e
+            f"result could not be read: {describe_error(e)}"
+        ) from _cause(e)
 
 
-def wait_for_load(job: Any, what: str) -> None:
+def wait_for_load(
+    job: Any, what: str, timeout: float = JOB_TIMEOUT_SECONDS
+) -> None:
     """Wait for a staging load job; it commits nothing final.
+
+    The wait is bounded: a load still running after `timeout` is
+    cancelled (best effort) and reported, rather than holding the run
+    (and its lock) until Cloud Run kills it. Its staging table is
+    dropped afterwards either way.
 
     Args:
         job: Load job from load_table_from_file().
         what: What the load is for, for messages.
+        timeout: Seconds to wait.
 
     Raises:
-        ServiceError: BigQuery reports that the load failed.
+        ServiceError: The load failed, or didn't finish in time.
     """
     logger.info(
         "Started BigQuery load job %s for %s",
@@ -102,11 +157,27 @@ def wait_for_load(job: Any, what: str) -> None:
         extra={"bq_job_id": job.job_id},
     )
     try:
-        job.result()
+        job.result(timeout=timeout)
     except GoogleAPICallError as e:
         raise ServiceError(
-            f"BigQuery load job {job.job_id} failed for {what}: {e}"
-        ) from e
+            f"BigQuery load job {job.job_id} failed for {what}: "
+            f"{describe_error(e)}; details: bq show -j {job.job_id}"
+        ) from None
+    except Exception as e:
+        try:
+            job.cancel()
+        except Exception as cancel_error:
+            logger.warning(
+                "Could not cancel BigQuery load job %s: %s",
+                job.job_id,
+                type(cancel_error).__name__,
+                extra={"bq_job_id": job.job_id},
+            )
+        raise ServiceError(
+            f"BigQuery load job {job.job_id} for {what} didn't finish "
+            f"({describe_error(e)}); cancelled. Details: "
+            f"bq show -j {job.job_id}"
+        ) from _cause(e)
 
 
 def _confirm_after_wait_failed(job: Any, what: str, error: Exception) -> None:
@@ -129,9 +200,9 @@ def _confirm_after_wait_failed(job: Any, what: str, error: Exception) -> None:
     except Exception as reload_error:
         raise IndeterminateCommitError(
             f"BigQuery job {job.job_id} for {what}: waiting failed "
-            f"({error}) and its state could not be re-read "
-            f"({reload_error})"
-        ) from error
+            f"({describe_error(error)}) and its state could not be "
+            f"re-read ({describe_error(reload_error)})"
+        ) from _cause(error)
 
     if job.state == "DONE" and job.error_result is None:
         logger.warning(
@@ -139,19 +210,20 @@ def _confirm_after_wait_failed(job: Any, what: str, error: Exception) -> None:
             "failed: %s",
             job.job_id,
             what,
-            error,
+            describe_error(error),
             extra={"bq_job_id": job.job_id},
         )
         return
     if job.state == "DONE":
         raise ServiceError(
             f"BigQuery job {job.job_id} failed for {what}: "
-            f"{job.error_result}"
-        ) from error
+            f"{describe_error(job.error_result)}; details: "
+            f"bq show -j {job.job_id}"
+        ) from None
     raise IndeterminateCommitError(
         f"BigQuery job {job.job_id} for {what} is still {job.state} "
-        f"after waiting failed ({error})"
-    ) from error
+        f"after waiting failed ({describe_error(error)})"
+    ) from _cause(error)
 
 
 #: Audit columns written for every load, in order. Each is set from

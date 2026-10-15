@@ -131,8 +131,12 @@ class TestPipelineProcessSkipOutcomes:
         assert result.checksum == ""
         pipeline.contract.read.assert_not_called()
 
-    def test_duplicate_checksum_is_skipped(self, pipeline, item):
-        """A checksum already recorded in the store skips the file.
+    def test_already_loaded_upload_is_skipped(self, pipeline, item):
+        """An upload whose marker exists is skipped without a download.
+
+        The marker is keyed by identity and version, so nothing needs
+        downloading (or hashing) to find it: the result has no
+        checksum.
 
         Args:
             pipeline: Pipeline fixture wired to mocks.
@@ -149,7 +153,8 @@ class TestPipelineProcessSkipOutcomes:
         result = pipeline.process(item)
 
         assert result.outcome == Outcome.SKIPPED
-        assert result.checksum != ""
+        assert result.checksum == ""
+        pipeline.source.download.assert_not_called()
         pipeline.contract.read.assert_not_called()
 
 

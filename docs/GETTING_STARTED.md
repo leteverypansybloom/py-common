@@ -302,15 +302,17 @@ The same flow is covered by the unit tests in
 ## 6. What a re-run does
 
 Run the same `pipeline.run()` again over the same folder. Expect
-`events_valid.xlsx` to come back `skipped` — its checksum was recorded
-under `audit/{warehouse identity}/{checksum}` the first time it loaded
-(`Pipeline.process()`),
-and `Pipeline.process()` checks that marker before re-validating
+`events_valid.xlsx` to come back `skipped`. When it loaded, a marker
+for that upload (the file's identity and version) was written under
+`audit/{warehouse identity}/versions/...` (`Pipeline.process()`), and
+the next run checks that marker before downloading the file
 (`Pipeline._is_duplicate()`). The marker is only a cache: if it is
-missing, a real warehouse's `load()` finds the file in its own audit
-table and returns `False`, and the file is still `skipped`. The ten quarantined files, by contrast,
-come back `quarantined` again, every time — a checksum marker is only
-written on a `LOADED` outcome, so a file that fails validation is
+missing, a real warehouse's `load()` finds the upload in its own
+audit table and returns `False`, and the file is still `skipped`.
+Saving the file again (a new version) loads it again. The ten
+quarantined files, by contrast, come back `quarantined` again, every
+time — a marker is only written once an upload loads, so a file that
+fails validation is
 re-read and re-validated on every run until it's fixed or removed from
 the source. This is deliberate (see `DECISIONS_en.md`, "Validation
 errors quarantine, not fail") but worth knowing before you wonder why a

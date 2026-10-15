@@ -14,6 +14,7 @@ Orchestrates:
 import json
 import logging
 import uuid
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from time import perf_counter
@@ -21,6 +22,7 @@ from typing import Any, Literal
 
 from py_common.contract import Contract, SheetRows
 from py_common.errors import (
+    ConfigError,
     IndeterminateCommitError,
     ServiceError,
     ValidationError,
@@ -77,15 +79,75 @@ class Pipeline:
     output_format: Literal["parquet", "raw_json"] = "parquet"
 
     def __post_init__(self) -> None:
-        """Reject an unknown output_format when the pipeline is built.
+        """Reject a configuration that can't load correctly.
+
+        Checked when the pipeline is built, so a mistake fails the
+        deployment instead of failing (or silently mis-loading) every
+        file at run time.
 
         Raises:
             ValueError: output_format is not "parquet" or "raw_json".
+            ConfigError: The warehouse's merge keys differ from the
+                contract's, or a raw warehouse's sheet-to-table
+                mapping doesn't match the contract's worksheets.
         """
         if self.output_format not in ("parquet", "raw_json"):
             raise ValueError(
                 f"output_format must be 'parquet' or 'raw_json', "
                 f"got {self.output_format!r}"
+            )
+        if isinstance(self.contract, Contract):
+            self._check_keys_match()
+            self._check_tables_match()
+
+    def _check_keys_match(self) -> None:
+        """The typed warehouse merges on the contract's key columns.
+
+        They are configured twice (Contract.key_columns and
+        BigQueryWarehouse(key_columns=...)). A warehouse given none
+        would append every upload again; one given other columns
+        would merge on the wrong ones.
+
+        Raises:
+            ConfigError: The two lists differ.
+        """
+        keys = getattr(self.warehouse, "key_columns", None)
+        if self.output_format != "parquet" or not isinstance(keys, list):
+            return
+        if list(keys) != list(self.contract.key_columns):
+            raise ConfigError(
+                f"Warehouse {self.warehouse.identity} merges on "
+                f"key_columns {keys!r}, but the contract's key_columns "
+                f"are {self.contract.key_columns!r}. Pass "
+                "key_columns=contract.key_columns to the warehouse."
+            )
+
+    def _check_tables_match(self) -> None:
+        """A raw warehouse maps exactly the contract's worksheets.
+
+        A sheet with no table would fail every load; a table with no
+        sheet would get an empty audit row on every load and never be
+        created.
+
+        Raises:
+            ConfigError: The mapping has missing or extra sheets.
+        """
+        tables = getattr(self.warehouse, "tables", None)
+        if self.output_format != "raw_json" or not isinstance(tables, Mapping):
+            return
+        sheets = [ws.name for ws in self.contract.worksheets]
+        missing = [name for name in sheets if name not in tables]
+        extra = [name for name in tables if name not in sheets]
+        if missing or extra:
+            problems = []
+            if missing:
+                problems.append(f"no table for sheet(s) {missing!r}")
+            if extra:
+                problems.append(f"table(s) for unknown sheet(s) {extra!r}")
+            raise ConfigError(
+                f"Warehouse {self.warehouse.identity}: "
+                f"{'; '.join(problems)}. Map exactly the contract's "
+                f"worksheets: {sheets!r}."
             )
 
     def run(self) -> list[Result]:
@@ -183,6 +245,13 @@ class Pipeline:
         warehouse_key = ""
 
         try:
+            # The marker is keyed by identity and version, so an upload
+            # already loaded here is skipped before it is downloaded.
+            if self._is_duplicate(item):
+                return self._make_result(
+                    item, Outcome.SKIPPED, checksum, 0, errors, start_time
+                )
+
             data = self._download(item)
             if data is None:
                 return self._make_result(
@@ -191,10 +260,6 @@ class Pipeline:
 
             checksum = digest(data)
             add_log_fields(checksum=checksum)
-            if self._is_duplicate(item, checksum):
-                return self._make_result(
-                    item, Outcome.SKIPPED, checksum, 0, errors, start_time
-                )
 
             # One parse validates and reads every worksheet; the
             # conversion below works from these rows.
@@ -297,8 +362,8 @@ class Pipeline:
             )
             return None
 
-    def _is_duplicate(self, item: SourceItem, checksum: str) -> bool:
-        """Check the marker cache for this file in this warehouse.
+    def _is_duplicate(self, item: SourceItem) -> bool:
+        """Check the marker cache for this upload in this warehouse.
 
         Only a cache: a miss goes on to the warehouse, whose load()
         checks its own audit table inside the commit transaction and
@@ -307,7 +372,6 @@ class Pipeline:
 
         Args:
             item: SourceItem being processed.
-            checksum: SHA-256 of the downloaded bytes.
 
         Returns:
             True if the marker says this file was already loaded

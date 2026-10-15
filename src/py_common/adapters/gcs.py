@@ -336,16 +336,22 @@ class GCSObjectStore:
 
         Returns:
             datetime | None: Expiry (UTC), or None if the lock is
-                unreadable, so it is never taken over.
+                unreadable, so it is never taken over. A time with no
+                time zone counts as unreadable: it can't be compared
+                safely, and guessing could take over a live lock.
         """
         try:
             info = json.loads(raw)
             if "expires_at" in info:
-                return datetime.fromisoformat(info["expires_at"])
-            acquired = datetime.fromisoformat(info["acquired_at"])
-            return acquired + timedelta(seconds=self.lease_seconds)
+                expires = datetime.fromisoformat(info["expires_at"])
+            else:
+                acquired = datetime.fromisoformat(info["acquired_at"])
+                expires = acquired + timedelta(seconds=self.lease_seconds)
         except (ValueError, KeyError, TypeError):
             return None
+        if expires.tzinfo is None:
+            return None
+        return expires
 
     def _release_lock(self, blob: Any, key: str, generation: int) -> None:
         """Delete the lock object if it is still the one we created.
@@ -370,6 +376,19 @@ class GCSObjectStore:
             logger.error(
                 "Lock %s was replaced by another run; not deleting it. "
                 "Check for overlapping runs.",
+                key,
+            )
+        except Exception as e:
+            # Most likely a missing delete permission on locks/ (see
+            # docs/GCP_SETUP.md, section 3). The run's own work is
+            # done; the lock stays until its lease expires.
+            logger.error(
+                "Could not release lock %s (%s: %s); it stays until its "
+                "lease expires, or delete gs://%s/%s by hand.",
+                key,
+                type(e).__name__,
+                e,
+                self.bucket_name,
                 key,
             )
 

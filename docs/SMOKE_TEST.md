@@ -98,17 +98,22 @@ This imitates the role SharePoint will eventually play. The pipeline is
 designed so that `LocalSource` can later be replaced by a SharePoint adapter
 without changing the validation, storage or BigQuery logic.
 
-### 2. A checksum identifies the exact file content
+### 2. The upload's identity and version decide whether it's new
 
-The pipeline calculates a SHA-256 checksum, which is a unique fingerprint of
-the file contents. It looks in GCS for an
-`audit/<warehouse identity>/<checksum>` marker:
+The pipeline identifies an upload by the file's identity at the source and
+its version (for `LocalSource`, the file name plus its modification time and
+size; for `GCSSource`, the object name and generation). Before downloading,
+it looks in GCS for a marker for that upload under
+`audit/<warehouse identity>/versions/`:
 
-- If the marker exists, the file is skipped.
-- If it does not exist, processing continues.
+- If the marker exists, the file is skipped without being downloaded.
+- If it does not, the file is downloaded and its SHA-256 checksum, a
+  fingerprint of the contents, is computed. The checksum names the stored
+  copies and is recorded with the load.
 
 This prevents accidental double loading when the pipeline is rerun with an
-unchanged file. The marker is only a cache: BigQuery checks its own audit
+unchanged file. A new version always loads, even if its bytes repeat an
+earlier one (step 10 restores an earlier upload). The marker is only a cache: BigQuery checks its own audit
 table inside the commit transaction as well, so a lost marker can't cause a
 second load (step 3 of the smoke test deletes the markers to prove it).
 
@@ -197,8 +202,9 @@ using `event_id` as the key:
 
 - A new event ID is inserted.
 - An existing event ID is updated rather than duplicated.
-- `_loaded_at` is set by BigQuery in the same transaction, to the same UTC
-  timestamp as the audit entry.
+- `_loaded_at` is written in the same transaction, set to the same UTC
+  timestamp as the audit entry (the pipeline's clock just before the commit
+  job starts).
 
 The final-table change and BigQuery audit entry are committed together. This
 avoids a successful-looking data load without a corresponding audit record.
@@ -209,8 +215,8 @@ GCS receives:
 
 - A detailed audit JSON record for each outcome: loaded, skipped, quarantined
   or failed.
-- A short checksum marker for successfully loaded files, used for duplicate
-  protection.
+- A short marker for each loaded upload (identity and version), used to
+  skip it on later runs.
 
 BigQuery receives a warehouse audit record for successful loads.
 
@@ -222,8 +228,9 @@ BigQuery receives a warehouse audit record for successful loads.
   table.
 - **Quarantine rather than discard:** Retain invalid files so problems can be
   understood and fixed.
-- **Use content-based duplicate protection:** Prevent the same bytes being
-  loaded more than once.
+- **Load each upload once:** The same upload (file version) is never loaded
+  twice, but a new upload always loads, even one that restores earlier
+  content.
 - **Use unique event IDs for merging:** Allow corrected versions of an event
   to update the existing row instead of creating duplicates.
 - **Use a staging table:** Check incoming data before it reaches the final

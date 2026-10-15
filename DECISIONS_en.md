@@ -88,6 +88,11 @@ at any time.
 
 ### Loaded markers and processed copies are kept per destination
 
+*Superseded in part by 0.2.0: markers are now kept per upload,
+`audit/{warehouse identity}/versions/{sha256(identity)}/{version}`,
+and are only a cache for the warehouse's own audit check. See
+"Warehouse.load() is idempotent (0.2.0)".*
+
 The "already loaded" marker moves from `audit/{checksum}` to
 `audit/{warehouse identity}/{checksum}`, and processed copies from
 `processed/{identity}/{checksum}/...` to
@@ -178,6 +183,10 @@ and the names are the same on every run of the same layout.
 ## 2026-09-30 — Real GCS lock; SharePoint adapter; versioned storage keys; `_loaded_at` set by BigQuery
 
 ### GCSObjectStore.lock() is a real lock, not a no-op
+
+*Superseded in part by 0.2.0: the lock is now a lease, which a later
+run takes over once it has expired (`GCSObjectStore(lease_seconds=)`,
+docs/GCP_SETUP.md section 5), so the trade-off below no longer holds.*
 
 Replaces the earlier position, recorded in the README "Concurrency"
 section, that the lock could be a no-op because one Cloud Scheduler
@@ -475,7 +484,8 @@ contract sets `allow_empty=True`.
   checksum, row count, and outcome
 - Audit entries include errors for failed attempts
 - Audit records cannot be modified (append-only)
-- Audit is queryable by checksum (detects re-runs)
+- Audit is queryable by destination table, load key and source
+  version (how re-runs are detected)
 
 ### RAP Principles: Transparency
 

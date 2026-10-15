@@ -125,9 +125,11 @@ query filters on. Raw tables created before py-common 0.2.0 are not
 clustered; add it to each (it applies to data written from then on):
 
 ```bash
-bq update --clustering_fields=source_file,source_generation   "$PROJECT:$RAW_DATASET.<raw table>"
-``` Their layout is in
-[`RAW_TABLE_LAYOUT.md`](RAW_TABLE_LAYOUT.md).
+bq update --clustering_fields=source_file,source_generation \
+  "$PROJECT:$RAW_DATASET.<raw table>"
+```
+
+Their layout is in [`RAW_TABLE_LAYOUT.md`](RAW_TABLE_LAYOUT.md).
 
 **Restrict this dataset.** Even with personal columns excluded by the
 contracts, the raw tables hold employer names and free text, and the
@@ -177,7 +179,7 @@ With these roles the job can add to `raw/`, `processed/`,
 so the store's immutability no longer rests on the code alone. IAM
 conditions need uniform bucket-level access, which section 1 turns
 on. Check the condition once after granting it: a first run should
-log `Released lock`, not a permission error.
+log `Released lock`, not `Could not release lock`.
 
 **Retention.** Consider keeping `raw/` and `audit/` for the period
 the DPIA sets even against someone with more access than the job. A
@@ -336,10 +338,18 @@ What the `py_common.runner` helpers add to `Pipeline.run()`:
   alert (section 7).
 
 Give each workbook its own landing folder (`prefix`), so each
-pipeline lists only the files its contract describes. The container
-installs `py-common[gcp]`, plus `functions-framework` for the
-service; see the repository's `Dockerfile`. functions-framework
+pipeline lists only the files its contract describes. Build the
+solution's image `FROM` the one this repository's `Dockerfile`
+builds: it has `py-common[gcp]` at the versions pinned in
+`constraints.txt` and runs as a non-root user. The solution's image
+adds its own code and, for the service, `functions-framework`, which
 loads `main.py` from the working directory.
+
+`Pipeline` checks its configuration when it is built: a
+`BigQueryWarehouse` must merge on the contract's `key_columns`, and
+a `RawJsonWarehouse` must map exactly the contract's worksheets. A
+mismatch raises `ConfigError` at start-up instead of failing every
+file.
 
 ## 5. Cloud Run job and schedule
 
@@ -402,7 +412,8 @@ object named in the error.
 The daily job is enough to load monthly files. Add this when an ad
 hoc upload should load within minutes rather than the next morning,
 or to follow the team's bucket → Pub/Sub → Eventarc → Cloud Run
-pattern ([`upcoming_work.md`](upcoming_work.md)).
+pattern (from the team's earlier guide, now archived as
+[`upcoming_work.md`](upcoming_work.md)).
 
 A new object in the landing bucket publishes a notification to
 Pub/Sub. Eventarc delivers it to the Cloud Run service, where
@@ -452,8 +463,11 @@ gcloud pubsub subscriptions update "$SUBSCRIPTION" --ack-deadline=600
 ```
 
 `notifications create` also creates the topic if it doesn't exist
-and lets Cloud Storage publish to it, which needs the Pub/Sub
-permissions listed in `upcoming_work.md`.
+and lets Cloud Storage publish to it. Whoever runs it needs at least
+`pubsub.topics.create`, `pubsub.topics.get`, `pubsub.topics.publish`
+and `pubsub.topics.getIamPolicy` on the topic's project, and
+`storage.buckets.update` on the landing bucket (the list from the
+team's earlier guide). Ask the Data Engineering team to grant them.
 
 | Setting | Why |
 |---|---|
@@ -484,10 +498,12 @@ What happens when:
   refusal.
 - **An unreadable event, or an upload to a folder with no pipeline:**
   logged and acknowledged, not retried. This includes sub-folders,
-  which `GCSSource` doesn't read.
+  which `GCSSource` doesn't read, and uploads to another bucket whose
+  folder has the same name: `handle_upload()` checks the event's
+  bucket against the one the folder's `GCSSource` reads.
 
-`upcoming_work.md` puts Pub/Sub and Cloud Run in an app project and
-the bucket in a data project. The same commands work across the two:
+The team's earlier guide (`upcoming_work.md`, archived) puts Pub/Sub
+and Cloud Run in an app project and the bucket in a data project. The same commands work across the two:
 create the topic, service and trigger in the app project, and grant
 the service account its roles on the data project's buckets and
 dataset.
@@ -495,7 +511,7 @@ dataset.
 ## 7. Alerts
 
 Without alerts, a failed load or a renamed column only shows up when a
-dashboard looks wrong. Set up four, all sent to the team's
+dashboard looks wrong. Set up five, all sent to the team's
 notification channel, for example the team mailbox or a Teams
 channel's email address:
 
@@ -508,7 +524,7 @@ whatever path led there). Match on those fields:
 | Alert | Filter (after the resource part below) | Fires when |
 |---|---|---|
 | Failed file | `jsonPayload.outcome="failed"` | Any file FAILED, from any cause (service error, unknown commit, audit write, ...) |
-| Failed run | `severity>=ERROR AND (jsonPayload.message:"Pipeline run failed" OR jsonPayload.message:"Freshness check failed")` | A run failed or was refused by the lock, or the freshness check couldn't run |
+| Failed run | `severity>=ERROR AND (jsonPayload.message:"Pipeline run failed" OR jsonPayload.message:"Freshness check failed" OR jsonPayload.message:"Could not release lock")` | A run failed or was refused by the lock, the freshness check couldn't run, or a run couldn't release its lock (the next runs would be refused until its lease expires) |
 | Header or data warning | `jsonPayload.message:"Contract warning:"` | A `"warn"` worksheet loaded with a mismatch, or a value loaded as NULL |
 | Quarantined file | `jsonPayload.outcome="quarantined"` | A file was rejected, by the contract or the warehouse |
 | Missing monthly file | `jsonPayload.message:"Missing monthly file:"` | From the 8th of the month, a monthly source with nothing loaded since the 1st; repeats daily until it loads |
@@ -563,8 +579,8 @@ A log-based alert can't fire on something that didn't happen, so the
 daily job checks. `check_freshness()` reads a view with one row per
 monthly source and logs `Missing monthly file: <source> (last loaded
 <date>)` for each overdue one. The view reads each source's own raw
-table: the audit table records only a file name, so it can't tell one
-source from another.
+table, which is the simplest thing to name per source (the audit
+table would also do, by its `destination` column).
 
 ```bash
 bq query --use_legacy_sql=false "

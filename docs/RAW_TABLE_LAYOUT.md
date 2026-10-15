@@ -13,12 +13,12 @@ so the SQL that reads them doesn't have to guess.
 | Column | Type | Meaning |
 |---|---|---|
 | `source_file` | STRING | File name at the source, e.g. `dummy_was_database.xlsx`. |
-| `source_generation` | STRING | The source's version marker. For `GCSSource` this is the GCS object generation: a number that increases on every upload of the same file name. |
+| `source_generation` | STRING | The source's version marker. For `GCSSource` this is the GCS object generation: a number that increases on every upload of the same file name. Other sources' versions aren't numbers (`LocalSource`: `<mtime_ns>-<size>`; SharePoint: an eTag like `"{GUID},3"`), so the "latest upload" query below works for `GCSSource` only. |
 | `sheet_name` | STRING | Worksheet the row came from. |
 | `row_number` | INT64 | The row number Excel shows for this row. Use it to point a file owner at a bad row. |
 | `checksum` | STRING | SHA-256 of the file's bytes. Joins to the audit table and to the copies kept in the bucket (`raw/<identity>/<checksum>/...`). |
 | `payload` | JSON | The row's values, one key per loaded column. |
-| `ingested_at` | TIMESTAMP | When the load committed. All rows of one file share it, and it equals the audit record's `timestamp`. |
+| `ingested_at` | TIMESTAMP | The load's timestamp: the pipeline's clock just before the commit job starts, written in the commit transaction. All rows of one upload share it, and it equals the audit record's `timestamp`. |
 
 Tables are partitioned by day of `ingested_at` and clustered on
 `source_file, source_generation`. Clustering only cuts the bytes a
@@ -144,6 +144,14 @@ QUALIFY CAST(source_generation AS INT64) = MAX(
   CAST(source_generation AS INT64)
 ) OVER (PARTITION BY source_file)
 ```
+
+**Keep one file name per feed.** "Latest" is per `source_file`, the
+file's name. If a cumulative file is uploaded under a new name each
+time (a date in the name, say), every name has its own latest upload
+and the query returns all of them: duplicate current rows. Upload
+each feed under one unchanging object name and let GCS versioning
+keep the history. A `uniqueKey` assertion on the cleaned table (as
+in the example below) catches it if it happens.
 
 **Payload fields.** Use `JSON_VALUE` for text and `LAX_` or
 `SAFE_CAST` for types. Quote keys that contain spaces or punctuation:
