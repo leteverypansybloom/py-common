@@ -1,8 +1,13 @@
-"""Google Cloud Storage adapter for immutable file storage.
+"""Google Cloud Storage adapters: immutable storage and a source.
 
-Implements ObjectStore protocol. All writes are append-only: if a key
-already exists with identical content, put() succeeds (idempotent). If
-content differs, put() fails with ValueError (prevents corruption).
+GCSObjectStore implements the ObjectStore protocol. All writes are
+append-only: if a key already exists with identical content, put()
+succeeds (idempotent). If content differs, put() fails with
+ValueError (prevents corruption).
+
+GCSSource implements the Source protocol: it lists workbooks in a
+landing folder of a bucket and downloads the exact object generation
+it listed.
 
 RAP Compliance:
 - Reproducible: Same key and data always produces same result
@@ -21,8 +26,16 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Generator, Optional
 
-from google.api_core.exceptions import NotFound, PreconditionFailed
+from google.api_core.exceptions import (
+    GoogleAPICallError,
+    NotFound,
+    PreconditionFailed,
+)
 from google.cloud import storage  # type: ignore
+
+from py_common.errors import NotFound as ItemNotFound
+from py_common.errors import ServiceError, VersionMismatch
+from py_common.model import SourceItem
 
 logger = logging.getLogger("py_common.adapters.gcs")
 
@@ -234,3 +247,155 @@ class GCSObjectStore:
                 f"Lock {key} was replaced by another run; "
                 "not deleting it. Check for overlapping runs."
             )
+
+
+class GCSSource:
+    """Discover and download workbooks in a GCS landing folder.
+
+    Implements the Source protocol from py_common.ports. Files are
+    read from one folder (prefix) of a bucket; sub-folders are not
+    read, matching SharePointSource.
+
+    Each item's identity is its full object name, and its version is
+    the object generation, which GCS changes on every overwrite. With
+    object versioning on, the same file name uploaded each month gets
+    a new generation each time, and earlier generations are kept.
+
+    Keep the pipeline's own object store out of the landing folder
+    (a separate bucket, or a prefix outside it), so the pipeline
+    never lists its own raw/ or processed/ copies as new files.
+
+    Attributes:
+        project_id (str): GCP project ID.
+        bucket_name (str): GCS bucket name (without gs:// prefix).
+        prefix (str): Landing folder, ending in "/" (empty means the
+            bucket root).
+        extensions (tuple[str, ...]): File extensions to pick up,
+            lower case, with dot.
+        client (storage.Client): GCS client.
+        bucket (storage.Bucket): Reference to GCS bucket.
+    """
+
+    def __init__(
+        self,
+        project_id: str,
+        bucket_name: str,
+        prefix: str = "",
+        extensions: tuple[str, ...] = (".xlsx",),
+    ) -> None:
+        """Initialize GCS source.
+
+        Args:
+            project_id (str): GCP project ID.
+            bucket_name (str): GCS bucket name, with or without gs://.
+            prefix (str): Landing folder, e.g. "landing/hww". Leading
+                and trailing slashes are optional.
+            extensions (tuple[str, ...]): File extensions to pick up.
+                Defaults to .xlsx only: openpyxl can't read .xls.
+
+        Returns:
+            None
+
+        Raises:
+            ValueError: An extension doesn't start with a dot.
+        """
+        if not extensions or not all(
+            e.startswith(".") and len(e) > 1 for e in extensions
+        ):
+            raise ValueError(
+                f"GCSSource extensions must look like '.xlsx', "
+                f"got {extensions!r}"
+            )
+        self.project_id = project_id
+        self.bucket_name = bucket_name.replace("gs://", "")
+        folder = prefix.strip("/")
+        self.prefix = f"{folder}/" if folder else ""
+        self.extensions = tuple(e.lower() for e in extensions)
+        self.client = storage.Client(project=project_id)
+        self.bucket = self.client.bucket(self.bucket_name)
+
+    def items(self) -> list[SourceItem]:
+        """List workbooks directly inside the landing folder.
+
+        Returns:
+            list[SourceItem]: One per matching object, sorted by
+                object name.
+
+        Raises:
+            ServiceError: GCS listing failed (permission, outage).
+        """
+        try:
+            blobs = list(
+                self.client.list_blobs(
+                    self.bucket_name, prefix=self.prefix, delimiter="/"
+                )
+            )
+        except GoogleAPICallError as e:
+            raise ServiceError(
+                f"Cannot list gs://{self.bucket_name}/{self.prefix}: {e}"
+            ) from e
+
+        items = [
+            SourceItem(
+                name=blob.name.rsplit("/", 1)[-1],
+                identity=blob.name,
+                version=str(blob.generation),
+                size_bytes=int(blob.size or 0),
+            )
+            for blob in blobs
+            if blob.name.lower().endswith(self.extensions)
+        ]
+        items.sort(key=lambda item: item.identity)
+        logger.info(
+            f"Found {len(items)} file(s) in "
+            f"gs://{self.bucket_name}/{self.prefix}"
+        )
+        return items
+
+    def download(self, item: SourceItem) -> bytes:
+        """Download the exact generation that items() listed.
+
+        Args:
+            item (SourceItem): Item from a prior items() call.
+
+        Returns:
+            bytes: The object's bytes at the listed generation.
+
+        Raises:
+            NotFound: The object no longer exists.
+            VersionMismatch: The object was overwritten since it was
+                listed (a newer upload is in progress or done).
+            ServiceError: GCS failed for another reason.
+        """
+        where = f"gs://{self.bucket_name}/{item.identity}"
+        try:
+            current = self.bucket.get_blob(item.identity)
+        except GoogleAPICallError as e:
+            raise ServiceError(f"Cannot read {where}: {e}") from e
+        if current is None:
+            raise ItemNotFound(f"Object no longer exists: {where}")
+        if str(current.generation) != item.version:
+            raise VersionMismatch(
+                f"Object changed since discovery: {where} "
+                f"(was generation {item.version}, "
+                f"now {current.generation})"
+            )
+
+        # The precondition closes the gap between the check above and
+        # the download: an upload in between fails here instead of
+        # returning bytes from a different generation.
+        try:
+            data: bytes = self.bucket.blob(item.identity).download_as_bytes(
+                if_generation_match=int(item.version)
+            )
+        except PreconditionFailed:
+            raise VersionMismatch(
+                f"Object changed during download: {where}"
+            ) from None
+        except NotFound:
+            raise ItemNotFound(f"Object no longer exists: {where}") from None
+        except GoogleAPICallError as e:
+            raise ServiceError(f"Cannot download {where}: {e}") from e
+
+        logger.debug(f"Downloaded {where} ({len(data)} bytes)")
+        return data

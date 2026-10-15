@@ -7,6 +7,7 @@ have a separate, already-tracked Windows path issue unrelated to
 what's being tested here).
 """
 
+import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from io import BytesIO
@@ -424,8 +425,10 @@ class TestPipelineStorageKeysAreVersioned:
         """
         source = Mock()
         source.download.return_value = data
+        warehouse = Mock()
+        warehouse.identity = "project.dataset.events"
         return Pipeline(
-            source=source, store=store, warehouse=Mock(), contract=contract
+            source=source, store=store, warehouse=warehouse, contract=contract
         )
 
     def test_edited_file_with_same_identity_loads(
@@ -478,8 +481,8 @@ class TestPipelineStorageKeysAreVersioned:
         self._pipeline(data, store, contract).process(item)
 
         assert (
-            f"processed/ID1/{digest(data)}/events.xlsx.parquet"
-            in store.objects
+            f"processed/project.dataset.events/ID1/{digest(data)}/"
+            "events.xlsx.parquet" in store.objects
         )
 
     def test_quarantine_keys_include_checksum(
@@ -605,3 +608,430 @@ class TestPipelineRetryAfterWarehouseFailure:
 
         assert first[0].outcome == first_outcome
         assert second[0].outcome == Outcome.LOADED, second[0].errors
+
+
+class TestPipelineToParquetHeaderRow:
+    """_to_parquet() reads headings from the contract's header_row."""
+
+    def test_title_line_above_headings_is_not_a_column(self) -> None:
+        """Columns come from row 2 when header_row=2."""
+        contract = Contract(
+            worksheets=[
+                Worksheet(
+                    name="Events",
+                    header_row=2,
+                    columns=[
+                        Column(name="name", data_type="string"),
+                        Column(name="count", data_type="integer"),
+                    ],
+                )
+            ]
+        )
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Events"
+        ws.append(["Last updated: 02/03/2026"])
+        ws.append(["name", "count"])
+        ws.append(["a", 1])
+        buffer = BytesIO()
+        wb.save(buffer)
+        pipeline = Pipeline(Mock(), Mock(), Mock(), contract)
+
+        frame = pd.read_parquet(
+            BytesIO(pipeline._to_parquet(buffer.getvalue()))
+        )
+
+        assert list(frame.columns) == ["name", "count"]
+        assert frame.to_dict("records") == [{"name": "a", "count": 1}]
+
+
+class TestPipelineToParquetHeadingNames:
+    """_to_parquet() keeps every column under its read_sheet() name."""
+
+    def test_repeated_headings_are_all_kept(self) -> None:
+        """Both "Other" columns reach the Parquet file."""
+        contract = Contract(
+            worksheets=[
+                Worksheet(
+                    name="Events",
+                    columns=[
+                        Column(name="Other", data_type="string"),
+                        Column(name="Other_2", data_type="string"),
+                    ],
+                )
+            ]
+        )
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Events"
+        ws.append(["Other", "Other"])
+        ws.append(["a", "b"])
+        buffer = BytesIO()
+        wb.save(buffer)
+        pipeline = Pipeline(Mock(), Mock(), Mock(), contract)
+
+        frame = pd.read_parquet(
+            BytesIO(pipeline._to_parquet(buffer.getvalue()))
+        )
+
+        assert frame.to_dict("records") == [{"Other": "a", "Other_2": "b"}]
+
+
+class TestPipelineToParquetColumnSelection:
+    """_to_parquet() writes only the columns the contract selects."""
+
+    def test_excluded_column_is_not_written(self) -> None:
+        """An excluded personal-data column never reaches Parquet."""
+        contract = Contract(
+            worksheets=[
+                Worksheet(
+                    name="Events",
+                    columns=[Column(name="name", data_type="string")],
+                    excluded=["email"],
+                )
+            ]
+        )
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Events"
+        ws.append(["name", "email"])
+        ws.append(["a", "a@example.org"])
+        buffer = BytesIO()
+        wb.save(buffer)
+        pipeline = Pipeline(Mock(), Mock(), Mock(), contract)
+
+        frame = pd.read_parquet(
+            BytesIO(pipeline._to_parquet(buffer.getvalue()))
+        )
+
+        assert list(frame.columns) == ["name"]
+
+
+class TestPipelineProcessWarnings:
+    """Warnings from a "warn" contract are kept, logged and audited."""
+
+    @staticmethod
+    def _warn(data: bytes, name: str, warnings: list[str]) -> int:
+        """Stand-in for Contract.validate() that records a warning.
+
+        Args:
+            data: Workbook bytes (unused).
+            name: Source file name.
+            warnings: List to append to.
+
+        Returns:
+            Row count.
+        """
+        warnings.append(f"{name} [Events]: Unexpected columns: extra")
+        return 1
+
+    @pytest.fixture
+    def warn_pipeline(self, pipeline: Pipeline) -> Pipeline:
+        """Pipeline whose contract passes the file with one warning."""
+        pipeline.contract.validate.side_effect = self._warn
+        pipeline._to_parquet = Mock(return_value=b"parquet")
+        return pipeline
+
+    def test_file_with_warnings_loads(
+        self, warn_pipeline: Pipeline, item: SourceItem
+    ) -> None:
+        """A warning doesn't stop the load.
+
+        Args:
+            warn_pipeline: Pipeline fixture.
+            item: SourceItem fixture.
+        """
+        result = warn_pipeline.process(item)
+
+        assert result.outcome == Outcome.LOADED, result.errors
+        assert result.warnings == [
+            "events.xlsx [Events]: Unexpected columns: extra"
+        ]
+        warn_pipeline.warehouse.load.assert_called_once()
+
+    def test_warnings_are_logged_at_warning_level(
+        self,
+        warn_pipeline: Pipeline,
+        item: SourceItem,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """WARNING log lines are what alerts are built on.
+
+        Args:
+            warn_pipeline: Pipeline fixture.
+            item: SourceItem fixture.
+            caplog: pytest log capture.
+        """
+        with caplog.at_level("WARNING", logger="py_common.pipeline"):
+            warn_pipeline.process(item)
+
+        assert any(
+            r.levelname == "WARNING" and "Unexpected columns" in r.message
+            for r in caplog.records
+        )
+
+    def test_warnings_are_in_the_audit_record(
+        self, warn_pipeline: Pipeline, item: SourceItem
+    ) -> None:
+        """The audit record says what was tolerated.
+
+        Args:
+            warn_pipeline: Pipeline fixture.
+            item: SourceItem fixture.
+        """
+        result = warn_pipeline.process(item)
+        warn_pipeline._audit(result)
+
+        records = [
+            json.loads(c.args[1])
+            for c in warn_pipeline.store.put.call_args_list
+            if c.args[0].startswith("audit/records/")
+        ]
+        assert records[0]["warnings"] == result.warnings
+
+    def test_clean_file_has_no_warnings(
+        self, pipeline: Pipeline, item: SourceItem
+    ) -> None:
+        """Results default to an empty warnings list.
+
+        Args:
+            pipeline: Pipeline fixture.
+            item: SourceItem fixture.
+        """
+        pipeline.contract.validate.return_value = 1
+        pipeline._to_parquet = Mock(return_value=b"parquet")
+
+        assert pipeline.process(item).warnings == []
+
+
+class TestPipelineKeysPerDestination:
+    """One workbook can feed several pipelines, one per table."""
+
+    @staticmethod
+    def _sheet_pipeline(
+        sheet: str, table: str, data: bytes, store: InMemoryStore
+    ) -> Pipeline:
+        """Pipeline loading one sheet of `data` into `table`.
+
+        Args:
+            sheet: Worksheet the contract reads.
+            table: Warehouse identity.
+            data: Workbook bytes the source returns.
+            store: Shared object store.
+
+        Returns:
+            Pipeline.
+        """
+        source = Mock()
+        source.download.return_value = data
+        warehouse = Mock()
+        warehouse.identity = table
+        contract = Contract(
+            worksheets=[
+                Worksheet(
+                    name=sheet,
+                    columns=[Column(name="name", data_type="string")],
+                )
+            ]
+        )
+        return Pipeline(source, store, warehouse, contract)
+
+    @staticmethod
+    def _two_sheet_workbook() -> bytes:
+        """Workbook with differently-filled "A" and "B" sheets.
+
+        Returns:
+            .xlsx bytes.
+        """
+        wb = Workbook()
+        first = wb.active
+        first.title = "A"
+        first.append(["name"])
+        first.append(["from A"])
+        second = wb.create_sheet("B")
+        second.append(["name"])
+        second.append(["from B"])
+        buffer = BytesIO()
+        wb.save(buffer)
+        return buffer.getvalue()
+
+    def test_second_pipeline_on_same_file_is_not_skipped(self) -> None:
+        """Loading sheet A doesn't mark the file done for sheet B."""
+        store = InMemoryStore()
+        data = self._two_sheet_workbook()
+        item = SourceItem("hww.xlsx", "ID1", "v1", 10)
+        first = self._sheet_pipeline("A", "p.d.a", data, store)
+        second = self._sheet_pipeline("B", "p.d.b", data, store)
+
+        first_result = first.process(item)
+        first._audit(first_result)
+        second_result = second.process(item)
+
+        assert first_result.outcome == Outcome.LOADED
+        assert second_result.outcome == Outcome.LOADED, second_result.errors
+        second.warehouse.load.assert_called_once()
+
+    def test_same_pipeline_still_skips_a_repeat(self) -> None:
+        """A rerun into the same table is still a duplicate."""
+        store = InMemoryStore()
+        data = self._two_sheet_workbook()
+        item = SourceItem("hww.xlsx", "ID1", "v1", 10)
+        pipeline = self._sheet_pipeline("A", "p.d.a", data, store)
+
+        pipeline._audit(pipeline.process(item))
+        repeat = pipeline.process(item)
+
+        assert repeat.outcome == Outcome.SKIPPED
+
+    def test_each_destination_keeps_its_own_processed_copy(self) -> None:
+        """Different sheets' Parquet doesn't collide in the store."""
+        store = InMemoryStore()
+        data = self._two_sheet_workbook()
+        item = SourceItem("hww.xlsx", "ID1", "v1", 10)
+
+        self._sheet_pipeline("A", "p.d.a", data, store).process(item)
+        self._sheet_pipeline("B", "p.d.b", data, store).process(item)
+
+        suffix = f"ID1/{digest(data)}/hww.xlsx.parquet"
+        assert f"processed/p.d.a/{suffix}" in store.objects
+        assert f"processed/p.d.b/{suffix}" in store.objects
+
+    def test_audit_record_names_the_destination(self) -> None:
+        """The audit record says which table the attempt was for."""
+        store = InMemoryStore()
+        data = self._two_sheet_workbook()
+        item = SourceItem("hww.xlsx", "ID1", "v1", 10)
+        pipeline = self._sheet_pipeline("A", "p.d.a", data, store)
+
+        pipeline._audit(pipeline.process(item))
+
+        record = next(
+            json.loads(value)
+            for key, value in store.objects.items()
+            if key.startswith("audit/records/")
+        )
+        assert record["warehouse"] == "p.d.a"
+
+
+class TestPipelineOutputFormat:
+    """output_format chooses Parquet or raw JSON rows for the load."""
+
+    @staticmethod
+    def _two_sheet_contract() -> Contract:
+        """Contract for "Account signups" and "Survey info" sheets.
+
+        Returns:
+            Contract.
+        """
+        return Contract(
+            worksheets=[
+                Worksheet(
+                    name="Account signups",
+                    columns=[Column(name="Org", data_type="string")],
+                ),
+                Worksheet(
+                    name="Survey info",
+                    columns=[Column(name="Org", data_type="string")],
+                ),
+            ]
+        )
+
+    @staticmethod
+    def _two_sheet_workbook() -> bytes:
+        """Workbook with two sign-ups and one survey response.
+
+        Returns:
+            .xlsx bytes.
+        """
+        wb = Workbook()
+        signups = wb.active
+        signups.title = "Account signups"
+        signups.append(["Org"])
+        signups.append(["Org 1"])
+        signups.append(["Org 2"])
+        survey = wb.create_sheet("Survey info")
+        survey.append(["Org"])
+        survey.append(["Org 3"])
+        buffer = BytesIO()
+        wb.save(buffer)
+        return buffer.getvalue()
+
+    def _raw_pipeline(self, store: InMemoryStore) -> Pipeline:
+        """Pipeline in raw_json mode over the two-sheet workbook.
+
+        Args:
+            store: Object store.
+
+        Returns:
+            Pipeline.
+        """
+        source = Mock()
+        source.download.return_value = self._two_sheet_workbook()
+        warehouse = Mock()
+        warehouse.identity = "p.raw.signups+survey"
+        return Pipeline(
+            source,
+            store,
+            warehouse,
+            self._two_sheet_contract(),
+            output_format="raw_json",
+        )
+
+    def test_default_is_parquet(self) -> None:
+        """Existing pipelines keep loading Parquet."""
+        pipeline = Pipeline(Mock(), Mock(), Mock(), Mock())
+
+        assert pipeline.output_format == "parquet"
+
+    def test_unknown_format_is_rejected(self) -> None:
+        """A typo fails when the pipeline is built."""
+        with pytest.raises(ValueError, match="output_format"):
+            Pipeline(Mock(), Mock(), Mock(), Mock(), output_format="csv")
+
+    def test_raw_json_loads_rows_from_every_sheet(self) -> None:
+        """The warehouse gets NDJSON for all sheets and their total."""
+        pipeline = self._raw_pipeline(InMemoryStore())
+        item = SourceItem("hww.xlsx", "ID1", "v1", 10)
+
+        result = pipeline.process(item)
+
+        assert result.outcome == Outcome.LOADED, result.errors
+        assert result.rows_processed == 3
+        call = pipeline.warehouse.load.call_args
+        assert call.kwargs["rows"] == 3
+        sheets = [
+            json.loads(line)["sheet_name"]
+            for line in call.kwargs["data"].decode().splitlines()
+        ]
+        assert sheets == ["Account signups", "Account signups", "Survey info"]
+
+    def test_raw_json_processed_copy_is_ndjson(self) -> None:
+        """The stored copy is the NDJSON the warehouse was given."""
+        store = InMemoryStore()
+        pipeline = self._raw_pipeline(store)
+        item = SourceItem("hww.xlsx", "ID1", "v1", 10)
+        data = pipeline.source.download.return_value
+
+        pipeline.process(item)
+
+        key = (
+            f"processed/p.raw.signups+survey/ID1/{digest(data)}/"
+            "hww.xlsx.ndjson"
+        )
+        assert (
+            store.objects[key]
+            == pipeline.warehouse.load.call_args.kwargs["data"]
+        )
+
+    def test_raw_json_retry_after_failure_loads(self) -> None:
+        """Identical NDJSON on retry: no processed/ conflict."""
+        store = InMemoryStore()
+        pipeline = self._raw_pipeline(store)
+        pipeline.warehouse.load.side_effect = [RuntimeError("boom"), None]
+        item = SourceItem("hww.xlsx", "ID1", "v1", 10)
+
+        first = pipeline.process(item)
+        second = pipeline.process(item)
+
+        assert first.outcome == Outcome.FAILED
+        assert second.outcome == Outcome.LOADED, second.errors

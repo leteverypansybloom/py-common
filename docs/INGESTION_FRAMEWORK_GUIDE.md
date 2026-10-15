@@ -152,7 +152,8 @@ exact; where nothing exists, that's stated plainly rather than implied.
   but by a **content hash** check after download. `Pipeline.process()`
   (`src/py_common/pipeline.py`) computes a SHA-256 of the
   downloaded bytes and skips the file if that exact checksum was
-  already recorded as `LOADED` (`store.get(f"audit/{checksum}")`).
+  already recorded as `LOADED` into the same destination
+  (`store.get(f"audit/{warehouse.identity}/{checksum}")`).
   This is a genuinely good property — a file that is re-saved with
   identical contents is correctly skipped, which is stricter than
   tools that key off "last modified" alone — but it is not a
@@ -173,8 +174,11 @@ exact; where nothing exists, that's stated plainly rather than implied.
   it. So the original bytes are always recoverable, even for files
   that never reach the warehouse.
 - There is no backfill or replay command. Re-loading old data today
-  means manually clearing the `audit/{checksum}` marker for those files
-  so the checksum check doesn't skip them again.
+  means manually clearing the `audit/{warehouse identity}/{checksum}`
+  marker for those files so the checksum check doesn't skip them
+  again. (For the raw JSON route there's usually no need: every
+  version is already in the raw table, and the cleaning layer can be
+  rerun from it.)
 
 ### 2.3 Make trustworthy — contracts, schema and quality
 
@@ -413,20 +417,23 @@ defines four small interfaces (`Source`, `ObjectStore`, `Warehouse`,
 (`pipeline.py`) never has to import a cloud SDK directly. A `Pipeline`
 discovers files from a `Source`, downloads and hashes each one, validates
 it against a `Contract`, lands the raw bytes, converts valid files to
-Parquet, loads them into a `Warehouse`, and writes an `AuditRecord` for
-every attempt — success, skip, quarantine or failure alike. It runs
-today against a local folder (`LocalSource` + `LocalObjectStore`); the
-production GCP pieces (`GCSObjectStore`, `BigQueryWarehouse`) are written
-and unit-tested against mocks, and so is the SharePoint side
-(`SharePointSource`, not yet run live), but there is no orchestration,
-scheduling, alerting, secrets, or infrastructure code anywhere in the
-repository yet.
+Parquet (typed route) or to JSON rows (raw JSON route), loads them into
+a `Warehouse`, and writes an `AuditRecord` for every attempt — success,
+skip, quarantine or failure alike. It runs today against a local folder
+(`LocalSource` + `LocalObjectStore`); the production GCP pieces
+(`GCSSource`, `GCSObjectStore`, `BigQueryWarehouse`,
+`RawJsonWarehouse`) are written and unit-tested against mocks, and so
+is the SharePoint side (`SharePointSource`, not yet run live). There is
+no orchestration, scheduling, alerting, secrets, or infrastructure
+code in the repository yet; [`GCP_SETUP.md`](GCP_SETUP.md) gives the
+manual steps for the raw JSON route.
 
 The test suite (`tests/unit/`, `tests/integration/`) confirms this shape:
 unit tests cover `Pipeline` (one test per outcome), `Contract`,
-`config.py`, `fixtures.py`, `gcp_auth.py`, the local adapters, and
-`GCSObjectStore` and `BigQueryWarehouse` (the last three with the
-cloud clients mocked). The integration tests
+`raw.py`, `config.py`, `fixtures.py`, `gcp_auth.py`, the local
+adapters, and the GCS and BigQuery adapters (with the cloud clients
+mocked). `test_hww_fixtures.py` runs the raw JSON route end to end
+over the HWW-style fixtures with the local adapters. The integration tests
 (`test_end_to_end_gcs_bq.py`, `test_gcs_bigquery_integration.py`,
 `test_live_services.py`) need real GCP credentials and skip
 themselves without them — so CI collects them but never actually
@@ -447,13 +454,13 @@ behaviour doesn't match the promise), **Missing** (nothing exists).
 | Metadata catalogue | Missing | No store of source/owner/schedule; contracts are Python objects the caller constructs. |
 | Connector catalogue | Partial | `Source`/`ObjectStore`/`Warehouse` protocols exist (`ports.py`); local, GCP and SharePoint adapters are real. SharePoint has not been run live yet. |
 | Connection testing | Missing | No pre-flight credential/permission check anywhere. |
-| Source discovery | Missing | No "list what's available at this source" helper. |
+| Source discovery | Missing | No "list what's available at this source" helper. `GCSSource` lists a landing folder, but only for loading, not for browsing. |
 | Raw landing storage | **Have** | `pipeline.py`, immutable `raw/{identity}/{checksum}/{name}` key per file version; edited files keep every version. |
-| Standardisation layer | Partial | Excel → pandas → Parquet conversion exists (`pipeline.py`); no multi-format (CSV/JSON) reader yet. |
+| Standardisation layer | Partial | Excel → Parquet (`pipeline.py`) and Excel → JSON rows (`raw.py`) exist, both through one heading reader (`read_sheet()`, `contract.py`) that names blank and repeated headings. No CSV or other input format yet. |
 | Schema registry | Partial | `Contract` dataclasses exist (`contract.py`); no external, diffable file format (e.g. YAML) yet. |
-| Schema-drift detection | **Have** (strict) | Missing *and* extra columns both raise `ContractError` (`contract.py`) — confirm this "reject on any drift" policy is actually what's wanted; some tools treat an extra column as a warning, not a failure. |
+| Schema-drift detection | **Have** | Missing and extra columns are detected per worksheet (`contract.py`). `on_mismatch="quarantine"` rejects the file; `on_mismatch="warn"` loads it and records a warning. `column_selection="all_except"` accepts new columns. |
 | Data profiling | Missing | No profiling tool or script. |
-| Data quality rule catalogue | Partial | Four rule types exist per column (`nullable`, `data_type`, `unique`, worksheet/column presence); no reusable catalogue across contracts, no thresholds. |
+| Data quality rule catalogue | Partial | Four rule types exist per column (`nullable`, `data_type`, `unique`, worksheet/column presence), each either quarantining or warning; no reusable catalogue across contracts, no thresholds. |
 | Mapping/transformation templates | Missing | No mapping-specification format; any renaming/mapping is ad hoc in caller code. |
 | Reference-data management | Missing | Not built; not yet needed at this scope. |
 | Full-load support | **Have** | `LocalSource.items()` always lists everything (`adapters/local.py`). |
@@ -461,21 +468,21 @@ behaviour doesn't match the promise), **Missing** (nothing exists).
 | CDC support | N/A | No database sources exist; correctly out of scope for now. |
 | File change detection | Partial | Content-hash dedup exists (`pipeline.py`); no delta/change-token query against the source itself. |
 | Scheduling and orchestration | Missing | No scheduler, no orchestrator config; `deploy/` is empty. |
-| Event triggering | Missing | Not built; batch-only today. |
+| Event triggering | Partial | `runner.handle_upload()` runs the pipeline for an upload's landing folder from a Cloud Run service behind Eventarc; the trigger itself is set up by hand (`GCP_SETUP.md`, section 6). |
 | Queueing / buffering | N/A | Not needed at current file volumes. |
 | Rate limiting / throttling | Partial | `SharePointSource` honours Graph `Retry-After` on 429; nothing else does. |
 | Retries and backoff | Partial | `SharePointSource` retries 429/5xx and network errors (bounded, exponential); other external calls are single attempts. |
 | Idempotency and deduplication | **Have** | Content-hash dedup at pipeline level (`Pipeline._is_duplicate()`), plus a warehouse `MERGE` on `key_columns` (`BigQueryWarehouse`) — provided the caller passes `key_columns`; see [2.4](#24-publish--writing-to-the-destination-safely). |
 | Checkpointing | Partial | File-level: a crash loses at most one file's work (results are appended per file). No run-level checkpoint. |
 | Delivery ledger / receipts | Partial | The audit record *is* a delivery ledger for BigQuery; no equivalent receipt concept for external destination APIs (none exist yet). |
-| Quarantine / dead-letter storage | **Have** | `pipeline.py`, `quarantine/{identity}/{checksum}/{name}` key, with the original file also kept in `raw/`. |
+| Quarantine / dead-letter storage | **Have** (file-level) | `pipeline.py`, `quarantine/{identity}/{checksum}/{name}` key, with the original file also kept in `raw/`. Row-level quarantine belongs in the Dataform layer for the raw JSON route. |
 | Reconciliation | Missing | No source-count vs. destination-count check after a load completes. |
 | Backfill and replay | Missing | No rebuild/replay command; manual procedure only (clear the checksum audit key). |
 | Lineage and audit trail | **Have** (file-level) | `model.py`, written by `pipeline.py`. No run-level record, no code/config version stamped per record. |
-| Logging, metrics, alerts | Partial | Plain-text logging exists; no metrics, no alerting. |
+| Logging, metrics, alerts | Partial | Plain-text logging exists, with contract warnings at WARNING. `runner.run_job()`/`handle_upload()` turn FAILED files into a failed job or a retried event, and `runner.check_freshness()` logs overdue sources. Alerts are documented as manual steps (`GCP_SETUP.md`), not built as code. |
 | Run-status API/dashboard | Missing | Nothing queries the audit trail for a status view. |
 | Secrets and identity management | Partial | `gcp_auth.py` handles *which GCP credential to run as*; the `SecretStore` protocol (`ports.py`) has **no implementation** for application secrets (e.g. a SharePoint client secret). |
-| Data classification / policy controls | Missing | Not built; the audit trail's "store checksum, not content" design (`pipeline.py`) is a reasonable privacy default to build on. |
+| Data classification / policy controls | Partial | Contracts can exclude columns (`Worksheet.excluded`) so personal data isn't loaded; no classification tags. The audit trail's "store checksum, not content" design (`pipeline.py`) is a reasonable privacy default to build on. |
 | Environment management | Partial | `config.py` supports named sections (e.g. `dev`/`prod`) with `${VAR}` interpolation; no enforced separation beyond that convention. |
 | Infrastructure as code | Missing | No Terraform; `deploy/` is an empty folder. |
 | Testing and release controls | **Have** | `pytest`, `pre-commit` (black/ruff/mypy/detect-secrets), GitHub Actions CI (`.github/workflows/tests.yml`). |
@@ -499,7 +506,7 @@ not a redesign.
 | Operational state (locks, checkpoints) | GCS lock object for the run lock; Firestore or another approved store for checkpoints if needed | Built: `GCSObjectStore.lock()` (`adapters/gcs.py`) refuses overlapping runs. A run killed mid-flight needs its lock object deleted by hand. |
 | Warehouse | BigQuery, with a `MERGE` on `Contract.key_columns` | Built: `BigQueryWarehouse.load()` (`adapters/bigquery.py`); the solution's `main.py` must pass `key_columns=contract.key_columns`. |
 | Secrets | Secret Manager, referenced (never inlined) from configuration | Needs a new adapter implementing `SecretStore` (`ports.py`); none exists today. |
-| Quality | Reusable checks: schema, required fields, uniqueness, valid codes, record counts, freshness | `Contract.validate()` covers the first four; row-count/freshness checks are not built (see [Section 5](#5-feature-by-feature-status)). |
+| Quality | Reusable checks: schema, required fields, uniqueness, valid codes, record counts, freshness | `Contract.validate()` covers the first four; freshness is a per-source view read by `runner.check_freshness()` (`GCP_SETUP.md`); row-count checks are not built (see [Section 5](#5-feature-by-feature-status)). |
 | Monitoring | Cloud Logging (already reachable via Python `logging`) plus named Cloud Monitoring alerts on failure and on staleness | Not built; needs both a structured-logging change and alert policies defined as IaC. |
 | Deployment | Terraform modules, run through the existing CI/CD pattern | `deploy/` exists as a placeholder folder only. |
 
@@ -604,11 +611,13 @@ transaction with its audit record (2026-09-21; see `DECISIONS_en.md`).
    over the audit-record table answering "when did each source last
    load successfully, and is that overdue?" Both are pure configuration
    once the audit trail exists, which it already does.
-7. **Only then**, consider incremental/delta loading, row-level
-   quarantine, an orchestrator, or anything else in
+7. **Only then**, consider incremental/delta loading, an
+   orchestrator, or anything else in
    [Section 7](#7-choosing-features-for-your-scenario)'s "usually
    unnecessary at this stage" column — each has its own trigger
    condition, and none of them are blocking today's actual project.
+   (Row-level quarantine is now handled by the Dataform layer for the
+   raw JSON route; see [`RAW_TABLE_LAYOUT.md`](RAW_TABLE_LAYOUT.md).)
 
 ---
 

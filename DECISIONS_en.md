@@ -8,6 +8,171 @@ Entries are not rewritten once made. When a decision changes, add a
 new dated entry saying which earlier entry it replaces, and mark the
 earlier entry as superseded.
 
+## 2026-10-15 — Runner helpers for scheduled and upload-triggered runs
+
+### A run with a FAILED file fails
+
+`Pipeline.run()` records a file that fails and carries on with the
+next, so a run can return normally with FAILED files. Each solution
+repository used to check the results itself. `py_common.runner` now
+does: `run_job()` returns exit code 1, and `handle_upload()` raises
+`RunFailed` (a new `IngestionError`). That way a Cloud Run job
+execution shows as failed, and Pub/Sub delivers an upload event again.
+`run_job()` runs every pipeline even after one fails or is refused by
+its lock, because the sources are independent. QUARANTINED is not a
+failure here: retrying won't fix a bad file, and it has its own alert.
+
+### Upload events run Pipeline.run(), not Pipeline.process()
+
+The HWW team's standard pattern starts a Cloud Run service from
+Eventarc when a file lands. `handle_upload()` maps the object's
+folder to its pipeline and calls `run()` for that folder. `run()`
+takes the warehouse lock and writes the audit record and the
+"already loaded" marker. `process()` does neither, so a redelivered
+event would have loaded the file again. `GCP_SETUP.md` had suggested
+`process()` could sit behind the trigger; it now says not to.
+
+The daily scheduled job stays, as the backstop for lost events (by
+default Pub/Sub keeps an undelivered event for 24 hours) and to run
+the freshness check. The service runs with one instance and one
+request at a time, so files landing together queue instead of
+clashing on the lock. The lock still guards the short periods when
+Cloud Run runs more instances than its maximum.
+
+**Trade-off**: two ways to start a run means two deployments and two
+log sources for the alerts. Benefit: an ad hoc upload loads in
+minutes, and the setup matches the team's pattern.
+
+### Missing files are checked per source
+
+The missing-file alert was a BigQuery scheduled query that failed
+when nothing had loaded for 35 days. It covered all sources at once,
+and its failure email reached only the account that created it. It
+is replaced by a `source_freshness` view, with one row per monthly
+source read from that source's raw table. The daily job calls
+`check_freshness()`, which logs `Missing monthly file:` for each
+overdue source, and a log-based alert sends that to the team.
+Sources are due by the 7th of the month.
+
+## 2026-10-14 — Workbook layouts and a raw JSON load route
+
+### A raw JSON route alongside the typed MERGE route
+
+The Healthy Working Wales project lands data in BigQuery as raw JSON
+and cleans it in Dataform (see
+`docs/RAW_JSON_VS_CONTRACT_VALIDATION.md`). py-common provides the
+landing and raw load: `Pipeline(output_format="raw_json")` writes
+every configured sheet as newline-delimited JSON
+(`py_common.raw.to_ndjson`), and `RawJsonWarehouse` inserts each
+sheet's rows into its own raw table. A raw table has `source_file`,
+`source_generation`, `sheet_name`, `row_number`, `checksum`,
+`payload` (JSON) and `ingested_at`, and is partitioned by day of
+`ingested_at`. `BigQueryWarehouse` and the Parquet route are
+unchanged.
+
+All of a file's rows, across every sheet, are inserted with the
+audit record in one script transaction, as `BigQueryWarehouse` does
+for its MERGE. Rows are only ever inserted. Every version of a file
+stays in the raw table, and Dataform picks the latest
+`source_generation`. Values keep their Excel type as far as JSON
+allows: numbers stay numbers, and dates become ISO 8601 text. That
+way the cleaning layer doesn't have to guess which "01/02/2026" was
+a real date.
+
+**Trade-off**: Raw tables grow with every monthly upload of a
+cumulative file, though at HWW volumes that is kilobytes. Typing and
+deduplication move to Dataform, so they are tested there rather than
+here. Benefit: a schema change never stops a load, nothing is
+overwritten, and the cleaning SQL can be rerun from the raw tables
+at any time.
+
+### Loaded markers and processed copies are kept per destination
+
+The "already loaded" marker moves from `audit/{checksum}` to
+`audit/{warehouse identity}/{checksum}`, and processed copies from
+`processed/{identity}/{checksum}/...` to
+`processed/{warehouse identity}/{identity}/{checksum}/...`. Audit
+records gain a `warehouse` field. `raw/` and `quarantine/` keys don't
+change: every pipeline stores the same original bytes there, which
+`put()` accepts as a repeat.
+
+Before, the first pipeline to load a workbook wrote the marker, and
+every other pipeline reading a different sheet of that workbook then
+skipped it as a duplicate. Had it not skipped, its different Parquet
+would have collided with the first one's under the same key.
+
+**Trade-off**: Markers written before this change are not looked
+up, so files that were already loaded load once more after
+upgrading. Nothing is in production yet; for a typed table with key
+columns, the MERGE makes that reload harmless. Benefit: one workbook
+can feed one pipeline per sheet.
+
+### Mismatches can warn instead of quarantine
+
+A worksheet's `on_mismatch` is `"quarantine"` (the default, as
+before) or `"warn"`. In `"warn"` mode a header mismatch (missing or
+unexpected column) and row-level problems (wrong type, missing
+required value, duplicate in a unique column) are recorded as
+warnings, and the file still loads. A missing listed column loads as
+empty. Warnings are logged at WARNING, kept on `Result.warnings`, and
+written to the audit record.
+
+This qualifies "Validation errors quarantine, not fail" below. With
+the raw JSON route, the cleaning layer in Dataform quarantines bad
+rows one at a time, so rejecting a whole monthly file over one bad
+value would hold back every good row with it.
+
+**Trade-off**: In `"warn"` mode, bad data reaches the raw tables, and
+the Dataform checks must catch it before it reaches reports.
+Warnings only help if someone is alerted to them (see
+`docs/GCP_SETUP.md`). Benefit: a renamed column or a stray value no
+longer stops a month's data, and the file owner still hears about it.
+
+### Contracts choose which columns are loaded
+
+A worksheet's `column_selection` is `"listed"` (the default) or
+`"all_except"`, and `excluded` names columns that are in the sheet
+but never loaded. In `listed` mode only the contract's columns are
+loaded, and an excluded column is not counted as unexpected. In
+`all_except` mode every column except the excluded ones is loaded,
+so a column added to a form is picked up without a contract change.
+`Contract.extract()` applies the selection; the Parquet conversion
+now uses it rather than reading the sheet itself.
+
+Most HWW sources hold far more columns than the analysis needs,
+including names, email addresses and contact details. Loading every
+column would copy that personal data into BigQuery for no reason,
+which works against the data minimisation the DPIA will expect.
+
+**Trade-off**: In `listed` mode a new column is not loaded until
+someone adds it to the contract; the header check reports it. In
+`all_except` mode a new personal-data column is loaded until someone
+excludes it. Benefit: each source can be set to whichever risk fits
+it, and the original file is still kept in `raw/` if a column is
+needed later.
+
+### Every column gets a name; none are dropped
+
+Headings are read once, by `read_sheet()` in `contract.py`, and both
+validation and conversion use its names. A blank heading over a
+column with data becomes `col_<letter>` (e.g. `col_B`); a blank
+heading over an empty column is ignored as formatting. A repeated
+heading keeps its name the first time and becomes `_2`, `_3`, ...
+after that, skipping any name the sheet already uses. Headings are
+not trimmed. Rows with no values are skipped.
+
+Before, the Parquet conversion built each row with
+`dict(zip(headers, row))`, so a repeated heading silently kept only
+its last column, and a blank heading's data went nowhere useful. The
+HWW survey sheets repeat "Other" many times.
+
+**Trade-off**: A data column with no heading is now reported as an
+unexpected column (`col_B`) instead of passing unnoticed, so a
+contract may need to list it. Names depend on column position for
+blank headings and on order for repeats, so moving such a column
+changes its name. Benefit: no data is lost without anyone knowing,
+and the names are the same on every run of the same layout.
+
 ## 2026-09-30 — Real GCS lock; SharePoint adapter; versioned storage keys; `_loaded_at` set by BigQuery
 
 ### GCSObjectStore.lock() is a real lock, not a no-op

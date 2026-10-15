@@ -5,9 +5,9 @@ from io import BytesIO
 from typing import Any
 
 import pytest
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
-from py_common.contract import Column, Contract, Worksheet
+from py_common.contract import Column, Contract, Worksheet, read_sheet
 from py_common.errors import ContractError, ValidationError
 from py_common.fixtures import make_fixtures
 
@@ -34,6 +34,31 @@ def _build_workbook(
         for col_idx, header in enumerate(headers, start=1):
             ws.cell(row=1, column=col_idx, value=header)
         for row_idx, row in enumerate(rows, start=2):
+            for col_idx, value in enumerate(row, start=1):
+                ws.cell(row=row_idx, column=col_idx, value=value)
+    buffer = BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
+def _build_grid_workbook(sheets: dict[str, list[list[Any]]]) -> bytes:
+    """Build .xlsx bytes, writing each sheet's rows exactly as given.
+
+    Unlike _build_workbook, nothing is assumed about where the
+    headings go, so tests can put title lines above them or leave
+    cells blank.
+
+    Args:
+        sheets: Maps worksheet name to its rows, top to bottom.
+
+    Returns:
+        Raw .xlsx file bytes.
+    """
+    wb = Workbook()
+    wb.remove(wb.active)
+    for name, rows in sheets.items():
+        ws = wb.create_sheet(title=name)
+        for row_idx, row in enumerate(rows, start=1):
             for col_idx, value in enumerate(row, start=1):
                 ws.cell(row=row_idx, column=col_idx, value=value)
     buffer = BytesIO()
@@ -316,3 +341,546 @@ def test_bool_rejected_by_integer_column():
 
     with pytest.raises(ValidationError, match="expected integer"):
         contract.validate(excel_bytes, "bool.xlsx")
+
+
+class TestWorksheetHeaderRow:
+    """Worksheet.header_row says which row holds the headings."""
+
+    def test_header_row_defaults_to_first_row(self):
+        """Existing contracts keep reading headings from row 1."""
+        assert Worksheet(name="Events").header_row == 1
+
+    def test_header_row_below_one_is_rejected(self):
+        """A header_row of 0 is a configuration mistake."""
+        with pytest.raises(ValueError, match="header_row"):
+            Worksheet(name="Events", header_row=0)
+
+
+class TestContractValidateHeaderRow:
+    """validate() reads headings from the configured row."""
+
+    @pytest.fixture
+    def contract(self) -> Contract:
+        """Contract whose headings sit on row 2, under a title line."""
+        return Contract(
+            worksheets=[
+                Worksheet(
+                    name="Account signups",
+                    header_row=2,
+                    columns=[
+                        Column(name="Org", data_type="string"),
+                        Column(name="Size", data_type="string"),
+                    ],
+                )
+            ]
+        )
+
+    def test_headings_on_row_two_are_found(self, contract):
+        """A "Last updated" line above the headings is skipped.
+
+        Args:
+            contract: Contract fixture with header_row=2.
+        """
+        excel_bytes = _build_grid_workbook(
+            {
+                "Account signups": [
+                    ["Last updated: 02/03/2026"],
+                    ["Org", "Size"],
+                    ["Org 1", "1000+"],
+                    ["Org 2", "10-49"],
+                ]
+            }
+        )
+
+        rows = contract.validate(excel_bytes, "signups.xlsx")
+
+        assert rows == 2
+
+    def test_errors_report_excel_row_numbers(self, contract):
+        """Row numbers in errors match what Excel shows.
+
+        Args:
+            contract: Contract fixture with header_row=2.
+        """
+        excel_bytes = _build_grid_workbook(
+            {
+                "Account signups": [
+                    ["Last updated: 02/03/2026"],
+                    ["Org", "Size"],
+                    ["Org 1", 1000],
+                ]
+            }
+        )
+
+        with pytest.raises(ValidationError, match="Row 3: 'Size'"):
+            contract.validate(excel_bytes, "signups.xlsx")
+
+    def test_wrong_header_row_reports_missing_columns(self, contract):
+        """Headings on row 1 don't satisfy a header_row=2 contract.
+
+        Args:
+            contract: Contract fixture with header_row=2.
+        """
+        excel_bytes = _build_grid_workbook(
+            {"Account signups": [["Org", "Size"], ["Org 1", "1000+"]]}
+        )
+
+        with pytest.raises(ContractError, match="Missing column 'Org'"):
+            contract.validate(excel_bytes, "signups.xlsx")
+
+
+def _read(rows: list[list[Any]], header_row: int = 1):
+    """Run read_sheet() over a one-sheet workbook built from rows.
+
+    Args:
+        rows: Sheet rows, top to bottom.
+        header_row: Row holding the headings.
+
+    Returns:
+        read_sheet()'s (names, rows) result.
+    """
+    excel_bytes = _build_grid_workbook({"Sheet": rows})
+    ws = load_workbook(BytesIO(excel_bytes), data_only=True)["Sheet"]
+    return read_sheet(ws, header_row)
+
+
+class TestReadSheet:
+    """read_sheet() gives every column a present, unique name."""
+
+    def test_blank_heading_over_data_is_named_by_letter(self):
+        """Column B with no heading but with data becomes col_B."""
+        names, rows = _read([["Count", None, "Org"], [1, "Nov", "Org 1"]])
+
+        assert names == ["Count", "col_B", "Org"]
+        assert rows == [(2, (1, "Nov", "Org 1"))]
+
+    def test_blank_heading_over_empty_column_is_ignored(self):
+        """A blank, empty column is only formatting, so it's dropped."""
+        names, rows = _read([["Org", None, "Size"], ["Org 1", None, "S"]])
+
+        assert names == ["Org", "Size"]
+        assert rows == [(2, ("Org 1", "S"))]
+
+    def test_repeated_headings_get_numbered(self):
+        """The first "Other" keeps its name; later ones get _2, _3."""
+        names, _ = _read([["Q1", "Other", "Q2", "Other", "Other"], [1] * 5])
+
+        assert names == ["Q1", "Other", "Q2", "Other_2", "Other_3"]
+
+    def test_renamed_repeat_skips_a_name_the_sheet_uses(self):
+        """A repeat can't take "Other_2" if a real heading uses it."""
+        names, _ = _read([["Other", "Other", "Other_2"], [1, 2, 3]])
+
+        assert names == ["Other", "Other_3", "Other_2"]
+
+    def test_headings_are_kept_exactly_as_written(self):
+        """No trimming: contracts must match the sheet exactly."""
+        names, _ = _read([["Organisation Industry ", 2026], ["x", "y"]])
+
+        assert names == ["Organisation Industry ", "2026"]
+
+    def test_empty_rows_are_skipped_and_row_numbers_kept(self):
+        """Blank rows vanish; remaining rows keep their Excel numbers."""
+        names, rows = _read(
+            [["Org"], ["Org 1"], [None], ["   "], ["Org 2"]],
+        )
+
+        assert names == ["Org"]
+        assert rows == [(2, ("Org 1",)), (5, ("Org 2",))]
+
+
+class TestContractValidateHeadingNames:
+    """validate() checks the names read_sheet() gives each column."""
+
+    def test_repeated_heading_can_be_listed_by_its_new_name(self):
+        """Contracts refer to the second "Other" as "Other_2"."""
+        contract = Contract(
+            worksheets=[
+                Worksheet(
+                    name="Survey info",
+                    columns=[
+                        Column(name="Other", data_type="string"),
+                        Column(name="Other_2", data_type="string"),
+                    ],
+                )
+            ]
+        )
+        excel_bytes = _build_grid_workbook(
+            {"Survey info": [["Other", "Other"], ["a", "b"]]}
+        )
+
+        assert contract.validate(excel_bytes, "survey.xlsx") == 1
+
+    def test_unlisted_blank_heading_column_is_unexpected(self):
+        """A data column with no heading is reported, not ignored."""
+        contract = Contract(
+            worksheets=[
+                Worksheet(
+                    name="Account signups",
+                    columns=[Column(name="Org", data_type="string")],
+                )
+            ]
+        )
+        excel_bytes = _build_grid_workbook(
+            {"Account signups": [["Org", None], ["Org 1", "Nov"]]}
+        )
+
+        with pytest.raises(ContractError, match="Unexpected columns: col_B"):
+            contract.validate(excel_bytes, "signups.xlsx")
+
+    def test_trailing_blank_rows_are_not_counted(self):
+        """Blank rows below the data don't count or fail checks."""
+        contract = Contract(
+            worksheets=[
+                Worksheet(
+                    name="Events",
+                    columns=[Column(name="event_id", data_type="string")],
+                )
+            ]
+        )
+        excel_bytes = _build_grid_workbook(
+            {"Events": [["event_id"], ["EVT001"], [None], [None]]}
+        )
+
+        assert contract.validate(excel_bytes, "events.xlsx") == 1
+
+
+class TestWorksheetColumnSelection:
+    """Worksheet checks its column selection settings up front."""
+
+    def test_defaults_load_only_listed_columns(self):
+        """Existing contracts keep loading just their listed columns."""
+        ws_def = Worksheet(name="Events")
+
+        assert ws_def.column_selection == "listed"
+        assert ws_def.excluded == []
+
+    def test_unknown_selection_is_rejected(self):
+        """A typo in column_selection fails when the contract is built."""
+        with pytest.raises(ValueError, match="column_selection"):
+            Worksheet(name="Events", column_selection="everything")
+
+    def test_column_both_listed_and_excluded_is_rejected(self):
+        """A column can't be loaded and excluded at the same time."""
+        with pytest.raises(ValueError, match="both listed and excluded"):
+            Worksheet(
+                name="Events",
+                columns=[Column(name="Email", data_type="string")],
+                excluded=["Email"],
+            )
+
+
+class TestContractValidateColumnSelection:
+    """validate() accepts excluded and, in all_except, new columns."""
+
+    def test_excluded_column_is_not_unexpected(self):
+        """A known personal-data column can stay in the sheet."""
+        contract = Contract(
+            worksheets=[
+                Worksheet(
+                    name="Peers",
+                    columns=[
+                        Column(name="Participant ID", data_type="string")
+                    ],
+                    excluded=["Email Address"],
+                )
+            ]
+        )
+        excel_bytes = _build_grid_workbook(
+            {"Peers": [["Participant ID", "Email Address"], ["0001", "a@b"]]}
+        )
+
+        assert contract.validate(excel_bytes, "peers.xlsx") == 1
+
+    def test_all_except_accepts_new_columns(self):
+        """A column added to the sheet doesn't stop the load."""
+        contract = Contract(
+            worksheets=[
+                Worksheet(
+                    name="Peers",
+                    columns=[
+                        Column(name="Participant ID", data_type="string")
+                    ],
+                    column_selection="all_except",
+                )
+            ]
+        )
+        excel_bytes = _build_grid_workbook(
+            {"Peers": [["Participant ID", "New question"], ["0001", "yes"]]}
+        )
+
+        assert contract.validate(excel_bytes, "peers.xlsx") == 1
+
+    def test_all_except_still_requires_listed_columns(self):
+        """Listed columns must be present in either mode."""
+        contract = Contract(
+            worksheets=[
+                Worksheet(
+                    name="Peers",
+                    columns=[
+                        Column(name="Participant ID", data_type="string")
+                    ],
+                    column_selection="all_except",
+                )
+            ]
+        )
+        excel_bytes = _build_grid_workbook({"Peers": [["ID"], ["0001"]]})
+
+        with pytest.raises(ContractError, match="Missing column"):
+            contract.validate(excel_bytes, "peers.xlsx")
+
+
+class TestContractExtract:
+    """extract() returns only the columns the contract selects."""
+
+    def test_listed_mode_returns_listed_columns_in_contract_order(self):
+        """Unlisted and excluded columns are left out."""
+        contract = Contract(
+            worksheets=[
+                Worksheet(
+                    name="Peers",
+                    columns=[
+                        Column(name="Sector", data_type="string"),
+                        Column(name="Participant ID", data_type="string"),
+                    ],
+                    excluded=["Email Address"],
+                )
+            ]
+        )
+        excel_bytes = _build_grid_workbook(
+            {
+                "Peers": [
+                    ["Participant ID", "Email Address", "Sector"],
+                    ["0001", "a@b", "Public"],
+                ]
+            }
+        )
+
+        sheet = contract.extract(excel_bytes)["Peers"]
+
+        assert sheet.columns == ["Sector", "Participant ID"]
+        assert sheet.rows == [(2, ("Public", "0001"))]
+
+    def test_all_except_mode_drops_only_excluded_columns(self):
+        """Everything else is kept, in the sheet's order."""
+        contract = Contract(
+            worksheets=[
+                Worksheet(
+                    name="Peers",
+                    column_selection="all_except",
+                    excluded=["First Name", "Email Address"],
+                )
+            ]
+        )
+        excel_bytes = _build_grid_workbook(
+            {
+                "Peers": [
+                    [
+                        "Participant ID",
+                        "First Name",
+                        "Sector",
+                        "Email Address",
+                    ],
+                    ["0001", "Jan", "Public", "a@b"],
+                ]
+            }
+        )
+
+        sheet = contract.extract(excel_bytes)["Peers"]
+
+        assert sheet.columns == ["Participant ID", "Sector"]
+        assert sheet.rows == [(2, ("0001", "Public"))]
+
+    def test_listed_column_missing_from_sheet_is_none(self):
+        """A missing listed column comes back empty, not as an error."""
+        contract = Contract(
+            worksheets=[
+                Worksheet(
+                    name="Peers",
+                    columns=[
+                        Column(name="Participant ID", data_type="string"),
+                        Column(name="Sector", data_type="string"),
+                    ],
+                )
+            ]
+        )
+        excel_bytes = _build_grid_workbook(
+            {"Peers": [["Participant ID"], ["0001"]]}
+        )
+
+        sheet = contract.extract(excel_bytes)["Peers"]
+
+        assert sheet.rows == [(2, ("0001", None))]
+
+    def test_every_configured_sheet_is_returned_in_order(self):
+        """One SheetRows per worksheet, using each sheet's header_row."""
+        contract = Contract(
+            worksheets=[
+                Worksheet(
+                    name="Survey info",
+                    header_row=2,
+                    columns=[Column(name="Org", data_type="string")],
+                ),
+                Worksheet(
+                    name="Account signups",
+                    columns=[Column(name="Org", data_type="string")],
+                ),
+            ]
+        )
+        excel_bytes = _build_grid_workbook(
+            {
+                "Account signups": [["Org"], ["Org 2"]],
+                "Survey info": [["Last updated"], ["Org"], ["Org 1"]],
+            }
+        )
+
+        sheets = contract.extract(excel_bytes)
+
+        assert list(sheets) == ["Survey info", "Account signups"]
+        assert sheets["Survey info"].rows == [(3, ("Org 1",))]
+        assert sheets["Account signups"].rows == [(2, ("Org 2",))]
+
+
+class TestWorksheetOnMismatch:
+    """Worksheet.on_mismatch defaults to today's quarantine."""
+
+    def test_defaults_to_quarantine(self):
+        """Existing contracts keep rejecting mismatched files."""
+        assert Worksheet(name="Events").on_mismatch == "quarantine"
+
+    def test_unknown_mode_is_rejected(self):
+        """A typo in on_mismatch fails when the contract is built."""
+        with pytest.raises(ValueError, match="on_mismatch"):
+            Worksheet(name="Events", on_mismatch="ignore")
+
+
+class TestContractValidateWarnMode:
+    """In "warn" mode, problems are recorded and the file passes."""
+
+    @staticmethod
+    def _contract(on_mismatch: str) -> Contract:
+        """Contract for a "Peers" sheet with an ID and a size.
+
+        Args:
+            on_mismatch: "quarantine" or "warn".
+
+        Returns:
+            Contract.
+        """
+        return Contract(
+            worksheets=[
+                Worksheet(
+                    name="Peers",
+                    on_mismatch=on_mismatch,
+                    columns=[
+                        Column(
+                            name="Participant ID",
+                            data_type="string",
+                            unique=True,
+                        ),
+                        Column(name="Business Size", data_type="string"),
+                    ],
+                )
+            ]
+        )
+
+    def test_renamed_column_is_a_warning(self):
+        """A renamed heading is reported, and the rows still count."""
+        excel_bytes = _build_grid_workbook(
+            {"Peers": [["Participant ID", "Size"], ["0001", "50-249"]]}
+        )
+        warnings: list[str] = []
+
+        rows = self._contract("warn").validate(
+            excel_bytes, "peers.xlsx", warnings=warnings
+        )
+
+        assert rows == 1
+        assert len(warnings) == 1
+        assert "Missing column 'Business Size'" in warnings[0]
+        assert "Unexpected columns: Size" in warnings[0]
+
+    def test_renamed_column_quarantines_in_quarantine_mode(self):
+        """The same file is rejected when on_mismatch is quarantine."""
+        excel_bytes = _build_grid_workbook(
+            {"Peers": [["Participant ID", "Size"], ["0001", "50-249"]]}
+        )
+
+        with pytest.raises(ContractError, match="Missing column"):
+            self._contract("quarantine").validate(excel_bytes, "peers.xlsx")
+
+    def test_missing_column_is_not_reported_on_every_row(self):
+        """One header warning, not a "required" error per row."""
+        excel_bytes = _build_grid_workbook(
+            {"Peers": [["Participant ID"], ["0001"], ["0002"]]}
+        )
+        warnings: list[str] = []
+
+        self._contract("warn").validate(
+            excel_bytes, "peers.xlsx", warnings=warnings
+        )
+
+        assert len(warnings) == 1
+        assert "is required" not in warnings[0]
+
+    def test_row_problems_are_warnings(self):
+        """A duplicate and a wrong type don't stop the file."""
+        excel_bytes = _build_grid_workbook(
+            {
+                "Peers": [
+                    ["Participant ID", "Business Size"],
+                    ["0001", "50-249"],
+                    ["0001", 250],
+                ]
+            }
+        )
+        warnings: list[str] = []
+
+        rows = self._contract("warn").validate(
+            excel_bytes, "peers.xlsx", warnings=warnings
+        )
+
+        assert rows == 2
+        assert "Row 3: Duplicate value" in warnings[0]
+        assert "Row 3: 'Business Size' is int" in warnings[0]
+
+    def test_row_problems_quarantine_in_quarantine_mode(self):
+        """The same rows are rejected when on_mismatch is quarantine."""
+        excel_bytes = _build_grid_workbook(
+            {
+                "Peers": [
+                    ["Participant ID", "Business Size"],
+                    ["0001", "50-249"],
+                    ["0001", "50-249"],
+                ]
+            }
+        )
+
+        with pytest.raises(ValidationError, match="Duplicate value"):
+            self._contract("quarantine").validate(excel_bytes, "peers.xlsx")
+
+    def test_warnings_are_tolerated_without_a_list(self):
+        """Callers that pass no list still get a passing file."""
+        excel_bytes = _build_grid_workbook(
+            {"Peers": [["Participant ID"], ["0001"]]}
+        )
+
+        assert self._contract("warn").validate(excel_bytes, "p.xlsx") == 1
+
+    def test_valid_file_adds_no_warnings(self):
+        """Nothing is recorded when the sheet matches."""
+        excel_bytes = _build_grid_workbook(
+            {
+                "Peers": [
+                    ["Participant ID", "Business Size"],
+                    ["0001", "50-249"],
+                ]
+            }
+        )
+        warnings: list[str] = []
+
+        self._contract("warn").validate(
+            excel_bytes, "peers.xlsx", warnings=warnings
+        )
+
+        assert warnings == []

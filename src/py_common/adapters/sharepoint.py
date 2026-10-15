@@ -113,13 +113,15 @@ class SharePointConfig:
         folder: Folder path inside the library, e.g. "Incoming/2026".
             Empty means the library root. Sub-folders are not read.
         extensions: File extensions to pick up (lower case, with dot).
+            Defaults to .xlsx only: openpyxl cannot read old-style
+            .xls workbooks.
     """
 
     hostname: str
     site_path: str
     library: str
     folder: str = ""
-    extensions: tuple[str, ...] = (".xlsx", ".xls")
+    extensions: tuple[str, ...] = (".xlsx",)
 
     _REQUIRED = ("hostname", "site_path", "library")
     _OPTIONAL = ("folder", "extensions")

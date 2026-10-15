@@ -75,5 +75,60 @@
     ],
     "row_count": 2,
     "description": "Duplicate value in unique column 'event_id'"
+  },
+  "hww_header_row_2": {
+    "filename": "hww_header_row_2.xlsx",
+    "worksheet": "Account signups",
+    "header_row": 2,
+    "headers": [
+      "Count",
+      null,
+      "Org",
+      "Size"
+    ],
+    "row_count": 2,
+    "description": "Headings on row 2; sign-up month under a blank heading"
+  },
+  "hww_repeated_other": {
+    "filename": "hww_repeated_other.xlsx",
+    "worksheet": "Survey info",
+    "header_row": 1,
+    "headers": [
+      "Org",
+      "Q4 Option A",
+      "Other",
+      "Q7 Option A",
+      "Other"
+    ],
+    "row_count": 2,
+    "description": "Two tick-box questions each with an 'Other' column"
+  },
+  "hww_personal_data": {
+    "filename": "hww_personal_data.xlsx",
+    "worksheet": "query (1)",
+    "header_row": 1,
+    "headers": [
+      "Participant ID",
+      "Business Name",
+      "First Name",
+      "Email Address",
+      "Sector"
+    ],
+    "row_count": 2,
+    "description": "Names and email addresses a contract should exclude"
+  },
+  "hww_header_mismatch": {
+    "filename": "hww_header_mismatch.xlsx",
+    "worksheet": "query (1)",
+    "header_row": 1,
+    "headers": [
+      "Participant ID",
+      "Business Name",
+      "First Name",
+      "Email Address",
+      "Business Sector"
+    ],
+    "row_count": 2,
+    "description": "'Sector' renamed to 'Business Sector'"
   }
 }

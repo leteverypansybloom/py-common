@@ -256,3 +256,27 @@ class TestLocalSourceIdentity:
         item = next(iter(source.items()))
 
         assert source.download(item) == b"workbook bytes"
+
+
+class TestLocalSourceItems:
+    """LocalSource.items() lists only workbooks openpyxl can read."""
+
+    def test_old_xls_files_are_not_listed(self, tmp_path):
+        """.xls files are skipped; openpyxl can't open them.
+
+        Args:
+            tmp_path: pytest temp directory fixture
+
+        Returns:
+            None
+
+        Raises:
+            AssertionError: If the .xls file is listed
+        """
+        (tmp_path / "events.xlsx").write_bytes(b"data")
+        (tmp_path / "legacy.xls").write_bytes(b"data")
+        source = LocalSource(tmp_path)
+
+        names = [item.name for item in source.items()]
+
+        assert names == ["events.xlsx"]

@@ -1,4 +1,4 @@
-"""Unit tests for GCSObjectStore adapter.
+"""Unit tests for the GCSObjectStore and GCSSource adapters.
 
 Tests define the ObjectStore protocol contract without requiring live
 GCS services. All external dependencies are mocked.
@@ -20,7 +20,10 @@ from google.api_core.exceptions import (
     PreconditionFailed,
 )
 
-from py_common.adapters.gcs import GCSObjectStore
+from py_common.adapters.gcs import GCSObjectStore, GCSSource
+from py_common.errors import NotFound as ItemNotFound
+from py_common.errors import ServiceError, VersionMismatch
+from py_common.model import SourceItem
 
 
 class TestGCSObjectStoreInit:
@@ -653,3 +656,369 @@ class TestGCSObjectStoreLock:
         assert any("Acquired" in m for m in messages)
         assert any("Released" in m for m in messages)
         mock_logger.warning.assert_not_called()
+
+
+def _listed_blob(name: str, generation: int = 1, size: int = 10) -> Mock:
+    """Mock storage.Blob as list_blobs() returns it.
+
+    Args:
+        name: Full object name.
+        generation: Object generation.
+        size: Size in bytes.
+
+    Returns:
+        Mock with name, generation and size.
+    """
+    blob = Mock()
+    blob.name = name
+    blob.generation = generation
+    blob.size = size
+    return blob
+
+
+class TestGCSSourceInit:
+    """Test GCSSource initialization."""
+
+    def test_init_normalises_bucket_and_prefix(self):
+        """gs:// is stripped and the prefix ends in one slash.
+
+        Args:
+            None
+
+        Returns:
+            None
+
+        Raises:
+            AssertionError: If bucket or prefix not normalised
+        """
+        with patch("py_common.adapters.gcs.storage.Client"):
+            source = GCSSource(
+                project_id="test-project",
+                bucket_name="gs://landing",
+                prefix="/hww/monthly/",
+            )
+            assert source.bucket_name == "landing"
+            assert source.prefix == "hww/monthly/"
+
+    def test_init_empty_prefix_means_bucket_root(self):
+        """No prefix lists the top of the bucket.
+
+        Args:
+            None
+
+        Returns:
+            None
+
+        Raises:
+            AssertionError: If prefix is not empty
+        """
+        with patch("py_common.adapters.gcs.storage.Client"):
+            source = GCSSource(project_id="p", bucket_name="landing")
+            assert source.prefix == ""
+
+    def test_init_defaults_to_xlsx_only(self):
+        """.xls is not picked up: openpyxl can't read it.
+
+        Args:
+            None
+
+        Returns:
+            None
+
+        Raises:
+            AssertionError: If default extensions are not .xlsx only
+        """
+        with patch("py_common.adapters.gcs.storage.Client"):
+            source = GCSSource(project_id="p", bucket_name="landing")
+            assert source.extensions == (".xlsx",)
+
+    def test_init_rejects_extension_without_dot(self):
+        """Extensions must look like ".xlsx".
+
+        Args:
+            None
+
+        Returns:
+            None
+
+        Raises:
+            AssertionError: If ValueError isn't raised
+        """
+        with patch("py_common.adapters.gcs.storage.Client"):
+            with pytest.raises(ValueError, match="extensions"):
+                GCSSource(
+                    project_id="p", bucket_name="b", extensions=("xlsx",)
+                )
+
+
+class TestGCSSourceItems:
+    """Test GCSSource.items() method.
+
+    Contract: lists matching files directly in the landing folder,
+    sorted, with the object generation as the version.
+    """
+
+    @pytest.fixture
+    def source(self):
+        """Fixture: GCSSource on "landing/hww/" with a mocked client."""
+        with patch("py_common.adapters.gcs.storage.Client"):
+            return GCSSource(
+                project_id="test-project",
+                bucket_name="landing",
+                prefix="hww",
+            )
+
+    def test_items_describe_each_workbook(self, source):
+        """Name, identity, version and size come from the object.
+
+        Args:
+            source: GCSSource fixture
+
+        Returns:
+            None
+
+        Raises:
+            AssertionError: If SourceItem fields are wrong
+        """
+        source.client.list_blobs.return_value = [
+            _listed_blob("hww/was.xlsx", generation=1712, size=2048)
+        ]
+
+        items = source.items()
+
+        assert items == [
+            SourceItem(
+                name="was.xlsx",
+                identity="hww/was.xlsx",
+                version="1712",
+                size_bytes=2048,
+            )
+        ]
+
+    def test_items_list_only_the_landing_folder(self, source):
+        """The listing uses the prefix and stops at sub-folders.
+
+        Args:
+            source: GCSSource fixture
+
+        Returns:
+            None
+
+        Raises:
+            AssertionError: If list_blobs isn't scoped to the folder
+        """
+        source.client.list_blobs.return_value = []
+
+        source.items()
+
+        source.client.list_blobs.assert_called_once_with(
+            "landing", prefix="hww/", delimiter="/"
+        )
+
+    def test_items_skip_other_file_types(self, source):
+        """Only .xlsx (any case) is listed; .xls and .csv are not.
+
+        Args:
+            source: GCSSource fixture
+
+        Returns:
+            None
+
+        Raises:
+            AssertionError: If a non-.xlsx object is listed
+        """
+        source.client.list_blobs.return_value = [
+            _listed_blob("hww/notes.csv"),
+            _listed_blob("hww/legacy.xls"),
+            _listed_blob("hww/PEERS.XLSX"),
+        ]
+
+        assert [i.name for i in source.items()] == ["PEERS.XLSX"]
+
+    def test_items_are_sorted_by_object_name(self, source):
+        """Order is stable whatever order GCS returns.
+
+        Args:
+            source: GCSSource fixture
+
+        Returns:
+            None
+
+        Raises:
+            AssertionError: If items are not sorted
+        """
+        source.client.list_blobs.return_value = [
+            _listed_blob("hww/was.xlsx"),
+            _listed_blob("hww/peers.xlsx"),
+        ]
+
+        assert [i.identity for i in source.items()] == [
+            "hww/peers.xlsx",
+            "hww/was.xlsx",
+        ]
+
+    def test_items_wraps_listing_failure_in_service_error(self, source):
+        """A permission error surfaces as ServiceError.
+
+        Args:
+            source: GCSSource fixture
+
+        Returns:
+            None
+
+        Raises:
+            AssertionError: If ServiceError isn't raised
+        """
+        source.client.list_blobs.side_effect = Forbidden("no access")
+
+        with pytest.raises(ServiceError, match="Cannot list"):
+            source.items()
+
+
+class TestGCSSourceDownload:
+    """Test GCSSource.download() method.
+
+    Contract: returns the bytes of exactly the listed generation, or
+    raises VersionMismatch / NotFound instead.
+    """
+
+    @pytest.fixture
+    def mock_bucket(self):
+        """Fixture: Mock GCS bucket."""
+        return MagicMock()
+
+    @pytest.fixture
+    def source(self, mock_bucket):
+        """Fixture: GCSSource with mocked bucket."""
+        with patch("py_common.adapters.gcs.storage.Client"):
+            source = GCSSource(project_id="p", bucket_name="landing")
+            source.bucket = mock_bucket
+            return source
+
+    @pytest.fixture
+    def item(self):
+        """Fixture: item listed at generation 5."""
+        return SourceItem(
+            name="was.xlsx",
+            identity="hww/was.xlsx",
+            version="5",
+            size_bytes=10,
+        )
+
+    def test_download_returns_listed_generation(
+        self, source, mock_bucket, item
+    ):
+        """Bytes are fetched with a generation precondition.
+
+        Args:
+            source: GCSSource fixture
+            mock_bucket: Mocked GCS bucket
+            item: SourceItem fixture
+
+        Returns:
+            None
+
+        Raises:
+            AssertionError: If bytes or precondition are wrong
+        """
+        mock_bucket.get_blob.return_value = _listed_blob(
+            "hww/was.xlsx", generation=5
+        )
+        blob = mock_bucket.blob.return_value
+        blob.download_as_bytes.return_value = b"workbook"
+
+        assert source.download(item) == b"workbook"
+        mock_bucket.blob.assert_called_once_with("hww/was.xlsx")
+        blob.download_as_bytes.assert_called_once_with(if_generation_match=5)
+
+    def test_download_raises_when_object_overwritten(
+        self, source, mock_bucket, item
+    ):
+        """A newer generation means the listed one is stale.
+
+        Args:
+            source: GCSSource fixture
+            mock_bucket: Mocked GCS bucket
+            item: SourceItem fixture
+
+        Returns:
+            None
+
+        Raises:
+            AssertionError: If VersionMismatch isn't raised
+        """
+        mock_bucket.get_blob.return_value = _listed_blob(
+            "hww/was.xlsx", generation=6
+        )
+
+        with pytest.raises(VersionMismatch, match="generation 5"):
+            source.download(item)
+        mock_bucket.blob.return_value.download_as_bytes.assert_not_called()
+
+    def test_download_raises_when_overwritten_mid_download(
+        self, source, mock_bucket, item
+    ):
+        """The generation precondition failing is a VersionMismatch.
+
+        Args:
+            source: GCSSource fixture
+            mock_bucket: Mocked GCS bucket
+            item: SourceItem fixture
+
+        Returns:
+            None
+
+        Raises:
+            AssertionError: If VersionMismatch isn't raised
+        """
+        mock_bucket.get_blob.return_value = _listed_blob(
+            "hww/was.xlsx", generation=5
+        )
+        mock_bucket.blob.return_value.download_as_bytes.side_effect = (
+            PreconditionFailed("generation changed")
+        )
+
+        with pytest.raises(VersionMismatch, match="during download"):
+            source.download(item)
+
+    def test_download_raises_not_found_when_deleted(
+        self, source, mock_bucket, item
+    ):
+        """A deleted object raises py_common's NotFound.
+
+        Args:
+            source: GCSSource fixture
+            mock_bucket: Mocked GCS bucket
+            item: SourceItem fixture
+
+        Returns:
+            None
+
+        Raises:
+            AssertionError: If NotFound isn't raised
+        """
+        mock_bucket.get_blob.return_value = None
+
+        with pytest.raises(ItemNotFound, match="no longer exists"):
+            source.download(item)
+
+    def test_download_wraps_other_errors_in_service_error(
+        self, source, mock_bucket, item
+    ):
+        """A permission error surfaces as ServiceError.
+
+        Args:
+            source: GCSSource fixture
+            mock_bucket: Mocked GCS bucket
+            item: SourceItem fixture
+
+        Returns:
+            None
+
+        Raises:
+            AssertionError: If ServiceError isn't raised
+        """
+        mock_bucket.get_blob.side_effect = Forbidden("no access")
+
+        with pytest.raises(ServiceError, match="Cannot read"):
+            source.download(item)

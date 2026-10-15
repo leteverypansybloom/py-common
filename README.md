@@ -4,9 +4,10 @@ Reusable Python library for Excel → Cloud workflows. Handles file discovery, v
 
 **Status**: Early development. The core pipeline, local adapters, and
 the GCS, BigQuery and SharePoint adapters are built and unit-tested
-against mocks. The SharePoint adapter has not yet been run against a
-real site: it waits on IT's decision on authentication. See
-[Adapter status](#adapter-status).
+against mocks. There are two load routes: typed tables merged on key
+columns, and raw JSON tables for cleaning in Dataform. The SharePoint
+adapter has not yet been run against a real site: it waits on IT's
+decision on authentication. See [Adapter status](#adapter-status).
 
 **New to this repo?** See [`docs/README.md`](docs/README.md) for a
 guided path: a hands-on getting-started walkthrough, a guide to
@@ -18,20 +19,31 @@ feature-by-feature status reference.
 ```
 Source (discover files)
     ↓
-Download (SharePoint, local folder, etc.)
+Download (SharePoint, GCS landing bucket, local folder)
     ↓
-Validate (against contract)
+Validate (against contract; quarantine or warn)
     ↓
 Store Raw (immutable copy)
     ↓
-Convert (to Parquet)
+Convert (Parquet, or JSON rows for raw tables)
     ↓
 Store Processed (immutable copy)
     ↓
-Load Warehouse (staging + merge)
+Load Warehouse (staging, then merge or insert)
     ↓
 Audit (record every attempt)
 ```
+
+Two load routes share the steps above:
+
+- **Typed** (`output_format="parquet"`, the default, with
+  `BigQueryWarehouse`): the primary worksheet is merged into a typed
+  table on the contract's key columns.
+- **Raw JSON** (`output_format="raw_json"`, with `RawJsonWarehouse`):
+  every configured worksheet is inserted into its own raw table, one
+  JSON payload per row, for cleaning in Dataform. See
+  [`docs/RAW_TABLE_LAYOUT.md`](docs/RAW_TABLE_LAYOUT.md) and
+  [`docs/GCP_SETUP.md`](docs/GCP_SETUP.md).
 
 ## Quick Start
 
@@ -46,13 +58,19 @@ described in
 ### Core Concepts
 
 **Source** (protocol)
-- Discovers files at a location (SharePoint, S3, local folder)
+- Discovers files at a location (SharePoint, GCS bucket, local folder)
 - Downloads exact bytes of a discovered version
 - Prevents processing stale or partially-written files
 
 **Contract**
 - Defines required worksheets, columns, data types
 - Validates structure and business rules
+- Per worksheet: which row holds the headings (`header_row`), which
+  columns are loaded (`column_selection`, `excluded`), and whether a
+  mismatch quarantines the file or is recorded as a warning
+  (`on_mismatch`)
+- Names every column: blank headings become `col_B`, repeated ones
+  `Other_2`
 - Deterministic; same file always produces same result
 
 **ObjectStore** (protocol)
@@ -73,8 +91,9 @@ described in
 
 **Pipeline**
 - Orchestrates the workflow
-- Handles deduplication (by checksum) and error recording
-- Returns list of Result objects (one per file)
+- Handles deduplication (by checksum, per destination) and error
+  recording
+- Returns list of Result objects (one per file), with any warnings
 
 ### Concurrency
 
@@ -166,6 +185,11 @@ are quarantined, and any other error (including
 carries on with the next file. The full hierarchy is in
 `src/py_common/errors.py`.
 
+A worksheet with `on_mismatch="warn"` doesn't raise for a header or
+row problem. The problem is appended to the `warnings` list passed to
+`validate()`, and `Pipeline` logs it at WARNING and keeps it on the
+result and the audit record.
+
 ## Testing
 
 See [`CONTRIBUTING.md`, Run Tests Locally](CONTRIBUTING.md#run-tests-locally).
@@ -176,21 +200,24 @@ See [`CONTRIBUTING.md`, Run Tests Locally](CONTRIBUTING.md#run-tests-locally).
 |---|---|---|
 | `LocalSource` | Source | ✅ Built, unit-tested |
 | `LocalObjectStore` | ObjectStore | ✅ Built, unit-tested |
+| `GCSSource` | Source | ✅ Built, unit-tested against mocks; reads a landing folder, versions by object generation |
 | `GCSObjectStore` | ObjectStore | ✅ Built, unit-tested against mocks; real `lock()` |
 | `BigQueryWarehouse` | Warehouse | ✅ Built, unit-tested against mocks; `MERGE` on `key_columns` |
+| `RawJsonWarehouse` | Warehouse | ✅ Built, unit-tested against mocks; one raw JSON table per sheet, not yet run live |
 | `SharePointSource` | Source | ✅ Built, unit-tested against mocked Graph; not yet run live (auth pending IT) |
 | Secret Manager | SecretStore | ⏳ Not started |
 
-Also built: contract validation, configuration with interpolation,
-fixture generation, the error hierarchy, and GCP authentication
-helpers (`gcp_auth.py`).
+Also built: contract validation, the raw JSON conversion (`raw.py`),
+configuration with interpolation, fixture generation, the error
+hierarchy, and GCP authentication helpers (`gcp_auth.py`).
 
 ## What's Next
 
-⏳ SharePoint authentication (token provider), once IT approves a flow  
-⏳ Live SharePoint test: one file, then the full Cloud Run job  
-⏳ Secret Manager adapter  
-⏳ Structured logging and alerting  
+- ⏳ First live run of the raw JSON route ([`docs/GCP_SETUP.md`](docs/GCP_SETUP.md))
+- ⏳ SharePoint authentication (token provider), once IT approves a flow
+- ⏳ Live SharePoint test: one file, then the full Cloud Run job
+- ⏳ Secret Manager adapter
+- ⏳ Structured logging; alert policies as code (manual steps in `docs/GCP_SETUP.md`)
 
 The agreed order, with reasoning, is in
 [`docs/INGESTION_FRAMEWORK_GUIDE.md`, Section 9](docs/INGESTION_FRAMEWORK_GUIDE.md#9-priority-order-for-closing-the-gaps).
