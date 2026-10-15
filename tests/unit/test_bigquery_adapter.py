@@ -16,6 +16,31 @@ from unittest.mock import Mock, MagicMock, patch
 
 from py_common.adapters.bigquery import BigQueryWarehouse
 from py_common.errors import ServiceError
+from py_common.model import SourceItem
+
+#: Source file passed to every load().
+ITEM = SourceItem("test.xlsx", "landing/test.xlsx", "1", 10)
+
+
+def _jobs(count_job: Mock):
+    """query() side effect: `count_job` for plain queries, and a job
+    returning the commit script's LOADED status for the script.
+
+    Args:
+        count_job: Job returned for every non-script query.
+
+    Returns:
+        A function to use as query.side_effect.
+    """
+
+    def query(sql: str, **_: object) -> Mock:
+        if "BEGIN TRANSACTION" not in sql:
+            return count_job
+        commit = Mock(job_id="commit-1")
+        commit.result.return_value = [("LOADED",)]
+        return commit
+
+    return query
 
 
 def _staging_table(*column_names: str) -> Mock:
@@ -194,7 +219,7 @@ class TestBigQueryWarehouseLoad:
         mock_query_job = Mock()
         mock_query_result = [(42,)]  # Actual row count
         mock_query_job.result.return_value = mock_query_result
-        mock_bq_client.query.return_value = mock_query_job
+        mock_bq_client.query.side_effect = _jobs(mock_query_job)
 
         # Mock load_table_from_file.
         mock_load_job = Mock()
@@ -206,7 +231,11 @@ class TestBigQueryWarehouseLoad:
 
         # load() should succeed with matching row count.
         warehouse.load(
-            key="test.xlsx", checksum="abc123", data=b"parquet data", rows=42
+            key="test.xlsx",
+            checksum="abc123",
+            data=b"parquet data",
+            rows=42,
+            item=ITEM,
         )
 
     def test_load_raises_on_row_count_mismatch(
@@ -228,7 +257,7 @@ class TestBigQueryWarehouseLoad:
         mock_query_job = Mock()
         mock_query_result = [(50,)]  # Different from expected (42)
         mock_query_job.result.return_value = mock_query_result
-        mock_bq_client.query.return_value = mock_query_job
+        mock_bq_client.query.side_effect = _jobs(mock_query_job)
 
         # Mock load_table_from_file.
         mock_load_job = Mock()
@@ -245,6 +274,7 @@ class TestBigQueryWarehouseLoad:
                 checksum="abc123",
                 data=b"parquet data",
                 rows=42,
+                item=ITEM,
             )
 
     def test_load_records_audit_entry(self, warehouse, mock_bq_client):
@@ -263,7 +293,7 @@ class TestBigQueryWarehouseLoad:
         # Mock query result for row count.
         mock_query_job = Mock()
         mock_query_job.result.return_value = [(42,)]
-        mock_bq_client.query.return_value = mock_query_job
+        mock_bq_client.query.side_effect = _jobs(mock_query_job)
 
         # Mock load_table_from_file.
         mock_load_job = Mock()
@@ -275,7 +305,11 @@ class TestBigQueryWarehouseLoad:
 
         # Call load().
         warehouse.load(
-            key="test.xlsx", checksum="abc123", data=b"parquet data", rows=42
+            key="test.xlsx",
+            checksum="abc123",
+            data=b"parquet data",
+            rows=42,
+            item=ITEM,
         )
 
         # Verify audit query was called.
@@ -317,10 +351,14 @@ class TestBigQueryWarehouseLoad:
 
         mock_query_job = Mock()
         mock_query_job.result.return_value = [(1,)]
-        mock_bq_client.query.return_value = mock_query_job
+        mock_bq_client.query.side_effect = _jobs(mock_query_job)
 
         warehouse.load(
-            key="test.xlsx", checksum="abc123", data=b"parquet data", rows=1
+            key="test.xlsx",
+            checksum="abc123",
+            data=b"parquet data",
+            rows=1,
+            item=ITEM,
         )
 
         sql_calls = [
@@ -377,6 +415,7 @@ class TestBigQueryWarehouseLoad:
                 checksum="abc123",
                 data=b"parquet data",
                 rows=1,
+                item=ITEM,
             )
 
 
@@ -578,10 +617,14 @@ class TestBigQueryWarehouseMergeSql:
 
         mock_query_job = Mock()
         mock_query_job.result.return_value = [(1,)]
-        mock_bq_client.query.return_value = mock_query_job
+        mock_bq_client.query.side_effect = _jobs(mock_query_job)
 
         warehouse.load(
-            key="test.xlsx", checksum="abc123", data=b"parquet data", rows=1
+            key="test.xlsx",
+            checksum="abc123",
+            data=b"parquet data",
+            rows=1,
+            item=ITEM,
         )
 
         sql_calls = [
@@ -627,10 +670,14 @@ class TestBigQueryWarehouseMergeSql:
 
         mock_query_job = Mock()
         mock_query_job.result.return_value = [(1,)]
-        mock_bq_client.query.return_value = mock_query_job
+        mock_bq_client.query.side_effect = _jobs(mock_query_job)
 
         warehouse.load(
-            key="test.xlsx", checksum="abc123", data=b"parquet data", rows=1
+            key="test.xlsx",
+            checksum="abc123",
+            data=b"parquet data",
+            rows=1,
+            item=ITEM,
         )
 
         sql_calls = [
@@ -670,7 +717,7 @@ class TestBigQueryWarehouseLoadedAt:
         )
         mock_query_job = Mock()
         mock_query_job.result.return_value = [(1,)]
-        mock_bq_client.query.return_value = mock_query_job
+        mock_bq_client.query.side_effect = _jobs(mock_query_job)
         return warehouse
 
     def test_append_only_insert_sets_loaded_at(self) -> None:
@@ -684,7 +731,9 @@ class TestBigQueryWarehouseLoadedAt:
         """
         warehouse = self._warehouse("event_id")
 
-        warehouse.load(key="k", checksum="c", data=b"parquet", rows=1)
+        warehouse.load(
+            key="k", checksum="c", data=b"parquet", rows=1, item=ITEM
+        )
 
         sql_calls = [c[0][0] for c in warehouse.client.query.call_args_list]
         txn_sql = next(s for s in sql_calls if "BEGIN TRANSACTION" in s)
@@ -703,7 +752,9 @@ class TestBigQueryWarehouseLoadedAt:
         warehouse = self._warehouse("event_id", "_loaded_at")
 
         with pytest.raises(ValueError, match="_loaded_at"):
-            warehouse.load(key="k", checksum="c", data=b"parquet", rows=1)
+            warehouse.load(
+                key="k", checksum="c", data=b"parquet", rows=1, item=ITEM
+            )
 
         sql_calls = [c[0][0] for c in warehouse.client.query.call_args_list]
         assert not any("BEGIN TRANSACTION" in s for s in sql_calls)

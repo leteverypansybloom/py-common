@@ -18,11 +18,16 @@ from unittest.mock import MagicMock, Mock, patch
 from google.api_core.exceptions import NotFound
 
 from py_common.errors import ServiceError
+from py_common.model import SourceItem
 from py_common.adapters.bigquery_raw import (
     RAW_SCHEMA,
     STAGING_SCHEMA,
     RawJsonWarehouse,
 )
+
+#: Source file passed to every load().
+ITEM = SourceItem("test.xlsx", "landing/test.xlsx", "1", 10)
+
 
 TABLES = {
     "Account signups": "hww_account_signups",
@@ -168,6 +173,7 @@ class TestRawJsonWarehouseLoad:
         """Fixture: Mock BigQuery client whose tables all exist."""
         client = MagicMock()
         client.load_table_from_file.return_value = _load_job(1)
+        client.query.return_value.result.return_value = [("LOADED",)]
         return client
 
     @pytest.fixture
@@ -194,7 +200,9 @@ class TestRawJsonWarehouseLoad:
         """
         data = _ndjson("Account signups", "Survey info")
 
-        warehouse.load(key="hww.xlsx", checksum="abc123", data=data, rows=2)
+        warehouse.load(
+            key="hww.xlsx", checksum="abc123", data=data, rows=2, item=ITEM
+        )
 
         calls = mock_bq_client.load_table_from_file.call_args_list
         destinations = [c.args[1] for c in calls]
@@ -225,6 +233,7 @@ class TestRawJsonWarehouseLoad:
             checksum="abc123",
             data=_ndjson("Survey info"),
             rows=1,
+            item=ITEM,
         )
 
         config = mock_bq_client.load_table_from_file.call_args.kwargs[
@@ -256,6 +265,7 @@ class TestRawJsonWarehouseLoad:
             checksum="abc123",
             data=_ndjson("Survey info"),
             rows=1,
+            item=ITEM,
         )
 
         table = mock_bq_client.create_table.call_args.args[0]
@@ -281,6 +291,7 @@ class TestRawJsonWarehouseLoad:
             checksum="abc123",
             data=_ndjson("Survey info"),
             rows=1,
+            item=ITEM,
         )
 
         mock_bq_client.create_table.assert_not_called()
@@ -304,7 +315,7 @@ class TestRawJsonWarehouseLoad:
 
         with pytest.raises(ValueError, match="Newsletter metrics"):
             warehouse.load(
-                key="hww.xlsx", checksum="abc123", data=data, rows=2
+                key="hww.xlsx", checksum="abc123", data=data, rows=2, item=ITEM
             )
         mock_bq_client.load_table_from_file.assert_not_called()
 
@@ -322,7 +333,11 @@ class TestRawJsonWarehouseLoad:
         """
         with pytest.raises(ValueError, match="Line 1"):
             warehouse.load(
-                key="hww.xlsx", checksum="abc123", data=b"{}\n", rows=1
+                key="hww.xlsx",
+                checksum="abc123",
+                data=b"{}\n",
+                rows=1,
+                item=ITEM,
             )
 
     def test_row_count_mismatch_stops_before_transaction(
@@ -348,6 +363,7 @@ class TestRawJsonWarehouseLoad:
                 checksum="abc123",
                 data=_ndjson("Survey info"),
                 rows=1,
+                item=ITEM,
             )
         mock_bq_client.query.assert_not_called()
 
@@ -371,6 +387,7 @@ class TestRawJsonWarehouseLoad:
             checksum="abc123",
             data=_ndjson("Account signups", "Survey info"),
             rows=2,
+            item=ITEM,
         )
 
         mock_bq_client.query.assert_called_once()
@@ -403,6 +420,7 @@ class TestRawJsonWarehouseLoad:
             checksum="abc123",
             data=_ndjson("Survey info"),
             rows=1,
+            item=ITEM,
         )
 
         sql = mock_bq_client.query.call_args.args[0]
@@ -413,6 +431,8 @@ class TestRawJsonWarehouseLoad:
         assert params == {
             "filename",
             "checksum",
+            "destination",
+            "source_version",
             "row_count",
             "outcome",
             "timestamp",
@@ -447,6 +467,7 @@ class TestRawJsonWarehouseLoad:
                 checksum="abc123",
                 data=_ndjson("Survey info"),
                 rows=1,
+                item=ITEM,
             )
 
     def test_file_with_no_rows_still_records_audit(
@@ -464,7 +485,9 @@ class TestRawJsonWarehouseLoad:
         Raises:
             AssertionError: If staging is touched or audit missing
         """
-        warehouse.load(key="hww.xlsx", checksum="abc123", data=b"", rows=0)
+        warehouse.load(
+            key="hww.xlsx", checksum="abc123", data=b"", rows=0, item=ITEM
+        )
 
         mock_bq_client.load_table_from_file.assert_not_called()
         sql = mock_bq_client.query.call_args.args[0]

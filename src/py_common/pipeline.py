@@ -13,7 +13,7 @@ Orchestrates:
 
 import json
 import logging
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from io import BytesIO
 from time import perf_counter
@@ -80,7 +80,7 @@ class Pipeline:
 
         Raises:
             RuntimeError: Another process holds the warehouse lock.
-            ServiceError: Source listing or audit store failed.
+            ServiceError: Source listing failed.
         """
         results: list[Result] = []
         lock_key = f"locks/{digest(self.warehouse.identity.encode())}"
@@ -89,8 +89,7 @@ class Pipeline:
             with self.store.lock(lock_key):
                 for item in self.source.items():
                     result = self.process(item)
-                    results.append(result)
-                    self._audit(result)
+                    results.append(self._audit_or_fail(result))
         except Exception as e:
             logger.exception("Pipeline run failed: %s", e)
             raise
@@ -172,6 +171,14 @@ class Pipeline:
                     rows_processed,
                     checksum[:8],
                 )
+            if outcome in (Outcome.LOADED, Outcome.SKIPPED):
+                # The warehouse has the file either way: record that
+                # in the marker cache before anything else can fail.
+                self.store.put(
+                    self._loaded_marker_key(item, checksum), b"processed"
+                )
+            if outcome == Outcome.SKIPPED:
+                rows_processed = 0
 
         except Exception as e:
             if outcome != Outcome.QUARANTINED:
@@ -210,33 +217,76 @@ class Pipeline:
             return None
 
     def _is_duplicate(self, item: SourceItem, checksum: str) -> bool:
-        """Check whether this exact content was already processed.
+        """Check the marker cache for this file in this warehouse.
+
+        Only a cache: a miss goes on to the warehouse, whose load()
+        checks its own audit table inside the commit transaction and
+        is the authority. A store read error raises (fail-closed)
+        rather than reading as a miss.
 
         Args:
-            item: SourceItem being processed (for logging).
+            item: SourceItem being processed.
             checksum: SHA-256 of the downloaded bytes.
 
         Returns:
-            True if this content was already loaded into this
-            pipeline's warehouse.
+            True if the marker says this file was already loaded
+            into this pipeline's warehouse.
+
+        Raises:
+            ServiceError: The marker could not be read.
         """
-        existing = self.store.get(self._loaded_marker_key(checksum))
-        if existing:
-            logger.info(
-                "Skipping %s: checksum %s already processed",
-                item.name,
-                checksum[:8],
-            )
-            return True
+        keys = [self._loaded_marker_key(item, checksum)]
+        if self.output_format == "raw_json":
+            # Raw-route markers written before identity + version
+            # keys (0.1.x) are keyed by checksum, and the audit rows
+            # from then have no destination, so only this marker
+            # stops those files being inserted again after an
+            # upgrade. See docs/RAW_TABLE_LAYOUT.md.
+            keys.append(self._content_marker_key(checksum))
+        for key in keys:
+            if self.store.get(key):
+                logger.info(
+                    "Skipping %s: already loaded (marker %s)",
+                    item.name,
+                    key,
+                )
+                return True
         return False
 
-    def _loaded_marker_key(self, checksum: str) -> str:
-        """Key of the marker saying this content was loaded here.
+    def _loaded_marker_key(self, item: SourceItem, checksum: str) -> str:
+        """Key of the marker saying this file was loaded here.
 
-        Scoped to the destination (warehouse identity), not just the
-        content: one workbook can feed several pipelines, one per
-        worksheet or table, and the first to load it must not make
-        the others skip it as a duplicate.
+        Scoped to the destination (warehouse identity): one workbook
+        can feed several pipelines, one per worksheet or table, and
+        the first to load it must not make the others skip it.
+
+        Within a destination it follows the warehouse's own dedup
+        rule. Typed (Parquet) route: the content checksum, as a
+        MERGE of identical rows changes nothing. Raw JSON route: the
+        source identity and version, because an insert-only table
+        must take every new generation, even one that repeats
+        earlier content (a revert), or "latest generation" goes
+        stale.
+
+        Args:
+            item: SourceItem being processed.
+            checksum: SHA-256 of the source bytes.
+
+        Returns:
+            "audit/{warehouse}/{checksum}" (typed) or
+            "audit/{warehouse}/versions/{sha256(identity)}/{version}"
+            (raw JSON).
+        """
+        if self.output_format == "raw_json":
+            identity = digest(item.identity.encode())
+            return (
+                f"audit/{self.warehouse.identity}/versions/"
+                f"{identity}/{item.version}"
+            )
+        return self._content_marker_key(checksum)
+
+    def _content_marker_key(self, checksum: str) -> str:
+        """Checksum-keyed marker: the typed route's, and 0.1.x's.
 
         Args:
             checksum: SHA-256 of the source bytes.
@@ -361,18 +411,27 @@ class Pipeline:
 
         Keyed by destination as well as content: pipelines reading
         different sheets of the same workbook produce different
-        bytes, which would otherwise collide under one key.
+        bytes, which would otherwise collide under one key. Raw JSON
+        copies are keyed by source version too:
+        "processed/{warehouse}/{identity}/{checksum}/{version}/
+        {name}.ndjson".
 
         Args:
             item: SourceItem being processed.
             checksum: SHA-256 of the source bytes.
             processed: Converted bytes to store.
         """
-        suffix = ".ndjson" if self.output_format == "raw_json" else ".parquet"
-        key = (
-            f"processed/{self.warehouse.identity}/"
-            f"{self._version_key(item, checksum)}{suffix}"
-        )
+        version_key = self._version_key(item, checksum)
+        if self.output_format == "raw_json":
+            # NDJSON embeds source_generation, so one content under
+            # two generations (a revert) is two different files.
+            identity, _, name = version_key.rpartition("/")
+            key = (
+                f"processed/{self.warehouse.identity}/{identity}/"
+                f"{item.version}/{name}.ndjson"
+            )
+        else:
+            key = f"processed/{self.warehouse.identity}/{version_key}.parquet"
         self.store.put(key, processed)
 
     def _load_to_warehouse(
@@ -398,7 +457,9 @@ class Pipeline:
             errors: Errors list to append to on failure (mutated).
 
         Returns:
-            Outcome.LOADED on success. Outcome.FAILED if the warehouse
+            Outcome.LOADED on success. Outcome.SKIPPED if the
+            warehouse found it already loaded (a retry after a lost
+            commit confirmation). Outcome.FAILED if the warehouse
             service failed (nothing committed; a retry is safe), so
             the runner retries it. Outcome.QUARANTINED if the
             warehouse found the file itself invalid.
@@ -408,12 +469,20 @@ class Pipeline:
                 confirmed; caller must treat this as a failure.
         """
         try:
-            self.warehouse.load(
+            inserted = self.warehouse.load(
                 key=warehouse_key,
                 checksum=checksum,
                 data=processed,
                 rows=rows_processed,
+                item=item,
             )
+            if not inserted:
+                logger.info(
+                    "Skipping %s: the warehouse audit shows it already "
+                    "loaded",
+                    item.name,
+                )
+                return Outcome.SKIPPED
             return Outcome.LOADED
         except IndeterminateCommitError:
             logger.error("Cannot confirm warehouse commit for %s", item.name)
@@ -468,6 +537,32 @@ class Pipeline:
             warnings=list(warnings or []),
         )
 
+    def _audit_or_fail(self, result: Result) -> Result:
+        """Write the audit record; a failure fails this file only.
+
+        The loaded marker was already written by process(), so even
+        when this write fails a retry finds the file loaded.
+
+        Args:
+            result: Processing result to record.
+
+        Returns:
+            `result`, or a FAILED copy of it if the record could not
+            be written.
+        """
+        try:
+            self._audit(result)
+            return result
+        except Exception as e:
+            logger.exception(
+                "Audit write failed for %s: %s", result.item.name, e
+            )
+            return replace(
+                result,
+                outcome=Outcome.FAILED,
+                errors=[*result.errors, f"Audit write failed: {e}"],
+            )
+
     def _audit(self, result: Result) -> None:
         """Write audit record to object store.
 
@@ -502,9 +597,3 @@ class Pipeline:
             f"audit/records/{timestamp_key}_{result.item.identity}.json"
         )
         self.store.put(audit_key, audit_json.encode())
-
-        # Also store duplicate check record if loaded
-        if result.outcome == Outcome.LOADED:
-            self.store.put(
-                self._loaded_marker_key(result.checksum), b"processed"
-            )

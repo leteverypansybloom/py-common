@@ -23,11 +23,20 @@ from google.api_core.exceptions import (
 from py_common.adapters.bigquery import BigQueryWarehouse
 from py_common.adapters.bigquery_raw import RawJsonWarehouse
 from py_common.errors import IndeterminateCommitError, ServiceError
+from py_common.model import SourceItem
 
 _NDJSON = (
     b'{"source_file":"f.xlsx","source_generation":"1","sheet_name":"S",'
     b'"row_number":2,"checksum":"c","payload":{}}\n'
 )
+
+
+ITEM = SourceItem("k.xlsx", "landing/k.xlsx", "1", 10)
+
+
+def _load(warehouse: Any, data: bytes) -> None:
+    """Load one row of `data` for ITEM."""
+    warehouse.load("k.xlsx", "abc123", data, 1, ITEM)
 
 
 def _typed(client: MagicMock) -> Callable[[], None]:
@@ -38,7 +47,7 @@ def _typed(client: MagicMock) -> Callable[[], None]:
     client.get_table.return_value = SimpleNamespace(
         schema=[SimpleNamespace(name="id", field_type="INTEGER")]
     )
-    return lambda: warehouse.load("k.xlsx", "abc123", b"parquet", 1)
+    return lambda: _load(warehouse, b"parquet")
 
 
 def _raw(client: MagicMock) -> Callable[[], None]:
@@ -46,7 +55,7 @@ def _raw(client: MagicMock) -> Callable[[], None]:
     with patch("py_common.adapters.bigquery_raw.bigquery.Client") as cls:
         cls.return_value = client
         warehouse = RawJsonWarehouse("p", "d", {"S": "t"})
-    return lambda: warehouse.load("k.xlsx", "abc123", _NDJSON, 1)
+    return lambda: _load(warehouse, _NDJSON)
 
 
 @pytest.fixture(params=[_typed, _raw], ids=["typed", "raw"])
@@ -94,7 +103,10 @@ def test_timeout_then_done_without_error_is_success(
 ) -> None:
     """A lost wait on a job that committed is not reported as failed."""
     _, commit, load = setup
-    commit.result.side_effect = [TimeoutError("wait timed out"), [(1,)]]
+    commit.result.side_effect = [
+        TimeoutError("wait timed out"),
+        [("LOADED",)],
+    ]
     commit.state = "DONE"
     commit.error_result = None
 

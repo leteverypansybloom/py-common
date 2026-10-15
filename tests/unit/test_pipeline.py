@@ -636,7 +636,7 @@ class TestPipelineRetryAfterWarehouseFailure:
         source.download.return_value = _workbook([("a", 1)])
         warehouse = Mock()
         warehouse.identity = "project.dataset.events"
-        warehouse.load.side_effect = [error, None]
+        warehouse.load.side_effect = [error, True]
         pipeline = Pipeline(source, InMemoryStore(), warehouse, contract)
 
         first = pipeline.run()
@@ -1050,8 +1050,9 @@ class TestPipelineOutputFormat:
 
         pipeline.process(item)
 
+        # Keyed by version too: the NDJSON embeds source_generation.
         key = (
-            f"processed/p.raw.signups+survey/ID1/{digest(data)}/"
+            f"processed/p.raw.signups+survey/ID1/{digest(data)}/v1/"
             "hww.xlsx.ndjson"
         )
         assert (
@@ -1063,7 +1064,7 @@ class TestPipelineOutputFormat:
         """Identical NDJSON on retry: no processed/ conflict."""
         store = InMemoryStore()
         pipeline = self._raw_pipeline(store)
-        pipeline.warehouse.load.side_effect = [RuntimeError("boom"), None]
+        pipeline.warehouse.load.side_effect = [RuntimeError("boom"), True]
         item = SourceItem("hww.xlsx", "ID1", "v1", 10)
 
         first = pipeline.process(item)

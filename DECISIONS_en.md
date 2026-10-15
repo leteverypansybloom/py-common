@@ -409,7 +409,21 @@ The warehouse.load() method either:
 Or: Raises exception and rolls back everything. No partial writes.
 
 **Benefit**: Guarantee: if load() succeeds, the data is committed
-and audited. If it raises, nothing was written.
+and audited. If it raises ServiceError, nothing was written; if it
+raises IndeterminateCommitError, the outcome is unknown.
+
+### Warehouse.load() is idempotent (0.2.0)
+
+Steps 3-4 run only if the audit table has no `LOADED` row for this
+destination and file, checked inside the same transaction; otherwise
+load() writes nothing and returns False. The object store's "loaded"
+marker is written after the commit, so a crash, timeout or store
+error between the two used to mean a second load on retry (review
+C2). Now the warehouse's own audit table, committed atomically with
+the data, is the authority and the marker is only a cache.
+
+The raw JSON route identifies a file by identity + version, the
+typed route by content checksum: see docs/RAW_TABLE_LAYOUT.md.
 
 ### RAP Principles: Reproducibility
 

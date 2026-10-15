@@ -27,6 +27,34 @@ of that file's rows again, under a new `source_generation`, and earlier
 uploads stay in the table. Nothing in the raw table is updated or
 deleted by py-common.
 
+**Each generation loads exactly once.** A file is identified by its
+source identity (for `GCSSource`, the object name) and generation,
+not by its content:
+
+- The same generation is never inserted twice, whatever fails and
+  however often the load is retried. The check is made against the
+  `audit` table inside the transaction that inserts the rows.
+- A new generation always loads, even if its bytes are identical to
+  an earlier one. This keeps "latest generation" right when an upload
+  is reverted:
+
+  | Upload | Generation | Content | Loaded? |
+  |---|---|---|---|
+  | January export | 100 | A | yes |
+  | February export, wrong | 200 | B | yes |
+  | January export again (revert) | 300 | A | **yes** |
+
+  The query below then returns generation 300 (content A). If
+  generation 300 were skipped as a repeat of A, it would return 200,
+  the upload that was just withdrawn.
+- Two different files with identical bytes both load, each under its
+  own `source_file`.
+
+Files loaded before py-common 0.2.0 were deduplicated by content
+alone, so a revert to content loaded before the upgrade is still
+skipped. To load it, delete its `audit/<warehouse>/<checksum>` marker
+in the store bucket and run again.
+
 ## Payload keys
 
 Keys are column names as py-common reads them from the heading row

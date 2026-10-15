@@ -16,8 +16,15 @@ from io import BytesIO
 from google.api_core.exceptions import GoogleAPICallError, NotFound
 from google.cloud import bigquery
 
-from py_common.adapters._bq_jobs import run_query, wait_for_load
+from py_common.adapters._bq_jobs import (
+    commit_parameters,
+    commit_script,
+    committed,
+    run_query,
+    wait_for_load,
+)
 from py_common.errors import ServiceError
+from py_common.model import SourceItem
 
 logger = logging.getLogger("py_common.adapters.bigquery")
 
@@ -102,19 +109,27 @@ class BigQueryWarehouse:
         checksum: str,
         data: bytes,
         rows: int,
-    ) -> None:
-        """Atomically load Parquet data or fail completely.
+        item: SourceItem,
+    ) -> bool:
+        """Atomically load Parquet data once, or fail completely.
 
         Steps:
         1. Ensure staging table exists
         2. Load Parquet data into staging (truncate first)
         3. Verify row count matches expectation
-        4. MERGE into final table (upsert on key_columns, or
-           append-only if none configured) and record the audit
-           entry together, in a single BigQuery script transaction.
-           Every inserted or updated row gets _loaded_at set to the
-           audit record's timestamp.
+        4. In one BigQuery script transaction: if the audit table
+           already has a LOADED row for this destination and
+           checksum, do nothing; otherwise MERGE into the final
+           table (upsert on key_columns, or append-only if none
+           configured) and record the audit entry. Every inserted or
+           updated row gets _loaded_at set to the audit timestamp.
         5. Commit that transaction, or roll it back entirely
+
+        Step 4's check makes load() idempotent: a retry after a
+        commit whose confirmation was lost (or whose store marker
+        was never written) writes nothing. The same content under a
+        new source version is also skipped: a MERGE of identical
+        rows would change nothing but _loaded_at.
 
         The staging load (steps 1-2) is not part of the transaction:
         staging is truncated and reloaded on every run, so a failure
@@ -130,9 +145,12 @@ class BigQueryWarehouse:
             checksum (str): SHA-256 checksum for deduplication.
             data (bytes): Parquet-encoded data to load.
             rows (int): Expected row count; verified before committing.
+            item (SourceItem): Source file loaded; its version is
+                recorded in the audit row.
 
         Returns:
-            None
+            bool: True if the rows were written, False if this
+                content was already loaded here.
 
         Raises:
             ValueError: Row count mismatch, schema error, data issues,
@@ -143,11 +161,13 @@ class BigQueryWarehouse:
                 not be confirmed.
         """
         try:
-            self._load(key, checksum, data, rows)
+            return self._load(key, checksum, data, rows, item)
         except GoogleAPICallError as e:
             raise ServiceError(f"BigQuery failed for {key}: {e}") from e
 
-    def _load(self, key: str, checksum: str, data: bytes, rows: int) -> None:
+    def _load(
+        self, key: str, checksum: str, data: bytes, rows: int, item: SourceItem
+    ) -> bool:
         """Body of load(); GoogleAPICallErrors are wrapped by load().
 
         Args:
@@ -155,6 +175,10 @@ class BigQueryWarehouse:
             checksum (str): SHA-256 checksum for deduplication.
             data (bytes): Parquet-encoded data to load.
             rows (int): Expected row count.
+            item (SourceItem): Source file loaded.
+
+        Returns:
+            bool: As load().
         """
         logger.debug(
             f"Loading {key}: {len(data)} bytes, {rows} rows, {checksum}"
@@ -226,40 +250,26 @@ class BigQueryWarehouse:
                 f"WHEN NOT MATCHED THEN {self._insert_clause(columns)}"
             )
 
-        # Steps 4-5: MERGE into final table and record the audit
-        # entry as one script transaction (see docstring above).
-        transaction_sql = (
-            "BEGIN\n"
-            "  BEGIN TRANSACTION;\n"
-            f"  {merge_sql};\n"
-            f"  INSERT INTO `{audit_full_id}` "
-            "(filename, checksum, row_count, outcome, timestamp) "
-            "VALUES (@filename, @checksum, @row_count, @outcome, "
-            "@timestamp);\n"
-            "  COMMIT TRANSACTION;\n"
-            "EXCEPTION WHEN ERROR THEN\n"
-            "  ROLLBACK TRANSACTION;\n"
-            "  RAISE USING MESSAGE = @@error.message;\n"
-            "END;"
+        # Steps 4-5: check, MERGE and audit as one script transaction
+        # (see docstring above). The typed route dedups on content:
+        # destination + checksum.
+        transaction_sql = commit_script(
+            [merge_sql], audit_full_id, dedup_columns=["checksum"]
         )
-
         job_config_txn = bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ScalarQueryParameter("filename", "STRING", key),
-                bigquery.ScalarQueryParameter("checksum", "STRING", checksum),
-                bigquery.ScalarQueryParameter("row_count", "INTEGER", rows),
-                bigquery.ScalarQueryParameter("outcome", "STRING", "LOADED"),
-                bigquery.ScalarQueryParameter(
-                    "timestamp",
-                    "TIMESTAMP",
-                    datetime.now(timezone.utc),
-                ),
-            ]
+            query_parameters=commit_parameters(
+                key,
+                checksum,
+                rows,
+                self.identity,
+                item,
+                datetime.now(timezone.utc),
+            )
         )
-
-        run_query(self.client, transaction_sql, job_config_txn, key)
-
-        logger.debug(f"Merged data into {self.table_id} and recorded audit")
+        job, result = run_query(
+            self.client, transaction_sql, job_config_txn, key
+        )
+        return committed(job, result, key)
 
     def _build_merge_sql(
         self,

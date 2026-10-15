@@ -16,12 +16,14 @@ find out what really happened before anything is reported.
 """
 
 import logging
+from datetime import datetime
 from typing import Any
 
 from google.api_core.exceptions import GoogleAPICallError
 from google.cloud import bigquery
 
 from py_common.errors import IndeterminateCommitError, ServiceError
+from py_common.model import SourceItem
 
 logger = logging.getLogger("py_common.adapters.bigquery")
 
@@ -137,3 +139,138 @@ def _confirm_after_wait_failed(job: Any, what: str, error: Exception) -> None:
         f"BigQuery job {job.job_id} for {what} is still {job.state} "
         f"after waiting failed ({error})"
     ) from error
+
+
+#: Audit columns written for every load, in order. Each is set from
+#: the query parameter of the same name.
+AUDIT_COLUMNS = (
+    "filename",
+    "checksum",
+    "destination",
+    "source_version",
+    "row_count",
+    "outcome",
+    "timestamp",
+)
+
+
+def commit_script(
+    writes: list[str], audit_full_id: str, dedup_columns: list[str]
+) -> str:
+    """Build the idempotent commit script shared by both warehouses.
+
+    Inside one transaction: check the audit table for a LOADED row
+    for this destination matching `dedup_columns`; if there is none,
+    run `writes` and record the audit row. The check is inside the
+    transaction so the BigQuery audit table, committed atomically
+    with the data, is what decides, whatever the store marker says.
+
+    The status is selected after the transaction block, so it is the
+    script's last statement and therefore the job's result.
+
+    Args:
+        writes: DML statements (no trailing semicolon) writing the
+            data, e.g. a MERGE or INSERT ... SELECT.
+        audit_full_id: Fully-qualified audit table ID.
+        dedup_columns: Audit columns, besides destination, that
+            identify "this file already loaded here". Each is
+            compared with the query parameter of the same name.
+
+    Returns:
+        A BigQuery script whose result is one row, one column
+        `status`: 'LOADED' or 'ALREADY_LOADED'.
+    """
+    match = "".join(f"\n      AND {c} = @{c}" for c in dedup_columns)
+    statements = "".join(f"    {w};\n" for w in writes)
+    columns = ", ".join(AUDIT_COLUMNS)
+    values = ", ".join(f"@{c}" for c in AUDIT_COLUMNS)
+    return (
+        "DECLARE already_loaded BOOL DEFAULT FALSE;\n"
+        "BEGIN\n"
+        "  BEGIN TRANSACTION;\n"
+        "  SET already_loaded = (\n"
+        "    SELECT COUNT(*) > 0\n"
+        f"    FROM `{audit_full_id}`\n"
+        "    WHERE destination = @destination"
+        f"{match}\n"
+        "      AND outcome = 'LOADED'\n"
+        "  );\n"
+        "  IF NOT already_loaded THEN\n"
+        f"{statements}"
+        f"    INSERT INTO `{audit_full_id}` ({columns}) "
+        f"VALUES ({values});\n"
+        "  END IF;\n"
+        "  COMMIT TRANSACTION;\n"
+        "EXCEPTION WHEN ERROR THEN\n"
+        "  ROLLBACK TRANSACTION;\n"
+        "  RAISE USING MESSAGE = @@error.message;\n"
+        "END;\n"
+        "SELECT IF(already_loaded, 'ALREADY_LOADED', 'LOADED') AS status;"
+    )
+
+
+def commit_parameters(
+    key: str,
+    checksum: str,
+    rows: int,
+    destination: str,
+    item: SourceItem,
+    timestamp: datetime,
+) -> list[bigquery.ScalarQueryParameter]:
+    """Query parameters for commit_script().
+
+    Args:
+        key: Load key, recorded as the audit filename.
+        checksum: SHA-256 of the source file.
+        rows: Row count loaded.
+        destination: The warehouse's identity.
+        item: Source file loaded (for its version).
+        timestamp: Commit timestamp (audit timestamp, _loaded_at /
+            ingested_at).
+
+    Returns:
+        One parameter per AUDIT_COLUMNS entry.
+    """
+    return [
+        bigquery.ScalarQueryParameter("filename", "STRING", key),
+        bigquery.ScalarQueryParameter("checksum", "STRING", checksum),
+        bigquery.ScalarQueryParameter("destination", "STRING", destination),
+        bigquery.ScalarQueryParameter(
+            "source_version", "STRING", item.version
+        ),
+        bigquery.ScalarQueryParameter("row_count", "INTEGER", rows),
+        bigquery.ScalarQueryParameter("outcome", "STRING", "LOADED"),
+        bigquery.ScalarQueryParameter("timestamp", "TIMESTAMP", timestamp),
+    ]
+
+
+def committed(job: Any, rows: list[Any], what: str) -> bool:
+    """Read commit_script()'s status row.
+
+    Args:
+        job: The finished commit job, for messages.
+        rows: Its result rows.
+        what: What the job was for, for messages.
+
+    Returns:
+        True if this job inserted the data, False if the audit table
+        showed it was already loaded.
+
+    Raises:
+        IndeterminateCommitError: The status is missing or unknown.
+    """
+    status = rows[0][0] if rows and len(rows[0]) else None
+    if status == "LOADED":
+        logger.info("BigQuery job %s committed %s", job.job_id, what)
+        return True
+    if status == "ALREADY_LOADED":
+        logger.info(
+            "BigQuery job %s: %s was already loaded; nothing written",
+            job.job_id,
+            what,
+        )
+        return False
+    raise IndeterminateCommitError(
+        f"BigQuery job {job.job_id} for {what} returned no load status "
+        f"(got {status!r})"
+    )

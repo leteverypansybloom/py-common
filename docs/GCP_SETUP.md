@@ -87,11 +87,36 @@ bq query --use_legacy_sql=false "
 CREATE TABLE IF NOT EXISTS \`$PROJECT.$RAW_DATASET.audit\` (
   filename STRING,
   checksum STRING,
+  destination STRING,
+  source_version STRING,
   row_count INT64,
   outcome STRING,
   timestamp TIMESTAMP
 )"
 ```
+
+The audit table is what makes a load happen at most once. Each
+warehouse checks it inside the same transaction that writes the
+rows, and writes nothing if it already has a `LOADED` row for this
+`destination` (the warehouse's identity) and file: the same
+`checksum` for `BigQueryWarehouse`, the same `filename` (load key)
+and `source_version` for `RawJsonWarehouse`. The `audit/` markers in
+the store bucket are only a cache in front of it.
+
+**Upgrading from 0.1.x.** Add the two columns (safe to run twice):
+
+```bash
+bq query --use_legacy_sql=false "
+ALTER TABLE \`$PROJECT.$RAW_DATASET.audit\`
+  ADD COLUMN IF NOT EXISTS destination STRING,
+  ADD COLUMN IF NOT EXISTS source_version STRING"
+```
+
+Rows written before the upgrade have `destination` NULL, and count as
+"not loaded here". So keep the store bucket's existing `audit/`
+markers: they still stop files loaded before the upgrade from being
+loaded again (for the raw JSON route the pipeline checks the old
+checksum-keyed marker as well as the new one).
 
 The raw tables themselves are created by `RawJsonWarehouse` on first
 load, partitioned by day of `ingested_at`. Their layout is in
@@ -289,8 +314,9 @@ gcloud run jobs execute "$JOB" --project="$PROJECT" --region="$REGION" --wait
 ```
 
 `--max-retries=0` because a rerun is safe but should be deliberate:
-files that loaded are skipped by checksum, and files that failed are
-retried on the next scheduled run.
+files that loaded are skipped (by the store marker, and failing that
+by the warehouse's audit check), and files that failed are retried on
+the next scheduled run.
 
 Run it daily. Files arrive monthly, but a daily run picks up a late or
 corrected upload the next morning, and a run with nothing new costs

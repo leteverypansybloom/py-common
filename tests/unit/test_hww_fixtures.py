@@ -30,7 +30,14 @@ class RecordingWarehouse:
         """Start with no loads."""
         self.loads: list[dict] = []
 
-    def load(self, key: str, checksum: str, data: bytes, rows: int) -> None:
+    def load(
+        self,
+        key: str,
+        checksum: str,
+        data: bytes,
+        rows: int,
+        item: SourceItem,
+    ) -> bool:
         """Record the load.
 
         Args:
@@ -38,8 +45,13 @@ class RecordingWarehouse:
             checksum: SHA-256 of the source file.
             data: NDJSON bytes.
             rows: Expected row count.
+            item: Source file loaded.
+
+        Returns:
+            True: every load is new here.
         """
         self.loads.append({"key": key, "data": data, "rows": rows})
+        return True
 
     def payloads(self) -> list[dict]:
         """Payloads of every row loaded so far.

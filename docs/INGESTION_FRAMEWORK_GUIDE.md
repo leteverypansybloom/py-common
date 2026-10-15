@@ -152,7 +152,11 @@ exact; where nothing exists, that's stated plainly rather than implied.
   (`src/py_common/pipeline.py`) computes a SHA-256 of the
   downloaded bytes and skips the file if that exact checksum was
   already recorded as `LOADED` into the same destination
-  (`store.get(f"audit/{warehouse.identity}/{checksum}")`).
+  (`store.get(f"audit/{warehouse.identity}/{checksum}")`; the raw
+  JSON route keys this marker on the file's identity and version
+  instead). The marker is a cache: each warehouse makes the same
+  check against its BigQuery `audit` table inside the commit
+  transaction, so a lost marker can't cause a second load.
   This is a genuinely good property — a file that is re-saved with
   identical contents is correctly skipped, which is stricter than
   tools that key off "last modified" alone — but it is not a

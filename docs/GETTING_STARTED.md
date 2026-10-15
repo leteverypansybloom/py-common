@@ -198,8 +198,11 @@ class FakeWarehouse:
     def identity(self):
         return "fake-warehouse"
 
-    def load(self, key, checksum, data, rows):
+    def load(self, key, checksum, data, rows, item):
+        # A real warehouse checks its own audit table and returns
+        # False if this file was already loaded there.
         self.loaded.append((key, checksum, rows))
+        return True
 
 
 contract = Contract(
@@ -301,9 +304,11 @@ The same flow is covered by the unit tests in
 Run the same `pipeline.run()` again over the same folder. Expect
 `events_valid.xlsx` to come back `skipped` — its checksum was recorded
 under `audit/{warehouse identity}/{checksum}` the first time it loaded
-(`Pipeline._audit()`),
+(`Pipeline.process()`),
 and `Pipeline.process()` checks that marker before re-validating
-(`Pipeline._is_duplicate()`). The ten quarantined files, by contrast,
+(`Pipeline._is_duplicate()`). The marker is only a cache: if it is
+missing, a real warehouse's `load()` finds the file in its own audit
+table and returns `False`, and the file is still `skipped`. The ten quarantined files, by contrast,
 come back `quarantined` again, every time — a checksum marker is only
 written on a `LOADED` outcome, so a file that fails validation is
 re-read and re-validated on every run until it's fixed or removed from

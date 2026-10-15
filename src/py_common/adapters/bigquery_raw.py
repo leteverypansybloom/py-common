@@ -26,8 +26,15 @@ from io import BytesIO
 from google.api_core.exceptions import GoogleAPICallError, NotFound
 from google.cloud import bigquery
 
-from py_common.adapters._bq_jobs import run_query, wait_for_load
+from py_common.adapters._bq_jobs import (
+    commit_parameters,
+    commit_script,
+    committed,
+    run_query,
+    wait_for_load,
+)
 from py_common.errors import ServiceError
+from py_common.model import SourceItem
 
 logger = logging.getLogger("py_common.adapters.bigquery_raw")
 
@@ -127,26 +134,39 @@ class RawJsonWarehouse:
         checksum: str,
         data: bytes,
         rows: int,
-    ) -> None:
-        """Atomically insert a file's rows into the raw tables.
+        item: SourceItem,
+    ) -> bool:
+        """Atomically insert a file version's rows, once.
 
         Steps:
         1. Split the NDJSON by sheet; refuse sheets with no table
         2. Create any raw table that doesn't exist yet
         3. Load each sheet's rows into {table}_staging (truncate)
         4. Verify the staged row count matches `rows`
-        5. Insert every sheet's rows into its raw table and record
-           the audit entry, in one script transaction; commit, or
-           roll back everything
+        5. In one script transaction: if the audit table already has
+           a LOADED row for this destination, load key and source
+           version, do nothing; otherwise insert every sheet's rows
+           into its raw table and record the audit entry. Commit, or
+           roll back everything.
+
+        The raw route dedups on the source file's identity and
+        version (the pipeline's load key starts with the identity),
+        not its content: re-uploading earlier content as a new
+        generation must load again, or "latest generation" in the
+        transformation layer would keep serving the upload it
+        replaced. See docs/RAW_TABLE_LAYOUT.md.
 
         Args:
             key (str): Unique identifier for this load.
             checksum (str): SHA-256 of the source file.
             data (bytes): NDJSON from py_common.raw.to_ndjson().
             rows (int): Expected row count across all sheets.
+            item (SourceItem): Source file loaded; its version is
+                part of the dedup key and the audit row.
 
         Returns:
-            None
+            bool: True if the rows were written, False if this file
+                version was already loaded here.
 
         Raises:
             ValueError: A line is not valid JSON or names a sheet
@@ -157,11 +177,13 @@ class RawJsonWarehouse:
                 not be confirmed.
         """
         try:
-            self._load(key, checksum, data, rows)
+            return self._load(key, checksum, data, rows, item)
         except GoogleAPICallError as e:
             raise ServiceError(f"BigQuery failed for {key}: {e}") from e
 
-    def _load(self, key: str, checksum: str, data: bytes, rows: int) -> None:
+    def _load(
+        self, key: str, checksum: str, data: bytes, rows: int, item: SourceItem
+    ) -> bool:
         """Body of load(); GoogleAPICallErrors are wrapped by load().
 
         Args:
@@ -169,6 +191,10 @@ class RawJsonWarehouse:
             checksum (str): SHA-256 of the source file.
             data (bytes): NDJSON from py_common.raw.to_ndjson().
             rows (int): Expected row count across all sheets.
+            item (SourceItem): Source file loaded.
+
+        Returns:
+            bool: As load().
         """
         by_sheet = self._split_by_sheet(data)
         unknown = sorted(set(by_sheet) - set(self.tables))
@@ -202,24 +228,23 @@ class RawJsonWarehouse:
                 f"Row count mismatch: expected {rows}, got {staged}"
             )
 
-        timestamp = datetime.now(timezone.utc)
         job_config_txn = bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ScalarQueryParameter("filename", "STRING", key),
-                bigquery.ScalarQueryParameter("checksum", "STRING", checksum),
-                bigquery.ScalarQueryParameter("row_count", "INTEGER", rows),
-                bigquery.ScalarQueryParameter("outcome", "STRING", "LOADED"),
-                bigquery.ScalarQueryParameter(
-                    "timestamp", "TIMESTAMP", timestamp
-                ),
-            ]
+            query_parameters=commit_parameters(
+                key,
+                checksum,
+                rows,
+                self.identity,
+                item,
+                datetime.now(timezone.utc),
+            )
         )
-        run_query(
+        job, result = run_query(
             self.client,
             self._transaction_sql(list(by_sheet)),
             job_config_txn,
             key,
         )
+        return committed(job, result, key)
 
         logger.debug(f"Inserted {rows} raw rows for {key}")
 
@@ -279,28 +304,22 @@ class RawJsonWarehouse:
             sheets (list[str]): Sheets with staged rows, in order.
 
         Returns:
-            str: A BigQuery script with one transaction.
+            str: A BigQuery script with one transaction (see
+                _bq_jobs.commit_script()).
         """
-        inserts = "".join(
-            f"  INSERT INTO `{self._full_id(self.tables[sheet])}` "
+        inserts = [
+            f"INSERT INTO `{self._full_id(self.tables[sheet])}` "
             f"({_COLUMNS}, ingested_at) "
             f"SELECT {_COLUMNS}, @timestamp "
-            f"FROM `{self._full_id(self.tables[sheet] + '_staging')}`;\n"
+            f"FROM `{self._full_id(self.tables[sheet] + '_staging')}`"
             for sheet in sheets
-        )
-        return (
-            "BEGIN\n"
-            "  BEGIN TRANSACTION;\n"
-            f"{inserts}"
-            f"  INSERT INTO `{self._full_id(self.audit_table_id)}` "
-            "(filename, checksum, row_count, outcome, timestamp) "
-            "VALUES (@filename, @checksum, @row_count, @outcome, "
-            "@timestamp);\n"
-            "  COMMIT TRANSACTION;\n"
-            "EXCEPTION WHEN ERROR THEN\n"
-            "  ROLLBACK TRANSACTION;\n"
-            "  RAISE USING MESSAGE = @@error.message;\n"
-            "END;"
+        ]
+        # Identity (in the load key) + version, not checksum: see
+        # load().
+        return commit_script(
+            inserts,
+            self._full_id(self.audit_table_id),
+            dedup_columns=["filename", "source_version"],
         )
 
     def _full_id(self, table_id: str) -> str:
