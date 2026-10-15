@@ -9,7 +9,8 @@ Hierarchy:
   │  └─ ContractError: Workbook doesn't match agreed schema
   ├─ ServiceError: Cloud service unavailable or permission denied
   ├─ ObjectStoreConflict: Key exists with different content
-  └─ IndeterminateCommitError: Don't know if warehouse committed
+  ├─ IndeterminateCommitError: Don't know if warehouse committed
+  └─ RunFailed: A pipeline run finished with FAILED files
 
 ContractError is a ValidationError, so callers that catch
 ValidationError (e.g. Pipeline.process(), which quarantines it)
@@ -17,6 +18,8 @@ catch ContractError too. This is deliberate: the README says schema
 mismatches should always quarantine, same as data-validation
 failures.
 """
+
+from py_common.model import Result
 
 
 class IngestionError(Exception):
@@ -95,3 +98,26 @@ class IndeterminateCommitError(IngestionError):
     """
 
     pass
+
+
+class RunFailed(IngestionError):
+    """A pipeline run finished, but one or more files FAILED.
+
+    Pipeline.run() records a failed file and moves on to the next, so
+    the run itself returns normally. py_common.runner raises this
+    afterwards, so that a Cloud Run job exits non-zero and an upload
+    event is delivered again.
+
+    Attributes:
+        results: The FAILED results, in run order.
+    """
+
+    def __init__(self, results: list[Result]) -> None:
+        """Name the failed files in the message.
+
+        Args:
+            results: The FAILED results, in run order.
+        """
+        names = ", ".join(result.item.name for result in results)
+        super().__init__(f"{len(results)} file(s) failed: {names}")
+        self.results = results

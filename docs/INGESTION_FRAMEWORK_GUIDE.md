@@ -468,7 +468,7 @@ behaviour doesn't match the promise), **Missing** (nothing exists).
 | CDC support | N/A | No database sources exist; correctly out of scope for now. |
 | File change detection | Partial | Content-hash dedup exists (`pipeline.py`); no delta/change-token query against the source itself. |
 | Scheduling and orchestration | Missing | No scheduler, no orchestrator config; `deploy/` is empty. |
-| Event triggering | Missing | Not built; batch-only today. |
+| Event triggering | Partial | `runner.handle_upload()` runs the pipeline for an upload's landing folder from a Cloud Run service behind Eventarc; the trigger itself is set up by hand (`GCP_SETUP.md`, section 6). |
 | Queueing / buffering | N/A | Not needed at current file volumes. |
 | Rate limiting / throttling | Partial | `SharePointSource` honours Graph `Retry-After` on 429; nothing else does. |
 | Retries and backoff | Partial | `SharePointSource` retries 429/5xx and network errors (bounded, exponential); other external calls are single attempts. |
@@ -479,7 +479,7 @@ behaviour doesn't match the promise), **Missing** (nothing exists).
 | Reconciliation | Missing | No source-count vs. destination-count check after a load completes. |
 | Backfill and replay | Missing | No rebuild/replay command; manual procedure only (clear the checksum audit key). |
 | Lineage and audit trail | **Have** (file-level) | `model.py`, written by `pipeline.py`. No run-level record, no code/config version stamped per record. |
-| Logging, metrics, alerts | Partial | Plain-text logging exists, with contract warnings at WARNING. Alerts are documented as manual steps (`GCP_SETUP.md`), not built as code. |
+| Logging, metrics, alerts | Partial | Plain-text logging exists, with contract warnings at WARNING. `runner.run_job()`/`handle_upload()` turn FAILED files into a failed job or a retried event, and `runner.check_freshness()` logs overdue sources. Alerts are documented as manual steps (`GCP_SETUP.md`), not built as code. |
 | Run-status API/dashboard | Missing | Nothing queries the audit trail for a status view. |
 | Secrets and identity management | Partial | `gcp_auth.py` handles *which GCP credential to run as*; the `SecretStore` protocol (`ports.py`) has **no implementation** for application secrets (e.g. a SharePoint client secret). |
 | Data classification / policy controls | Partial | Contracts can exclude columns (`Worksheet.excluded`) so personal data isn't loaded; no classification tags. The audit trail's "store checksum, not content" design (`pipeline.py`) is a reasonable privacy default to build on. |
@@ -506,7 +506,7 @@ not a redesign.
 | Operational state (locks, checkpoints) | GCS lock object for the run lock; Firestore or another approved store for checkpoints if needed | Built: `GCSObjectStore.lock()` (`adapters/gcs.py`) refuses overlapping runs. A run killed mid-flight needs its lock object deleted by hand. |
 | Warehouse | BigQuery, with a `MERGE` on `Contract.key_columns` | Built: `BigQueryWarehouse.load()` (`adapters/bigquery.py`); the solution's `main.py` must pass `key_columns=contract.key_columns`. |
 | Secrets | Secret Manager, referenced (never inlined) from configuration | Needs a new adapter implementing `SecretStore` (`ports.py`); none exists today. |
-| Quality | Reusable checks: schema, required fields, uniqueness, valid codes, record counts, freshness | `Contract.validate()` covers the first four; row-count/freshness checks are not built (see [Section 5](#5-feature-by-feature-status)). |
+| Quality | Reusable checks: schema, required fields, uniqueness, valid codes, record counts, freshness | `Contract.validate()` covers the first four; freshness is a per-source view read by `runner.check_freshness()` (`GCP_SETUP.md`); row-count checks are not built (see [Section 5](#5-feature-by-feature-status)). |
 | Monitoring | Cloud Logging (already reachable via Python `logging`) plus named Cloud Monitoring alerts on failure and on staleness | Not built; needs both a structured-logging change and alert policies defined as IaC. |
 | Deployment | Terraform modules, run through the existing CI/CD pattern | `deploy/` exists as a placeholder folder only. |
 

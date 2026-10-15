@@ -8,6 +8,52 @@ Entries are not rewritten once made. When a decision changes, add a
 new dated entry saying which earlier entry it replaces, and mark the
 earlier entry as superseded.
 
+## 2026-10-15 — Runner helpers for scheduled and upload-triggered runs
+
+### A run with a FAILED file fails
+
+`Pipeline.run()` records a file that fails and carries on with the
+next, so a run can return normally with FAILED files. Each solution
+repository used to check the results itself. `py_common.runner` now
+does: `run_job()` returns exit code 1, and `handle_upload()` raises
+`RunFailed` (a new `IngestionError`). That way a Cloud Run job
+execution shows as failed, and Pub/Sub delivers an upload event again.
+`run_job()` runs every pipeline even after one fails or is refused by
+its lock, because the sources are independent. QUARANTINED is not a
+failure here: retrying won't fix a bad file, and it has its own alert.
+
+### Upload events run Pipeline.run(), not Pipeline.process()
+
+The HWW team's standard pattern starts a Cloud Run service from
+Eventarc when a file lands. `handle_upload()` maps the object's
+folder to its pipeline and calls `run()` for that folder. `run()`
+takes the warehouse lock and writes the audit record and the
+"already loaded" marker. `process()` does neither, so a redelivered
+event would have loaded the file again. `GCP_SETUP.md` had suggested
+`process()` could sit behind the trigger; it now says not to.
+
+The daily scheduled job stays, as the backstop for lost events (by
+default Pub/Sub keeps an undelivered event for 24 hours) and to run
+the freshness check. The service runs with one instance and one
+request at a time, so files landing together queue instead of
+clashing on the lock. The lock still guards the short periods when
+Cloud Run runs more instances than its maximum.
+
+**Trade-off**: two ways to start a run means two deployments and two
+log sources for the alerts. Benefit: an ad hoc upload loads in
+minutes, and the setup matches the team's pattern.
+
+### Missing files are checked per source
+
+The missing-file alert was a BigQuery scheduled query that failed
+when nothing had loaded for 35 days. It covered all sources at once,
+and its failure email reached only the account that created it. It
+is replaced by a `source_freshness` view, with one row per monthly
+source read from that source's raw table. The daily job calls
+`check_freshness()`, which logs `Missing monthly file:` for each
+overdue source, and a log-based alert sends that to the team.
+Sources are due by the 7th of the month.
+
 ## 2026-10-14 — Workbook layouts and a raw JSON load route
 
 ### A raw JSON route alongside the typed MERGE route
