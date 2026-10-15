@@ -4,6 +4,7 @@ A contract specifies required worksheets, columns, data types,
 and business rules. Validation is deterministic and repeatable.
 """
 
+import posixpath
 import zipfile
 from dataclasses import dataclass, field
 from datetime import date
@@ -506,8 +507,8 @@ class Contract:
                 if not any(_is_blank(v) for v in key_values):
                     if key_values in first_seen:
                         row_errors.append(
-                            f"Row {row_idx}: Duplicate key {key_values} "
-                            f"in ({', '.join(keys)}), first on row "
+                            f"Row {row_idx}: Duplicate key in "
+                            f"({', '.join(keys)}), first on row "
                             f"{first_seen[key_values]}"
                         )
                     else:
@@ -725,25 +726,32 @@ def formulas_without_values(
 
     Returns:
         Sheet name -> [(row number, cell reference), ...], only for
-        sheets that have such cells. A workbook whose parts can't be
-        found returns {} (openpyxl has already opened it, so this is
-        only a non-standard layout).
+        sheets that have such cells.
+
+    Raises:
+        ContractError: A sheet's XML part can't be located or read.
     """
     try:
         with zipfile.ZipFile(BytesIO(excel_bytes)) as archive:
             paths = _sheet_paths(archive)
             found: dict[str, list[tuple[int, str]]] = {}
+            parts = set(archive.namelist())
             for name in sheet_names:
                 path = paths.get(name)
-                if path is None or path not in archive.namelist():
-                    continue
+                if path is None or path not in parts:
+                    # Never read "can't find the sheet" as "no
+                    # uncached formulas".
+                    raise ContractError(
+                        f"Worksheet {name}: cannot locate its part in "
+                        f"the workbook to check formulas ({path})"
+                    )
                 with archive.open(path) as part:
                     cells = _uncached_formula_cells(part)
                 if cells:
                     found[name] = cells
             return found
-    except (zipfile.BadZipFile, KeyError, ElementTree.ParseError):
-        return {}
+    except (zipfile.BadZipFile, KeyError, ElementTree.ParseError) as e:
+        raise ContractError(f"Cannot scan workbook formulas: {e}") from e
 
 
 def _local(tag: str) -> str:
@@ -765,11 +773,15 @@ def _sheet_paths(archive: zipfile.ZipFile) -> dict[str, str]:
         for _, element in ElementTree.iterparse(rels):
             if _local(element.tag) == "Relationship":
                 target = element.get("Target", "")
-                targets[element.get("Id", "")] = (
+                # Targets are relative to xl/ unless absolute; resolve
+                # "./" and "../" as openpyxl does, so every spelling
+                # of the same part is scanned.
+                joined = (
                     target.lstrip("/")
                     if target.startswith("/")
                     else f"xl/{target}"
                 )
+                targets[element.get("Id", "")] = posixpath.normpath(joined)
     paths: dict[str, str] = {}
     with archive.open("xl/workbook.xml") as workbook:
         for _, element in ElementTree.iterparse(workbook):

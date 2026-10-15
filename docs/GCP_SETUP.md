@@ -387,8 +387,13 @@ naming it until its lease expires (one hour by default,
 `GCSObjectStore(lease_seconds=...)`), and the first run after that
 takes it over and logs `Took over expired lock` at WARNING. Keep
 `lease_seconds` above the job's task timeout (10 minutes unless set
-with `--task-timeout`) and the service's `--timeout`, so a lease can
-only expire once its run is certainly dead. To unblock sooner, check
+with `--task-timeout`) and the service's `--timeout`,
+so a lease outlasts any normal run. This makes a stolen lock
+unlikely, not impossible: a Cloud Run *service* container can keep
+working after its request times out, and the lease isn't renewed or
+fenced. The warehouse's in-transaction audit check is the second line
+of defence; two commits racing each other is still possible (see
+`CHANGELOG.md`, Known limitations). To unblock sooner, check
 that no run is active, then delete the `gs://$STORE_BUCKET/locks/...`
 object named in the error.
 
@@ -534,10 +539,21 @@ logs plain text instead (no `configure_json_logging()`), use
 `textPayload:"..."` with the message texts; the outcome filters need
 JSON logging.
 
-**Test each alert once** before relying on it: run the smoke test
-(`docs/SMOKE_TEST.md`), whose invalid workbook produces a
-`quarantined` summary line, and confirm the notification arrives.
-In the Logs Explorer, the alert's filter should return that line. The same
+**Test each alert once** before relying on it. The smoke test
+(`docs/SMOKE_TEST.md`, `scripts/demo.py`) logs JSON like the
+production job; run it as a Cloud Run job so its lines carry the
+`cloud_run_job` resource, then check each filter in the Logs Explorer
+and that its notification arrives:
+
+| Alert | How to trigger it |
+|---|---|
+| Quarantined file | The smoke test's invalid workbook (step 4) |
+| Header or data warning | Upload a workbook with an extra column to a `"warn"` source |
+| Failed file | Run once with the job's BigQuery access removed, or point it at a dataset with no `audit` table |
+| Failed run | Start a second run while one holds the lock |
+| Missing monthly file | Temporarily set the freshness view's due day so a source is overdue |
+
+The quarantine check alone doesn't prove the others. The same
 alerts can be created in the console under *Logging → Logs Explorer →
 Create alert*.
 
@@ -580,8 +596,9 @@ FROM loads CROSS JOIN month"
 - **Add a source after its first file has loaded.** The view can't
   name a raw table that doesn't exist yet.
 - **What counts as arrived:** a file that loaded. A quarantined upload
-  doesn't count (its own alert has fired). Nor does an upload
-  identical to last month's, which is skipped.
+  doesn't count (its own alert has fired). On the raw JSON route a new
+  upload always loads, even with the same bytes as last month's; on
+  the typed route identical content is skipped and so doesn't count.
 
 The view also gives each source's "last updated" date, which the
 dashboard can show. Dataform can publish it with the cleaned tables,

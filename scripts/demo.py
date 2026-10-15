@@ -49,6 +49,7 @@ from py_common.adapters import LocalSource
 from py_common.adapters.bigquery import BigQueryWarehouse
 from py_common.adapters.bigquery_raw import RawJsonWarehouse
 from py_common.adapters.gcs import GCSObjectStore
+from py_common.logging import configure_json_logging
 from py_common.model import digest
 
 PROJECT = os.environ["GCP_PROJECT_ID"]
@@ -130,6 +131,10 @@ def main() -> None:
         help="add the 0.2.0 audit columns if they are missing",
     )
     args = parser.parse_args()
+    # Same log shape as the production job, so the alert filters in
+    # docs/GCP_SETUP.md (jsonPayload.outcome etc.) can be tested
+    # against this run's log lines.
+    configure_json_logging()
 
     client = bigquery.Client(project=PROJECT)
     bucket = storage.Client(project=PROJECT).bucket(BUCKET)

@@ -15,7 +15,7 @@ import pytest
 from unittest.mock import Mock, MagicMock, patch
 
 from py_common.adapters.bigquery import BigQueryWarehouse
-from py_common.errors import ServiceError
+from py_common.errors import ContractError, ServiceError
 from py_common.model import SourceItem
 
 #: Source file passed to every load().
@@ -734,7 +734,7 @@ class TestBigQueryWarehouseLoadedAt:
         """
         warehouse = self._warehouse("event_id", "_loaded_at")
 
-        with pytest.raises(ValueError, match="_loaded_at"):
+        with pytest.raises(ContractError, match="_loaded_at"):
             warehouse.load(
                 key="k", checksum="c", data=b"parquet", rows=1, item=ITEM
             )

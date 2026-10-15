@@ -63,10 +63,11 @@ def load_config(path: Path | str) -> dict[str, Any]:
         path: Path to .yaml or .yml file.
 
     Returns:
-        Parsed configuration dict.
+        Parsed configuration dict ({} for an empty file).
 
     Raises:
-        ConfigError: File not found or YAML is malformed.
+        ConfigError: File not found, YAML is malformed, or its top
+            level isn't a mapping.
     """
     path = Path(path)
 
@@ -74,13 +75,22 @@ def load_config(path: Path | str) -> dict[str, Any]:
         raise ConfigError(f"Configuration file not found: {path}")
 
     try:
-        with open(path) as f:
+        # UTF-8 always: the platform default (cp1252 on Windows)
+        # would misread non-ASCII names such as Welsh ones.
+        with open(path, encoding="utf-8") as f:
             config = yaml.safe_load(f)
-        return config or {}
     except yaml.YAMLError as e:
         raise ConfigError(f"YAML parse error in {path}: {e}") from e
-    except IOError as e:
+    except (IOError, UnicodeDecodeError) as e:
         raise ConfigError(f"Cannot read {path}: {e}") from e
+    if config is None:
+        return {}
+    if not isinstance(config, dict):
+        raise ConfigError(
+            f"{path}: top level must be a mapping, got "
+            f"{type(config).__name__}"
+        )
+    return config
 
 
 def require_keys(config: dict[str, Any], keys: list[str]) -> None:

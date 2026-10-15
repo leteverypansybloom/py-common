@@ -24,7 +24,10 @@ repos:
     rev: v1.5.0
     hooks:
       - id: mypy
-        additional_dependencies: ["types-PyYAML"]
+        # Same scope as CI (mypy src/py_common --strict); tests are
+        # not written to strict typing.
+        files: ^src/py_common/
+        additional_dependencies: ["types-PyYAML", "pandas-stubs", "types-openpyxl", "types-requests"]
         args: ["--strict"]
 
   # Secret detection

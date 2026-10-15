@@ -290,8 +290,6 @@ class RawJsonWarehouse:
         )
         return committed(job, result, key)
 
-        logger.debug("Inserted %d raw rows for %s", rows, key)
-
     def _split_by_sheet(self, data: bytes) -> dict[str, list[bytes]]:
         """Group NDJSON lines by their sheet_name, keeping order.
 

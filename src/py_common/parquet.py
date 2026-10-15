@@ -218,11 +218,13 @@ def _warning(
     Returns:
         The warning text.
     """
+    # The bad value itself isn't included: it is data (possibly
+    # personal) and this text reaches logs and audit records.
     if len(failures) == 1:
-        row, value = failures[0]
+        row, _ = failures[0]
         return (
-            f"{where}: '{column}' row {row} is not {data_type} "
-            f"({value!r}); loaded as NULL"
+            f"{where}: '{column}' row {row} is not {data_type}; "
+            "loaded as NULL"
         )
     rows = ", ".join(str(row) for row, _ in failures[:_ROWS_SHOWN])
     more = ", ..." if len(failures) > _ROWS_SHOWN else ""

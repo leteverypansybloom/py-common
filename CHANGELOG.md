@@ -83,6 +83,22 @@ loaded into BigQuery twice, whatever fails and wherever it fails.
   row counts come from the load job, `gs://` is stripped only as a
   prefix.
 
+### Known limitations
+
+- **Not strictly exactly-once under every failure.** A commit job
+  still running when its client gives up isn't resumed; a retry
+  starts a new one, and the lock lease isn't renewed or fenced. The
+  in-transaction audit check stops ordinary retries loading twice,
+  but two commits racing each other could both pass it.
+- **Typed route: restoring earlier content (A → B → A) is skipped**,
+  and the MERGE never deletes rows removed from the source.
+- **Raw route: an empty replacement inserts nothing**, so "latest
+  generation" still shows the previous upload's rows.
+- **Changing a `RawJsonWarehouse` table mapping** changes its
+  identity, so files already loaded load again.
+- Only each landing file's current version is loaded; there is no
+  replay command.
+
 ### Tooling
 
 - Dependencies have upper bounds; CI tests Python 3.11 and 3.12,

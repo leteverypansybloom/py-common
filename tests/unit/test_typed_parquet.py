@@ -109,8 +109,7 @@ class TestCoercion:
 
         assert _read(data).column("count").to_pylist() == [1, None]
         assert warnings == [
-            "f.xlsx [Events]: 'count' row 3 is not integer ('NA'); "
-            "loaded as NULL"
+            "f.xlsx [Events]: 'count' row 3 is not integer; loaded as NULL"
         ]
 
     def test_lossless_conversions_are_kept(self) -> None:

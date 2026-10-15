@@ -79,9 +79,10 @@ class GCSObjectStore:
                 gs://, prefix is removed for normalization.
             lease_seconds (int): How long a run's lock lasts before
                 another run may take it over. Must exceed the Cloud
-                Run job or service timeout, so a lock can only expire
-                once its holder is certainly dead. Defaults to one
-                hour.
+                Run job or service timeout, so a lease outlasts any
+                normal run. Not a guarantee: a service container can
+                keep running after its request times out, and the
+                lease isn't renewed. Defaults to one hour.
 
         Returns:
             None

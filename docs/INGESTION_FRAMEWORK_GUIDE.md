@@ -176,12 +176,13 @@ exact; where nothing exists, that's stated plainly rather than implied.
   (`Pipeline._quarantine_invalid()`) before the pipeline gives up on
   it. So the original bytes are always recoverable, even for files
   that never reach the warehouse.
-- There is no backfill or replay command. Re-loading old data today
-  means manually clearing the `audit/{warehouse identity}/{checksum}`
-  marker for those files so the checksum check doesn't skip them
-  again. (For the raw JSON route there's usually no need: every
-  version is already in the raw table, and the cleaning layer can be
-  rerun from it.)
+- There is no backfill or replay command, and clearing the
+  `audit/...` markers no longer forces a reload: since 0.2.0 the
+  warehouse's own audit table decides, inside the commit transaction.
+  Only the current version of each landing file is listed; earlier
+  GCS generations are kept but not loaded. (For the raw JSON route a
+  replay is rarely needed: every loaded version is in the raw table,
+  and the cleaning layer can be rerun from it.)
 
 ### 2.3 Make trustworthy — contracts, schema and quality
 
@@ -334,27 +335,24 @@ exact; where nothing exists, that's stated plainly rather than implied.
   This is genuinely solid, append-only, and doesn't store the raw data
   itself — only the checksum — so it's safe to keep without extra
   redaction work.
-- **Run ID:** there isn't one. Each `Result` and `AuditRecord` is
-  per-*file*; there's no record that groups "everything that happened
-  in this run" together, so answering "how did last night's run go, as
-  a whole?" means scanning individual file records for one time window.
-- **Logging:** plain Python `logging` module calls throughout
-  (e.g. `pipeline.py`, `adapters/gcs.py`), text-formatted, not
-  structured JSON. This will still show up in Cloud Logging on Cloud
-  Run, but you can't filter or alert on a specific field the way you
-  can with structured logs.
-- **Monitoring/alerting:** none. A failed run currently means an
-  uncaught exception propagates out of `Pipeline.run()`
-  (`pipeline.py`); nothing emails, pages, or posts anywhere.
+- **Run ID:** every `Pipeline.run()` has one, on every log line it
+  writes. It isn't stored in the audit records yet, so grouping a
+  run's files means filtering the logs (`jsonPayload.run_id`).
+- **Logging:** `py_common.logging.configure_json_logging()` writes
+  Cloud-Logging JSON with `run_id`, `warehouse`, `item_identity`,
+  `version`, `checksum` and `bq_job_id` fields, and one summary line
+  per file with its `outcome`.
+- **Monitoring/alerting:** log-based alerts set up by hand
+  (`docs/GCP_SETUP.md`, section 7); not yet defined as code.
 - **Retention:** no retention policy is set or configurable anywhere —
   the landing/raw/quarantine prefixes in `GCSObjectStore` accumulate
   forever until someone sets a bucket lifecycle rule outside this code.
-- **Locking:** `ObjectStore.lock()` is an exclusive lock that never
-  expires or steals (`ports.py`). `GCSObjectStore.lock()`
-  (`adapters/gcs.py`) implements it with a lock object created by
-  atomic create-if-absent, so overlapping runs get a `RuntimeError`.
-  A run killed mid-flight leaves the lock in place until an operator
-  deletes it. `LocalObjectStore.lock()` (`adapters/local.py`) is still
+- **Locking:** `GCSObjectStore.lock()` (`adapters/gcs.py`) creates a
+  lock object by atomic create-if-absent, so overlapping runs get a
+  `RuntimeError`. It is a lease (one hour by default): a run killed
+  mid-flight blocks others until it expires, then the next run takes
+  it over. It isn't renewed or fenced, so it reduces, rather than
+  rules out, overlapping writers. `LocalObjectStore.lock()` (`adapters/local.py`) is still
   a no-op, appropriately, for local testing.
 - **Secrets:** the `SecretStore` protocol exists (`ports.py`)
   but **no adapter implements it** — there is no Secret Manager class

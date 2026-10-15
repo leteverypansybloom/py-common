@@ -242,7 +242,9 @@ class BigQueryWarehouse:
         staging_table = self.client.get_table(staging_full_id)
         columns = [field.name for field in staging_table.schema]
         if LOADED_AT_COLUMN in columns:
-            raise ValueError(
+            # A problem with the file, so quarantine (ContractError),
+            # not a retry that can never succeed.
+            raise ContractError(
                 f"Source data for {key} has a '{LOADED_AT_COLUMN}' "
                 "column; that name is reserved for the load timestamp "
                 "the warehouse sets"
@@ -409,16 +411,15 @@ class BigQueryWarehouse:
         )
         if not rows:
             return
-        found = "; ".join(
-            ", ".join(
-                f"{column}={value}" for column, value in zip(key_columns, row)
-            )
-            + f" ({row[len(key_columns)]} rows)"
-            for row in rows
-        )
+        # Key values are data (possibly personal), and this message
+        # reaches logs and audit records, so give counts only.
+        null_groups = sum(1 for row in rows if row[len(key_columns) + 1])
+        duplicate_groups = len(rows) - null_groups
         raise ValidationError(
-            f"{key}: duplicate or NULL merge keys in "
-            f"({', '.join(key_columns)}): {found}"
+            f"{key}: merge keys ({', '.join(key_columns)}) are not "
+            f"unique and non-NULL in staging: {duplicate_groups} "
+            f"repeated key(s), {null_groups} NULL key group(s) "
+            "(first 5 checked)"
         )
 
     def _build_merge_sql(

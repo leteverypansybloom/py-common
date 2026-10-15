@@ -85,7 +85,8 @@ described in
 
 **Warehouse** (protocol)
 - Stages, validates, and loads data
-- Implements `load(key, checksum, data, rows)`
+- Implements `load(key, checksum, data, rows, item) -> bool`
+  (`False`: its audit table shows the file already loaded)
 - Atomically commits or rolls back entire transaction
 - Records audit entry with row count and checksum
 
@@ -251,7 +252,7 @@ Optional extras (`pip install -e ".[gcp]"` etc.):
 
 - `gcp`: google-cloud-storage >= 2.10, < 4; google-cloud-bigquery
   >= 3.13, < 4; google-api-core >= 2.11, < 3
-- `sharepoint`: requests >= 2.31 (authentication library to follow IT's decision)
+- `sharepoint`: requests >= 2.32.4, < 3 (authentication library to follow IT's decision)
 - `dev`: pytest, black, ruff, mypy, pre-commit, detect-secrets and
   type stubs
 

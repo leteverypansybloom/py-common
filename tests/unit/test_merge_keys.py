@@ -87,7 +87,10 @@ class TestContractKeyUniqueness:
         )
         data = _workbook([(1, "N", 5), (1, "S", 6), (1, "N", 7)])
 
-        with pytest.raises(ValidationError, match=r"Row 4.*\(1, 'N'\)"):
+        with pytest.raises(
+            ValidationError,
+            match=r"Row 4: Duplicate key in \(id, region\), first on row 2",
+        ):
             contract.validate(data, "f.xlsx")
 
     def test_same_id_different_region_is_fine(self) -> None:
@@ -183,12 +186,15 @@ class TestWarehouseKeyChecks:
             warehouse.load("k", "c", b"parquet", 2, ITEM)
         assert _scripts(client) == []
 
-    def test_duplicate_keys_are_validation_error_naming_them(self) -> None:
+    def test_duplicate_keys_are_validation_error_with_counts(self) -> None:
+        """Counts only: key values are data and reach logs (M13)."""
         warehouse, client = _warehouse(
             ["id", "region", "count"], [(1, "N", 2, 0), (7, "S", 3, 0)]
         )
 
-        with pytest.raises(ValidationError, match=r"id=1, region=N.*7"):
+        with pytest.raises(
+            ValidationError, match=r"\(id, region\).*2 repeated key"
+        ):
             warehouse.load("k", "c", b"parquet", 2, ITEM)
         assert _scripts(client) == []
 
