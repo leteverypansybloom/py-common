@@ -30,7 +30,10 @@ from py_common.adapters._bq_jobs import (
     commit_parameters,
     commit_script,
     committed,
+    create_staging_table,
+    drop_staging_table,
     run_query,
+    staging_table_id,
     wait_for_load,
 )
 from py_common.errors import ServiceError
@@ -141,7 +144,9 @@ class RawJsonWarehouse:
         Steps:
         1. Split the NDJSON by sheet; refuse sheets with no table
         2. Create any raw table that doesn't exist yet
-        3. Load each sheet's rows into {table}_staging (truncate)
+        3. Load each sheet's rows into a staging table of this
+           load's own ({table}_stg_{checksum[:12]}_{random},
+           expiring in a day; dropped afterwards)
         4. Verify the staged row count matches `rows`
         5. In one script transaction: if the audit table already has
            a LOADED row for this destination, load key and source
@@ -204,24 +209,60 @@ class RawJsonWarehouse:
                 f"{', '.join(unknown)} in {key}"
             )
 
+        staging: dict[str, str] = {}
+        try:
+            return self._stage_and_commit(
+                key, checksum, rows, item, by_sheet, staging
+            )
+        finally:
+            for full_id in staging.values():
+                drop_staging_table(self.client, full_id)
+
+    def _stage_and_commit(
+        self,
+        key: str,
+        checksum: str,
+        rows: int,
+        item: SourceItem,
+        by_sheet: dict[str, list[bytes]],
+        staging: dict[str, str],
+    ) -> bool:
+        """Stage every sheet, verify the count, then commit.
+
+        Args:
+            key (str): Unique identifier for this load.
+            checksum (str): SHA-256 of the source file.
+            rows (int): Expected row count across all sheets.
+            item (SourceItem): Source file loaded.
+            by_sheet (dict[str, list[bytes]]): NDJSON lines per sheet.
+            staging (dict[str, str]): Filled with sheet -> staging
+                table as each is created, so the caller can drop
+                them whatever happens (mutated).
+
+        Returns:
+            bool: As load().
+        """
         staged = 0
         for sheet, lines in by_sheet.items():
             table_id = self.tables[sheet]
             self._ensure_raw_table(table_id)
+            staging[sheet] = self._full_id(
+                staging_table_id(table_id, checksum)
+            )
+            create_staging_table(self.client, staging[sheet], STAGING_SCHEMA)
             job_config = bigquery.LoadJobConfig(
                 source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
                 schema=STAGING_SCHEMA,
-                # WRITE_TRUNCATE: Empty staging before load (safety).
                 write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
             )
             load_job = self.client.load_table_from_file(
                 BytesIO(b"".join(lines)),
-                self._full_id(f"{table_id}_staging"),
+                staging[sheet],
                 job_config=job_config,
             )
             wait_for_load(load_job, key)
             staged += load_job.output_rows or 0
-            logger.debug(f"Staged {sheet} for {key}")
+            logger.debug("Staged %s for %s", sheet, key)
 
         if staged != rows:
             raise ValueError(
@@ -240,7 +281,7 @@ class RawJsonWarehouse:
         )
         job, result = run_query(
             self.client,
-            self._transaction_sql(list(by_sheet)),
+            self._transaction_sql(staging),
             job_config_txn,
             key,
         )
@@ -297,11 +338,12 @@ class RawJsonWarehouse:
             )
             self.client.create_table(table, exists_ok=True)
 
-    def _transaction_sql(self, sheets: list[str]) -> str:
+    def _transaction_sql(self, staging: dict[str, str]) -> str:
         """Build the script inserting every sheet plus the audit row.
 
         Args:
-            sheets (list[str]): Sheets with staged rows, in order.
+            staging (dict[str, str]): Sheet -> its staging table, for
+                every sheet with staged rows, in order.
 
         Returns:
             str: A BigQuery script with one transaction (see
@@ -311,8 +353,8 @@ class RawJsonWarehouse:
             f"INSERT INTO `{self._full_id(self.tables[sheet])}` "
             f"({_COLUMNS}, ingested_at) "
             f"SELECT {_COLUMNS}, @timestamp "
-            f"FROM `{self._full_id(self.tables[sheet] + '_staging')}`"
-            for sheet in sheets
+            f"FROM `{staging_full_id}`"
+            for sheet, staging_full_id in staging.items()
         ]
         # Identity (in the load key) + version, not checksum: see
         # load().

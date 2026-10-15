@@ -139,7 +139,7 @@ gcloud iam service-accounts create "$SA_NAME" --project="$PROJECT" \
 |---|---|---|
 | `roles/storage.objectViewer` | Landing bucket | List and download the uploaded files |
 | `roles/storage.objectAdmin` | Store bucket | Write copies and audit records; create and delete the run lock |
-| `roles/bigquery.dataEditor` | Raw dataset | Create raw and staging tables; insert rows and audit records |
+| `roles/bigquery.dataEditor` | Raw dataset | Create raw tables; create and drop each load's staging table (`{table}_stg_...`, expiring after a day if a run dies before dropping it); insert rows and audit records |
 | `roles/bigquery.jobUser` | Project | Run load jobs and the commit transaction |
 
 ```bash
@@ -340,9 +340,15 @@ gcloud scheduler jobs create http "$JOB-daily" \
 ```
 
 **If a run is killed** (for example, a timeout) it can leave its lock
-object in the store bucket, and later runs are refused with an error
-naming it. Check that no run is active, then delete the
-`gs://$STORE_BUCKET/locks/...` object named in the error.
+object in the store bucket. Later runs are refused with an error
+naming it until its lease expires (one hour by default,
+`GCSObjectStore(lease_seconds=...)`), and the first run after that
+takes it over and logs `Took over expired lock` at WARNING. Keep
+`lease_seconds` above the job's task timeout (10 minutes unless set
+with `--task-timeout`) and the service's `--timeout`, so a lease can
+only expire once its run is certainly dead. To unblock sooner, check
+that no run is active, then delete the `gs://$STORE_BUCKET/locks/...`
+object named in the error.
 
 ## 6. Run on upload with Eventarc (optional)
 
@@ -425,8 +431,10 @@ What happens when:
   hours by default, then drops it. The daily job loads the file
   anyway.
 - **A run is killed** (for example at the timeout): its lock stays, as
-  for the job (section 5), and every event is refused until the lock
-  is deleted. The failed-run alert fires on each refusal.
+  for the job (section 5), and events are refused until the lease
+  expires (one hour by default) or the lock is deleted. Pub/Sub keeps
+  redelivering them meanwhile, and the failed-run alert fires on each
+  refusal.
 - **An unreadable event, or an upload to a folder with no pipeline:**
   logged and acknowledged, not retried. This includes sub-folders,
   which `GCSSource` doesn't read.

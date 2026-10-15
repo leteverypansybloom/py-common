@@ -87,28 +87,6 @@ class TestBigQueryWarehouseInit:
             assert warehouse.dataset_id == "test-dataset"
             assert warehouse.table_id == "test_table"
 
-    def test_init_sets_staging_table_name(self):
-        """__init__() derives staging table name.
-
-        Staging table is {table_id}_staging.
-
-        Args:
-            None
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If staging table name not derived
-        """
-        with patch("py_common.adapters.bigquery.bigquery.Client"):
-            warehouse = BigQueryWarehouse(
-                project_id="test-project",
-                dataset_id="test-dataset",
-                table_id="test_table",
-            )
-            assert warehouse.staging_table_id == "test_table_staging"
-
     def test_init_default_audit_table(self):
         """__init__() uses default audit_table_id.
 

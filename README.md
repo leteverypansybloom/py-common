@@ -103,11 +103,14 @@ create-if-absent (`if_generation_match=0`), so if two runs start at
 once (a second scheduler trigger, a manual re-run, a retry) only one
 proceeds. The other gets a `RuntimeError` naming the holder.
 
-- The lock never expires and is never stolen, as the `ObjectStore`
-  protocol requires.
+- The lock is a lease. It records when it expires
+  (`GCSObjectStore(..., lease_seconds=3600)` by default), and an
+  unexpired lock is never taken.
 - If a run is killed without releasing it, later runs are refused
-  until someone confirms no run is active and deletes the lock
-  object named in the error message.
+  until the lease expires; the next run then takes the lock over
+  (atomically, so only one run can) and logs a WARNING naming the
+  old holder. `lease_seconds` must exceed the Cloud Run job or
+  service timeout.
 - Release only deletes the lock this run created.
 - The Cloud Run Job's service account needs create and delete
   permission on objects in the bucket.

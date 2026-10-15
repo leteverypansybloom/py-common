@@ -14,6 +14,7 @@ import hashlib
 import json
 
 import pytest
+from _fake_gcs import FakeBucket
 from unittest.mock import Mock, MagicMock, patch
 
 from google.api_core.exceptions import (
@@ -343,47 +344,6 @@ class TestGCSObjectStorePut:
             assert mock_logger.debug.called
 
 
-class _FakeBlob:
-    """In-memory stand-in for a GCS blob with generation checks."""
-
-    def __init__(self, objects, key):
-        self._objects = objects
-        self._key = key
-        self.generation = None
-
-    def upload_from_string(self, data, if_generation_match=None):
-        exists = self._key in self._objects
-        if if_generation_match == 0 and exists:
-            raise PreconditionFailed("exists")
-        gen = self._objects.get(self._key, (None, 0))[1] + 1
-        raw = data.encode() if isinstance(data, str) else data
-        self._objects[self._key] = (raw, gen)
-        self.generation = gen
-
-    def download_as_bytes(self):
-        if self._key not in self._objects:
-            raise NotFound("missing")
-        return self._objects[self._key][0]
-
-    def delete(self, if_generation_match=None):
-        if self._key not in self._objects:
-            raise NotFound("missing")
-        current = self._objects[self._key][1]
-        if if_generation_match not in (None, current):
-            raise PreconditionFailed("generation changed")
-        del self._objects[self._key]
-
-
-class _FakeBucket:
-    """In-memory stand-in for a GCS bucket."""
-
-    def __init__(self):
-        self.objects = {}
-
-    def blob(self, key):
-        return _FakeBlob(self.objects, key)
-
-
 class TestGCSObjectStoreLock:
     """Test GCSObjectStore.lock() context manager.
 
@@ -399,7 +359,7 @@ class TestGCSObjectStoreLock:
     @pytest.fixture
     def bucket(self):
         """Fixture: in-memory fake bucket."""
-        return _FakeBucket()
+        return FakeBucket()
 
     @pytest.fixture
     def store(self, bucket):

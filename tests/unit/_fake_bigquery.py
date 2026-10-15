@@ -72,6 +72,9 @@ class FakeBigQueryClient:
         self.audit: list[dict[str, Any]] = []
         self.lose_next_commit_wait: Exception | None = None
         self.scripts: list[str] = []
+        self.created: list[str] = []
+        self.expires: dict[str, Any] = {}
+        self.delete_error: Exception | None = None
         self._jobs = 0
 
     def _job_id(self) -> str:
@@ -93,10 +96,14 @@ class FakeBigQueryClient:
     def create_table(self, table: Any, exists_ok: bool = False) -> None:
         table_id = getattr(table, "table_id_full", None) or _full_id(table)
         schema = [field.name for field in getattr(table, "schema", [])]
+        self.created.append(table_id)
+        self.expires[table_id] = getattr(table, "expires", None)
         self.tables.setdefault(table_id, schema)
         self.rows.setdefault(table_id, 0)
 
     def delete_table(self, table_id: str, not_found_ok: bool = False) -> None:
+        if self.delete_error is not None:
+            raise self.delete_error
         self.tables.pop(table_id, None)
 
     # Loads ----------------------------------------------------------

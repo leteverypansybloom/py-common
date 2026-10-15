@@ -16,7 +16,8 @@ find out what really happened before anything is reported.
 """
 
 import logging
-from datetime import datetime
+import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from google.api_core.exceptions import GoogleAPICallError
@@ -274,3 +275,73 @@ def committed(job: Any, rows: list[Any], what: str) -> bool:
         f"BigQuery job {job.job_id} for {what} returned no load status "
         f"(got {status!r})"
     )
+
+
+#: How long a staging table lives if its load never drops it.
+STAGING_LIFETIME = timedelta(days=1)
+
+
+def staging_table_id(table_id: str, checksum: str) -> str:
+    """A staging table name of this load's own.
+
+    Per load, not per table: two warehouses can share a destination
+    table while holding different run locks (RawJsonWarehouse's lock
+    is scoped to its whole set of tables), so a shared
+    "{table}_staging" could be refilled by another file's load
+    between this load's staging and its commit.
+
+    Args:
+        table_id: Destination table name.
+        checksum: SHA-256 of the source file.
+
+    Returns:
+        "{table}_stg_{checksum[:12]}_{8 random hex digits}".
+    """
+    return f"{table_id}_stg_{checksum[:12]}_{uuid.uuid4().hex[:8]}"
+
+
+def create_staging_table(
+    client: bigquery.Client,
+    full_id: str,
+    schema: list[bigquery.SchemaField] | None = None,
+) -> None:
+    """Create a staging table that expires after STAGING_LIFETIME.
+
+    The expiry cleans up after a run that dies before dropping it.
+
+    Args:
+        client: BigQuery client.
+        full_id: project.dataset.table to create.
+        schema: Columns; None lets the first load set them (Parquet).
+
+    Raises:
+        ServiceError: The table could not be created.
+    """
+    table = bigquery.Table(full_id, schema=schema)
+    table.expires = datetime.now(timezone.utc) + STAGING_LIFETIME
+    try:
+        client.create_table(table)
+    except GoogleAPICallError as e:
+        raise ServiceError(
+            f"Cannot create staging table {full_id}: {e}"
+        ) from e
+
+
+def drop_staging_table(client: bigquery.Client, full_id: str) -> None:
+    """Drop a staging table; best effort, never raises.
+
+    A failure only leaves the table until it expires, so it must not
+    hide the load's own result.
+
+    Args:
+        client: BigQuery client.
+        full_id: project.dataset.table to drop.
+    """
+    try:
+        client.delete_table(full_id, not_found_ok=True)
+    except Exception as e:
+        logger.warning(
+            "Could not drop staging table %s (it expires by itself): %s",
+            full_id,
+            e,
+        )

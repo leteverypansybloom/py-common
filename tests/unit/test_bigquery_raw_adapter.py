@@ -206,10 +206,11 @@ class TestRawJsonWarehouseLoad:
 
         calls = mock_bq_client.load_table_from_file.call_args_list
         destinations = [c.args[1] for c in calls]
-        assert destinations == [
-            "p.raw_hww.hww_account_signups_staging",
-            "p.raw_hww.hww_survey_info_staging",
+        assert [d.split("_stg_")[0] for d in destinations] == [
+            "p.raw_hww.hww_account_signups",
+            "p.raw_hww.hww_survey_info",
         ]
+        assert len(set(destinations)) == 2
         staged = [c.args[0].getvalue() for c in calls]
         assert b"".join(staged) == data
 
@@ -268,7 +269,11 @@ class TestRawJsonWarehouseLoad:
             item=ITEM,
         )
 
-        table = mock_bq_client.create_table.call_args.args[0]
+        [table] = [
+            c.args[0]
+            for c in mock_bq_client.create_table.call_args_list
+            if "_stg_" not in c.args[0].table_id
+        ]
         assert table.table_id == "hww_survey_info"
         assert table.schema == RAW_SCHEMA
         assert table.time_partitioning.field == "ingested_at"
@@ -294,7 +299,12 @@ class TestRawJsonWarehouseLoad:
             item=ITEM,
         )
 
-        mock_bq_client.create_table.assert_not_called()
+        created = [
+            c.args[0].table_id
+            for c in mock_bq_client.create_table.call_args_list
+        ]
+        # Only this load's own staging table is created.
+        assert [t.split("_stg_")[0] for t in created] == ["hww_survey_info"]
 
     def test_unknown_sheet_is_refused_before_loading(
         self, warehouse, mock_bq_client
@@ -395,7 +405,7 @@ class TestRawJsonWarehouseLoad:
         assert "BEGIN TRANSACTION" in sql
         assert "INSERT INTO `p.raw_hww.hww_account_signups`" in sql
         assert "INSERT INTO `p.raw_hww.hww_survey_info`" in sql
-        assert "FROM `p.raw_hww.hww_survey_info_staging`" in sql
+        assert "FROM `p.raw_hww.hww_survey_info_stg_abc123_" in sql
         assert "INSERT INTO `p.raw_hww.audit`" in sql
         assert "COMMIT TRANSACTION" in sql
         assert "ROLLBACK TRANSACTION" in sql

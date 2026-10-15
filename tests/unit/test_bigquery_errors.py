@@ -16,7 +16,6 @@ import pytest
 from google.api_core.exceptions import (
     BadRequest,
     Forbidden,
-    NotFound,
     ServiceUnavailable,
 )
 
@@ -167,29 +166,16 @@ def test_staging_load_failure_is_service_error(
         load()
 
 
-class TestEnsureStagingTable:
-    """BigQueryWarehouse._ensure_staging_table (review M11)."""
+class TestStagingTableCreation:
+    """Staging-table errors are ServiceErrors (review M11)."""
 
-    def _warehouse(self) -> tuple[BigQueryWarehouse, MagicMock]:
-        client = MagicMock()
-        with patch("py_common.adapters.bigquery.bigquery.Client") as cls:
-            cls.return_value = client
-            return BigQueryWarehouse("p", "d", "t"), client
-
-    def test_creates_table_only_when_missing(self) -> None:
-        """NotFound → the staging table is created."""
-        warehouse, client = self._warehouse()
-        client.get_table.side_effect = NotFound("no table")
-
-        warehouse._ensure_staging_table()
-
-        client.create_table.assert_called_once()
-
-    def test_other_errors_are_not_masked(self) -> None:
-        """A 403 is reported, not hidden behind a create attempt."""
-        warehouse, client = self._warehouse()
-        client.get_table.side_effect = Forbidden("no access")
+    def test_create_failure_is_service_error(
+        self, setup: tuple[MagicMock, Mock, Callable[[], None]]
+    ) -> None:
+        """A 403 creating staging is reported, nothing is committed."""
+        client, commit, load = setup
+        client.create_table.side_effect = Forbidden("no access")
 
         with pytest.raises(ServiceError, match="no access"):
-            warehouse._ensure_staging_table()
-        client.create_table.assert_not_called()
+            load()
+        commit.result.assert_not_called()

@@ -21,7 +21,10 @@ from py_common.adapters._bq_jobs import (
     commit_parameters,
     commit_script,
     committed,
+    create_staging_table,
+    drop_staging_table,
     run_query,
+    staging_table_id,
     wait_for_load,
 )
 from py_common.errors import ContractError, ServiceError, ValidationError
@@ -51,7 +54,6 @@ class BigQueryWarehouse:
         project_id (str): GCP project ID.
         dataset_id (str): BigQuery dataset name.
         table_id (str): Final table name.
-        staging_table_id (str): Staging table ({table_id}_staging).
         audit_table_id (str): Audit table name (default: "audit").
         key_columns (list[str]): Columns identifying a unique logical
             row, used to upsert into the final table. Empty means
@@ -89,8 +91,6 @@ class BigQueryWarehouse:
         self.table_id = table_id
         self.audit_table_id = audit_table_id
         self.key_columns = key_columns or []
-        # Staging table uses {table_id}_staging naming convention.
-        self.staging_table_id = f"{table_id}_staging"
         self.client = bigquery.Client(project=project_id)
 
     @property
@@ -119,8 +119,9 @@ class BigQueryWarehouse:
         """Atomically load Parquet data once, or fail completely.
 
         Steps:
-        1. Ensure staging table exists
-        2. Load Parquet data into staging (truncate first)
+        1. Create this load's own staging table
+           ({table}_stg_{checksum[:12]}_{random}, expiring in a day)
+        2. Load Parquet data into it
         3. Verify row count matches expectation
         4. In one BigQuery script transaction: if the audit table
            already has a LOADED row for this destination and
@@ -137,8 +138,9 @@ class BigQueryWarehouse:
         rows would change nothing but _loaded_at.
 
         The staging load (steps 1-2) is not part of the transaction:
-        staging is truncated and reloaded on every run, so a failure
-        there simply leaves nothing to merge. Steps 4-5 run as one
+        a failure there simply leaves nothing to merge. The staging
+        table is dropped afterwards, whatever happened (best effort;
+        it expires anyway). Steps 4-5 run as one
         BigQuery job so the final-table write and the audit record
         can never diverge — if the audit INSERT fails, the MERGE is
         rolled back too, instead of leaving committed data with no
@@ -165,13 +167,26 @@ class BigQueryWarehouse:
             IndeterminateCommitError: The transaction's outcome could
                 not be confirmed.
         """
+        staging_full_id = (
+            f"{self.project_id}.{self.dataset_id}."
+            f"{staging_table_id(self.table_id, checksum)}"
+        )
         try:
-            return self._load(key, checksum, data, rows, item)
+            create_staging_table(self.client, staging_full_id)
+            return self._load(key, checksum, data, rows, item, staging_full_id)
         except GoogleAPICallError as e:
             raise ServiceError(f"BigQuery failed for {key}: {e}") from e
+        finally:
+            drop_staging_table(self.client, staging_full_id)
 
     def _load(
-        self, key: str, checksum: str, data: bytes, rows: int, item: SourceItem
+        self,
+        key: str,
+        checksum: str,
+        data: bytes,
+        rows: int,
+        item: SourceItem,
+        staging_full_id: str,
     ) -> bool:
         """Body of load(); GoogleAPICallErrors are wrapped by load().
 
@@ -181,6 +196,7 @@ class BigQueryWarehouse:
             data (bytes): Parquet-encoded data to load.
             rows (int): Expected row count.
             item (SourceItem): Source file loaded.
+            staging_full_id (str): This load's staging table.
 
         Returns:
             bool: As load().
@@ -189,12 +205,6 @@ class BigQueryWarehouse:
             f"Loading {key}: {len(data)} bytes, {rows} rows, {checksum}"
         )
 
-        # Step 1: Ensure staging table exists.
-        self._ensure_staging_table()
-
-        staging_full_id = (
-            f"{self.project_id}.{self.dataset_id}.{self.staging_table_id}"
-        )
         final_full_id = f"{self.project_id}.{self.dataset_id}.{self.table_id}"
         audit_full_id = (
             f"{self.project_id}.{self.dataset_id}.{self.audit_table_id}"
@@ -204,7 +214,8 @@ class BigQueryWarehouse:
         # so BigQuery infers the staging table's schema from the file.
         job_config = bigquery.LoadJobConfig(
             source_format=bigquery.SourceFormat.PARQUET,
-            # WRITE_TRUNCATE: Empty staging before load (safety).
+            # The table is new and empty; WRITE_TRUNCATE lets the
+            # Parquet schema replace its empty one.
             write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
         )
 
@@ -471,41 +482,6 @@ class BigQueryWarehouse:
             [*(f"S.`{c}`" for c in columns), "@timestamp"]
         )
         return f"INSERT ({insert_columns}) VALUES ({insert_values})"
-
-    def _ensure_staging_table(self) -> None:
-        """Create staging table if it does not exist.
-
-        Uses minimal schema; actual schema inferred from Parquet load.
-
-        Args:
-            None
-
-        Returns:
-            None
-
-        Raises:
-            ServiceError: The table can't be read or created
-                (permission, outage).
-        """
-        staging_full_id = (
-            f"{self.project_id}.{self.dataset_id}." f"{self.staging_table_id}"
-        )
-
-        try:
-            self.client.get_table(staging_full_id)
-            logger.debug("Staging table %s exists", self.staging_table_id)
-        except NotFound:
-            logger.info("Creating staging table %s", staging_full_id)
-            # Create empty table; schema comes from Parquet.
-            table = bigquery.Table(staging_full_id)
-            try:
-                self.client.create_table(table, exists_ok=True)
-            except GoogleAPICallError as e:
-                raise ServiceError(
-                    f"Cannot create {staging_full_id}: {e}"
-                ) from e
-        except GoogleAPICallError as e:
-            raise ServiceError(f"Cannot read {staging_full_id}: {e}") from e
 
 
 def _type(field_type: str) -> str:

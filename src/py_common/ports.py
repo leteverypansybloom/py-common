@@ -78,8 +78,9 @@ class ObjectStore(Protocol):
         """Acquire exclusive write lock on key.
 
         Used to prevent concurrent writers when staging to
-        the warehouse. Lock must not auto-expire or steal
-        from long-running processes.
+        the warehouse. Never taken from a live holder. A lock may
+        be a lease that a later run takes over once it has expired
+        (GCSObjectStore), provided the lease outlasts any run.
 
         Args:
             key: Identifier for the lock (e.g., warehouse ID).
