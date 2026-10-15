@@ -10,11 +10,13 @@ readme = "README.md"
 license = {text = "MIT"}
 authors = [{name = "Public Health Wales", email = "eoinvondy@gmail.com"}]
 requires-python = ">=3.11"
+# Upper bounds stop a fresh install pulling in a major version the
+# code was never tested against (review finding M14).
 dependencies = [
-    "openpyxl>=3.0.0",
-    "pyyaml>=6.0",
-    "pandas>=2.0.0",
-    "pyarrow>=15.0.0",
+    "openpyxl>=3.1,<4",
+    "pyyaml>=6.0,<7",
+    "pandas>=2.0,<3",
+    "pyarrow>=15,<27",
 ]
 
 [project.optional-dependencies]
@@ -29,7 +31,7 @@ dev = [
     # mypy --strict needs type stubs for untyped runtime deps, or it
     # stops at the import line before checking any real code.
     "types-PyYAML>=6.0",
-    "pandas-stubs>=2.0.0",
+    "pandas-stubs>=2.0,<3",
     "types-openpyxl>=3.0.0",
     "types-requests>=2.31.0",
     # SharePoint adapter unit tests import requests (for its
@@ -37,8 +39,9 @@ dev = [
     "requests>=2.31.0",
 ]
 gcp = [
-    "google-cloud-storage>=2.10.0",
-    "google-cloud-bigquery>=3.13.0",
+    "google-cloud-storage>=2.10,<4",
+    "google-cloud-bigquery>=3.13,<4",
+    "google-api-core>=2.11,<3",
 ]
 # Authentication is injected (see adapters/sharepoint.py), so no
 # identity library is pinned here until IT approves a credential flow.
@@ -55,6 +58,8 @@ target-version = ["py311"]
 
 [tool.ruff]
 line-length = 79
+
+[tool.ruff.lint]
 select = ["E", "F", "W"]
 
 [tool.mypy]
@@ -71,6 +76,12 @@ follow_imports_for_stubs = true
 [[tool.mypy.overrides]]
 module = ["numpy", "numpy.*"]
 follow_imports = "skip"
+ignore_missing_imports = true
+
+# The Google Cloud client libraries ship without type information,
+# so mypy --strict would stop at the import line (review finding M14).
+[[tool.mypy.overrides]]
+module = ["google.cloud.*", "google.api_core.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

@@ -226,14 +226,18 @@ The agreed order, with reasoning, is in
 
 Core:
 
-- openpyxl >= 3.0 — Read Excel
-- pyyaml >= 6.0 — YAML configuration
-- pandas >= 2.0 — Excel → DataFrame conversion
-- pyarrow >= 15.0 — Parquet output
+- openpyxl >= 3.1, < 4 — Read Excel
+- pyyaml >= 6.0, < 7 — YAML configuration
+- pandas >= 2.0, < 3 — Excel → DataFrame conversion
+- pyarrow >= 15, < 27 — Parquet output
+
+Every runtime dependency has an upper bound, so a fresh install
+never picks up a major version the code hasn't been tested against.
 
 Optional extras (`pip install -e ".[gcp]"` etc.):
 
-- `gcp`: google-cloud-storage >= 2.10, google-cloud-bigquery >= 3.13
+- `gcp`: google-cloud-storage >= 2.10, < 4; google-cloud-bigquery
+  >= 3.13, < 4; google-api-core >= 2.11, < 3
 - `sharepoint`: requests >= 2.31 (authentication library to follow IT's decision)
 - `dev`: pytest, black, ruff, mypy, pre-commit, detect-secrets and
   type stubs

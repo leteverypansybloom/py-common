@@ -31,7 +31,7 @@ from google.api_core.exceptions import (
     NotFound,
     PreconditionFailed,
 )
-from google.cloud import storage  # type: ignore
+import google.cloud.storage as storage
 
 from py_common.errors import NotFound as ItemNotFound
 from py_common.errors import ServiceError, VersionMismatch

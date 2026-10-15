@@ -91,7 +91,8 @@ Two layers of checks run without you asking:
   detect-secrets, and YAML / large-file / whitespace / merge-conflict
   checks. Run them all by hand with `pre-commit run --all-files`.
 - **On push and pull request** (`.github/workflows/tests.yml`):
-  pytest with coverage, ruff, black and mypy on Python 3.11.
+  ruff, black, mypy and pip-audit first (they fail fast), then pytest
+  with coverage, on Python 3.11 and 3.12.
 
 If detect-secrets flags something that is genuinely not a secret,
 update the baseline and commit it with your change:
