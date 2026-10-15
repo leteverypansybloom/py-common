@@ -43,7 +43,7 @@ python -m pre_commit install
 ```
 
 **Why `gcp` is included:** the unit tests for `GCSObjectStore` and
-`gcp_auth` import `google.cloud` directly (mocking the calls, not the
+`BigQueryWarehouse` import `google.cloud` directly (mocking the calls, not the
 import), so with `.[dev]` alone `pytest` fails to collect them. No GCP
 credentials are needed — only the libraries. The optional groups in
 `pyproject.toml` are `dev`, `gcp` and `sharepoint`; there is no `all`

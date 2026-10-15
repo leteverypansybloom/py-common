@@ -113,15 +113,14 @@ exact; where nothing exists, that's stated plainly rather than implied.
   commit to a folder path). The nearest thing is the manual live test
   in `tests/integration/test_live_services.py`, which lists the
   configured folder and downloads one file.
-- Authentication for GCP is handled separately by `gcp_auth.py`
-  (`src/py_common/gcp_auth.py`), which auto-detects Cloud Run/GCE vs. a
-  local Application Default Credentials file vs. a service-account
-  JSON key. This is **not** wired into the `Source`/`ObjectStore`/
-  `Warehouse` adapters — `GCSObjectStore` and `BigQueryWarehouse`
-  currently construct their own `storage.Client()` /
-  `bigquery.Client()` directly (`adapters/gcs.py`,
-  `adapters/bigquery.py`), relying on ambient Application Default
-  Credentials rather than calling `gcp_auth()` first.
+- GCP authentication uses Application Default Credentials: the GCS
+  and BigQuery adapters construct their own `storage.Client()` /
+  `bigquery.Client()` (`adapters/gcs.py`, `adapters/bigquery.py`),
+  which find credentials through `google.auth.default()` (the
+  `GOOGLE_APPLICATION_CREDENTIALS` variable, gcloud's ADC file, or
+  the Cloud Run metadata server). The older `gcp_auth.py` helper, a
+  port of the R `gcp_auth.R`, is not used by the library and now
+  lives in `scripts/`.
 
 ### 2.2 Capture — getting the bytes in, once, safely
 
@@ -351,8 +350,8 @@ exact; where nothing exists, that's stated plainly rather than implied.
   a no-op, appropriately, for local testing.
 - **Secrets:** the `SecretStore` protocol exists (`ports.py`)
   but **no adapter implements it** — there is no Secret Manager class
-  anywhere in `src/py_common/adapters/`. `gcp_auth.py` handles *GCP
-  authentication* (which credential to run as) but that is a different
+  anywhere in `src/py_common/adapters/`. Application Default Credentials handle
+  *GCP authentication* (which credential to run as) but that is a different
   problem from *fetching an application secret* (e.g. a SharePoint
   client secret) — the two should not be confused when
   `SharePointSource` is built.
@@ -430,7 +429,7 @@ manual steps for the raw JSON route.
 
 The test suite (`tests/unit/`, `tests/integration/`) confirms this shape:
 unit tests cover `Pipeline` (one test per outcome), `Contract`,
-`raw.py`, `config.py`, `fixtures.py`, `gcp_auth.py`, the local
+`raw.py`, `config.py`, `fixtures.py`, the local
 adapters, and the GCS and BigQuery adapters (with the cloud clients
 mocked). `test_hww_fixtures.py` runs the raw JSON route end to end
 over the HWW-style fixtures with the local adapters. The integration tests
@@ -481,7 +480,7 @@ behaviour doesn't match the promise), **Missing** (nothing exists).
 | Lineage and audit trail | **Have** (file-level) | `model.py`, written by `pipeline.py`. No run-level record, no code/config version stamped per record. |
 | Logging, metrics, alerts | Partial | Plain-text logging exists, with contract warnings at WARNING. `runner.run_job()`/`handle_upload()` turn FAILED files into a failed job or a retried event, and `runner.check_freshness()` logs overdue sources. Alerts are documented as manual steps (`GCP_SETUP.md`), not built as code. |
 | Run-status API/dashboard | Missing | Nothing queries the audit trail for a status view. |
-| Secrets and identity management | Partial | `gcp_auth.py` handles *which GCP credential to run as*; the `SecretStore` protocol (`ports.py`) has **no implementation** for application secrets (e.g. a SharePoint client secret). |
+| Secrets and identity management | Partial | GCP identity comes from Application Default Credentials (the job's service account on Cloud Run); the `SecretStore` protocol (`ports.py`) has **no implementation** for application secrets (e.g. a SharePoint client secret). |
 | Data classification / policy controls | Partial | Contracts can exclude columns (`Worksheet.excluded`) so personal data isn't loaded; no classification tags. The audit trail's "store checksum, not content" design (`pipeline.py`) is a reasonable privacy default to build on. |
 | Environment management | Partial | `config.py` supports named sections (e.g. `dev`/`prod`) with `${VAR}` interpolation; no enforced separation beyond that convention. |
 | Infrastructure as code | Missing | No Terraform; `deploy/` is an empty folder. |

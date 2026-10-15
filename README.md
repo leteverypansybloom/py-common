@@ -209,7 +209,7 @@ See [`CONTRIBUTING.md`, Run Tests Locally](CONTRIBUTING.md#run-tests-locally).
 
 Also built: contract validation, the raw JSON conversion (`raw.py`),
 configuration with interpolation, fixture generation, the error
-hierarchy, and GCP authentication helpers (`gcp_auth.py`).
+and the error hierarchy.
 
 ## What's Next
 
@@ -248,8 +248,12 @@ library or the test suite:
   real cloud resources.
 - `scripts/check_gcp_auth.py` — checks your local GCP credentials can
   reach BigQuery and Cloud Storage.
+- `scripts/gcp_auth.py` — a Python port of the R `gcp_auth.R` helper.
+  Not part of the library: the adapters authenticate through Google's
+  client libraries (Application Default Credentials). Kept for code
+  ported from R; likely to be removed.
 
-Both read their project settings from environment variables; see the
+The first two read their project settings from environment variables; see the
 header of each file.
 
 ## Standards

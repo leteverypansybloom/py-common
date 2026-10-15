@@ -22,7 +22,7 @@ its contents.
 
 In the current codebase, `GCSObjectStore` and `BigQueryWarehouse` create
 Google Cloud clients directly. Those clients automatically look for ADC;
-they do not currently call `py_common.gcp_auth`.
+they do not call `scripts/gcp_auth.py`, which is not part of the library.
 
 ## Create or refresh the credentials file
 
