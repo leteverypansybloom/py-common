@@ -10,7 +10,8 @@ Hierarchy:
   ├─ ServiceError: Cloud service unavailable or permission denied
   ├─ ObjectStoreConflict: Key exists with different content
   ├─ IndeterminateCommitError: Don't know if warehouse committed
-  └─ RunFailed: A pipeline run finished with FAILED files
+  ├─ RunFailed: A pipeline run finished with FAILED files
+  └─ ConfigError: Configuration file is missing or malformed
 
 ContractError is a ValidationError, so callers that catch
 ValidationError (e.g. Pipeline.process(), which quarantines it)
@@ -80,6 +81,10 @@ class IndeterminateCommitError(IngestionError):
     Raised when connection to warehouse fails during commit.
     Caller must check warehouse state before retrying.
     """
+
+
+class ConfigError(IngestionError):
+    """Configuration file is missing or malformed."""
 
 
 class RunFailed(IngestionError):

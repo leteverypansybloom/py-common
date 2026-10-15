@@ -13,10 +13,11 @@ Orchestrates:
 
 import json
 import logging
+import uuid
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from time import perf_counter
-from typing import Literal
+from typing import Any, Literal
 
 from py_common.contract import Contract, SheetRows
 from py_common.errors import (
@@ -25,12 +26,32 @@ from py_common.errors import (
     ValidationError,
     VersionMismatch,
 )
+from py_common.logging import add_log_fields, context_fields, log_context
 from py_common.model import AuditRecord, Outcome, Result, SourceItem, digest
 from py_common.parquet import to_parquet
 from py_common.ports import ObjectStore, Source, Warehouse
 from py_common.raw import to_ndjson
 
 logger = logging.getLogger("py_common.pipeline")
+
+
+def _fields(**more: Any) -> dict[str, Any]:
+    """`extra=` for a pipeline log call: the run and file fields.
+
+    The same fields also reach adapter log lines, through the
+    ContextFilter that configure_json_logging() installs; passing
+    them here as well keeps them on the pipeline's own lines under
+    any handler.
+
+    Args:
+        **more: Fields for this line only; None values are dropped.
+
+    Returns:
+        Field name -> value.
+    """
+    fields = context_fields()
+    fields.update({k: v for k, v in more.items() if v is not None})
+    return fields
 
 
 @dataclass
@@ -82,17 +103,47 @@ class Pipeline:
         """
         results: list[Result] = []
         lock_key = f"locks/{digest(self.warehouse.identity.encode())}"
+        run_id = uuid.uuid4().hex
 
-        try:
-            with self.store.lock(lock_key):
-                for item in self.source.items():
-                    result = self.process(item)
-                    results.append(self._audit_or_fail(result))
-        except Exception as e:
-            logger.exception("Pipeline run failed: %s", e)
-            raise
+        # Everything logged during the run, by the pipeline or an
+        # adapter, carries run_id and warehouse (py_common.logging).
+        with log_context(run_id=run_id, warehouse=self.warehouse.identity):
+            logger.info("Run %s started", run_id, extra=_fields())
+            try:
+                with self.store.lock(lock_key):
+                    for item in self.source.items():
+                        with log_context(
+                            item_identity=item.identity, version=item.version
+                        ):
+                            result = self._audit_or_fail(self.process(item))
+                            self._log_summary(result)
+                        results.append(result)
+            except Exception as e:
+                logger.exception("Pipeline run failed: %s", e, extra=_fields())
+                raise
 
         return results
+
+    @staticmethod
+    def _log_summary(result: Result) -> None:
+        """Log the one summary line for a file.
+
+        Args:
+            result: The file's final result.
+        """
+        logger.info(
+            "%s %s: %d rows in %.2fs",
+            result.item.name,
+            result.outcome.value,
+            result.rows_processed,
+            result.processing_time_seconds,
+            extra=_fields(
+                checksum=result.checksum or None,
+                outcome=result.outcome.value,
+                rows=result.rows_processed,
+                seconds=round(result.processing_time_seconds, 3),
+            ),
+        )
 
     def process(self, item: SourceItem) -> Result:
         """Process a single file; caller must hold warehouse lock.
@@ -102,6 +153,18 @@ class Pipeline:
 
         Returns:
             Result with outcome (loaded, skipped, quarantined, failed).
+        """
+        with log_context(item_identity=item.identity, version=item.version):
+            return self._process(item)
+
+    def _process(self, item: SourceItem) -> Result:
+        """Body of process(), inside the file's log context.
+
+        Args:
+            item: SourceItem from source discovery.
+
+        Returns:
+            As process().
         """
         start_time = perf_counter()
         errors: list[str] = []
@@ -119,6 +182,7 @@ class Pipeline:
                 )
 
             checksum = digest(data)
+            add_log_fields(checksum=checksum)
             if self._is_duplicate(item, checksum):
                 return self._make_result(
                     item, Outcome.SKIPPED, checksum, 0, errors, start_time
@@ -148,7 +212,9 @@ class Pipeline:
             # "warn" mode the file loads, so nothing else would show
             # that the layout or data has changed.
             for warning in warnings:
-                logger.warning("Contract warning: %s", warning)
+                logger.warning(
+                    "Contract warning: %s", warning, extra=_fields()
+                )
             self._store_processed(item, checksum, processed)
 
             warehouse_key = f"{item.identity}_{checksum[:8]}"
@@ -168,6 +234,7 @@ class Pipeline:
                     item.name,
                     rows_processed,
                     checksum[:8],
+                    extra=_fields(),
                 )
             if outcome in (Outcome.LOADED, Outcome.SKIPPED):
                 # The warehouse has the file either way: record that
@@ -183,7 +250,9 @@ class Pipeline:
                 outcome = Outcome.FAILED
             if str(e) not in errors:
                 errors.append(str(e))
-            logger.exception("Processing error for %s: %s", item.name, e)
+            logger.exception(
+                "Processing error for %s: %s", item.name, e, extra=_fields()
+            )
 
         return self._make_result(
             item,
@@ -210,7 +279,9 @@ class Pipeline:
             return self.source.download(item)
         except VersionMismatch:
             logger.info(
-                "Skipping %s: version changed during download", item.name
+                "Skipping %s: version changed during download",
+                item.name,
+                extra=_fields(),
             )
             return None
 
@@ -247,6 +318,7 @@ class Pipeline:
                     "Skipping %s: already loaded (marker %s)",
                     item.name,
                     key,
+                    extra=_fields(),
                 )
                 return True
         return False
@@ -332,7 +404,9 @@ class Pipeline:
         Returns:
             Single-element errors list describing the failure.
         """
-        logger.warning("Validation failed for %s: %s", item.name, error)
+        logger.warning(
+            "Validation failed for %s: %s", item.name, error, extra=_fields()
+        )
         key = self._version_key(item, checksum)
         self.store.put(f"raw/{key}", data)
         self.store.put(f"quarantine/{key}", data)
@@ -507,11 +581,16 @@ class Pipeline:
                     "Skipping %s: the warehouse audit shows it already "
                     "loaded",
                     item.name,
+                    extra=_fields(),
                 )
                 return Outcome.SKIPPED
             return Outcome.LOADED
         except IndeterminateCommitError:
-            logger.error("Cannot confirm warehouse commit for %s", item.name)
+            logger.error(
+                "Cannot confirm warehouse commit for %s",
+                item.name,
+                extra=_fields(),
+            )
             errors.append("Warehouse commit indeterminate")
             raise
         except ServiceError as e:
@@ -519,7 +598,7 @@ class Pipeline:
             # retried (Pub/Sub redelivery, next job run), whereas
             # QUARANTINED would be acknowledged and raise the
             # bad-file alert.
-            logger.error("Warehouse service error: %s", e)
+            logger.error("Warehouse service error: %s", e, extra=_fields())
             errors.append(f"Warehouse error: {e}")
             return Outcome.FAILED
         except ValidationError as e:
@@ -581,7 +660,10 @@ class Pipeline:
             return result
         except Exception as e:
             logger.exception(
-                "Audit write failed for %s: %s", result.item.name, e
+                "Audit write failed for %s: %s",
+                result.item.name,
+                e,
+                extra=_fields(),
             )
             return replace(
                 result,

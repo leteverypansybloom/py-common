@@ -230,7 +230,8 @@ and the error hierarchy.
 - ⏳ SharePoint authentication (token provider), once IT approves a flow
 - ⏳ Live SharePoint test: one file, then the full Cloud Run job
 - ⏳ Secret Manager adapter
-- ⏳ Structured logging; alert policies as code (manual steps in `docs/GCP_SETUP.md`)
+- ✅ Structured JSON logging (`py_common.logging.configure_json_logging()`)
+- ⏳ Alert policies as code (manual steps in `docs/GCP_SETUP.md`)
 
 The agreed order, with reasoning, is in
 [`docs/INGESTION_FRAMEWORK_GUIDE.md`, Section 9](docs/INGESTION_FRAMEWORK_GUIDE.md#9-priority-order-for-closing-the-gaps).

@@ -12,11 +12,12 @@ from typing import Any
 
 import yaml
 
-from py_common.errors import IngestionError
+# ConfigError lives in py_common.errors with the other exceptions;
+# it is re-exported here so `from py_common.config import ConfigError`
+# keeps working.
+from py_common.errors import ConfigError
 
-
-class ConfigError(IngestionError):
-    """Configuration file is missing or malformed."""
+__all__ = ["ConfigError", "interpolate", "load_config", "require_keys"]
 
 
 def interpolate(text: str) -> str:

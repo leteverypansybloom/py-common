@@ -145,7 +145,9 @@ gcloud iam service-accounts create "$SA_NAME" --project="$PROJECT" \
 | Role | On | Why |
 |---|---|---|
 | `roles/storage.objectViewer` | Landing bucket | List and download the uploaded files |
-| `roles/storage.objectAdmin` | Store bucket | Write copies and audit records; create and delete the run lock |
+| `roles/storage.objectCreator` | Store bucket | Write copies, audit records and markers (create only: it can't overwrite or delete them) |
+| `roles/storage.objectViewer` | Store bucket | Read markers and compare an existing copy's hashes |
+| `roles/storage.objectUser`, with a condition | `locks/` in the store bucket only | Release the run lock (delete) and take over an expired one (overwrite, which GCS counts as a delete) |
 | `roles/bigquery.dataEditor` | Raw dataset | Create raw tables; create and drop each load's staging table (`{table}_stg_...`, expiring after a day if a run dies before dropping it); insert rows and audit records |
 | `roles/bigquery.jobUser` | Project | Run load jobs and the commit transaction |
 
@@ -154,7 +156,14 @@ gcloud storage buckets add-iam-policy-binding "gs://$LANDING_BUCKET" \
   --member="serviceAccount:$SA" --role="roles/storage.objectViewer"
 
 gcloud storage buckets add-iam-policy-binding "gs://$STORE_BUCKET" \
-  --member="serviceAccount:$SA" --role="roles/storage.objectAdmin"
+  --member="serviceAccount:$SA" --role="roles/storage.objectCreator"
+
+gcloud storage buckets add-iam-policy-binding "gs://$STORE_BUCKET" \
+  --member="serviceAccount:$SA" --role="roles/storage.objectViewer"
+
+gcloud storage buckets add-iam-policy-binding "gs://$STORE_BUCKET" \
+  --member="serviceAccount:$SA" --role="roles/storage.objectUser" \
+  --condition="title=locks-only,expression=resource.name.startsWith(\"projects/_/buckets/$STORE_BUCKET/objects/locks/\")"
 
 bq add-iam-policy-binding --member="serviceAccount:$SA" \
   --role="roles/bigquery.dataEditor" "$PROJECT:$RAW_DATASET"
@@ -162,6 +171,22 @@ bq add-iam-policy-binding --member="serviceAccount:$SA" \
 gcloud projects add-iam-policy-binding "$PROJECT" \
   --member="serviceAccount:$SA" --role="roles/bigquery.jobUser"
 ```
+
+With these roles the job can add to `raw/`, `processed/`,
+`quarantine/` and `audit/` but never change or delete what is there,
+so the store's immutability no longer rests on the code alone. IAM
+conditions need uniform bucket-level access, which section 1 turns
+on. Check the condition once after granting it: a first run should
+log `Released lock`, not a permission error.
+
+**Retention.** Consider keeping `raw/` and `audit/` for the period
+the DPIA sets even against someone with more access than the job. A
+bucket retention policy applies to every object in the bucket,
+including `locks/`, and would stop the lock being released, so it
+needs the lock in a bucket of its own (py-common keeps both in one
+store bucket today). Until then, keep soft delete on (the default, 7
+days; raise it with `gcloud storage buckets update
+--soft-delete-duration`) so a deleted copy can be restored.
 
 People who upload files need only `roles/storage.objectCreator` on the
 landing bucket: they can add files but not read, overwrite or delete
@@ -220,6 +245,14 @@ def build_pipelines() -> dict[str, Pipeline]:
     }
 ```
 
+`configure_json_logging()` writes each log line as JSON, which Cloud
+Logging turns into a structured entry: `severity`, `message`, and
+fields to filter on — `run_id` (one per `Pipeline.run()`),
+`warehouse`, `item_identity`, `version`, `checksum` and `bq_job_id`.
+Each file ends with one summary line that also has `outcome`, `rows`
+and `seconds`. For example, everything about one file in one run:
+`jsonPayload.run_id="..." AND jsonPayload.item_identity="was/x.xlsx"`.
+
 ```python
 # hww/job.py: the daily Cloud Run job (the image's default command)
 """Load every HWW workbook, then check for missing monthly files."""
@@ -230,6 +263,7 @@ import sys
 
 from google.cloud import bigquery
 
+from py_common.logging import configure_json_logging
 from py_common.runner import check_freshness, run_job
 
 from hww.pipelines import build_pipelines
@@ -242,7 +276,7 @@ def main() -> int:
         Exit code: 1 if a file FAILED, a run didn't finish, or the
         freshness check couldn't run, so the execution shows failed.
     """
-    logging.basicConfig(level=logging.INFO)
+    configure_json_logging()
     code = run_job(build_pipelines().values())
     try:
         check_freshness(
@@ -268,11 +302,12 @@ import logging
 import functions_framework
 from cloudevents.http import CloudEvent
 
+from py_common.logging import configure_json_logging
 from py_common.runner import handle_upload
 
 from hww.pipelines import build_pipelines
 
-logging.basicConfig(level=logging.INFO)
+configure_json_logging()
 PIPELINES = build_pipelines()
 
 

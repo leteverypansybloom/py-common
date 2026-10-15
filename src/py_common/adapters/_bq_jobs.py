@@ -61,7 +61,12 @@ def run_query(
         job = client.query(sql, job_config=job_config)
     except GoogleAPICallError as e:
         raise ServiceError(f"Cannot start BigQuery job for {what}: {e}") from e
-    logger.info("Started BigQuery job %s for %s", job.job_id, what)
+    logger.info(
+        "Started BigQuery job %s for %s",
+        job.job_id,
+        what,
+        extra={"bq_job_id": job.job_id},
+    )
 
     try:
         return job, list(job.result(timeout=timeout))
@@ -89,7 +94,12 @@ def wait_for_load(job: Any, what: str) -> None:
     Raises:
         ServiceError: BigQuery reports that the load failed.
     """
-    logger.info("Started BigQuery load job %s for %s", job.job_id, what)
+    logger.info(
+        "Started BigQuery load job %s for %s",
+        job.job_id,
+        what,
+        extra={"bq_job_id": job.job_id},
+    )
     try:
         job.result()
     except GoogleAPICallError as e:
@@ -129,6 +139,7 @@ def _confirm_after_wait_failed(job: Any, what: str, error: Exception) -> None:
             job.job_id,
             what,
             error,
+            extra={"bq_job_id": job.job_id},
         )
         return
     if job.state == "DONE":
@@ -262,13 +273,19 @@ def committed(job: Any, rows: list[Any], what: str) -> bool:
     """
     status = rows[0][0] if rows and len(rows[0]) else None
     if status == "LOADED":
-        logger.info("BigQuery job %s committed %s", job.job_id, what)
+        logger.info(
+            "BigQuery job %s committed %s",
+            job.job_id,
+            what,
+            extra={"bq_job_id": job.job_id},
+        )
         return True
     if status == "ALREADY_LOADED":
         logger.info(
             "BigQuery job %s: %s was already loaded; nothing written",
             job.job_id,
             what,
+            extra={"bq_job_id": job.job_id},
         )
         return False
     raise IndeterminateCommitError(
