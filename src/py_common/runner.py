@@ -32,6 +32,7 @@ check_freshness() takes any client with a BigQuery-style query().
 import base64
 import json
 import logging
+import re
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -44,8 +45,12 @@ from py_common.pipeline import Pipeline
 logger = logging.getLogger("py_common.runner")
 
 #: GCS notification event types that mean "a new object version".
-#: An empty type is accepted too, for messages without attributes.
-_NEW_OBJECT_EVENTS = ("", "OBJECT_FINALIZE")
+#: GCS always sets the eventType attribute, so a message without one
+#: is not an upload notification and is ignored.
+_NEW_OBJECT_EVENTS = ("OBJECT_FINALIZE",)
+
+#: A fully qualified view name: project.dataset.view.
+_VIEW_NAME = re.compile(r"^[\w-]+\.[\w-]+\.[\w-]+$")
 
 
 class QueryClient(Protocol):
@@ -257,12 +262,17 @@ def check_freshness(client: QueryClient, view: str) -> list[str]:
         Names of the overdue sources, sorted.
 
     Raises:
-        ValueError: view contains a backtick.
+        ValueError: view isn't project.dataset.view (letters, digits,
+            underscores and hyphens only).
         Exception: Whatever the client raises; a check that couldn't
             run is not reported as "nothing missing".
     """
-    if "`" in view:
-        raise ValueError(f"View name must not contain '`': {view!r}")
+    # The name is interpolated into SQL, so allow only the shape of
+    # a real view name, not just "no backtick".
+    if not _VIEW_NAME.match(view):
+        raise ValueError(
+            f"View name must be project.dataset.view, got {view!r}"
+        )
     rows = client.query(
         f"SELECT source, last_loaded_at FROM `{view}` "
         "WHERE overdue ORDER BY source"

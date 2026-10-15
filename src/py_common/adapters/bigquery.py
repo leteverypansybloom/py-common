@@ -202,7 +202,7 @@ class BigQueryWarehouse:
             bool: As load().
         """
         logger.debug(
-            f"Loading {key}: {len(data)} bytes, {rows} rows, {checksum}"
+            "Loading %s: %d bytes, %d rows, %s", key, len(data), rows, checksum
         )
 
         final_full_id = f"{self.project_id}.{self.dataset_id}.{self.table_id}"
@@ -227,17 +227,15 @@ class BigQueryWarehouse:
         wait_for_load(load_job, key)
         logger.debug("Loaded Parquet into staging table")
 
-        # Step 3: Verify row count.
-        count_sql = f"SELECT COUNT(*) as cnt FROM `{staging_full_id}`"
-        count_result = self.client.query(count_sql).result()
-        actual_rows = list(count_result)[0][0]
-
+        # Step 3: Verify row count. The load job reports the rows it
+        # wrote, so no COUNT(*) query (a round trip, billed at the
+        # 10 MB minimum) is needed.
+        actual_rows = load_job.output_rows
         if actual_rows != rows:
             raise ValueError(
                 f"Row count mismatch: expected {rows}, got {actual_rows}"
             )
-
-        logger.debug(f"Verified {actual_rows} rows in staging")
+        logger.debug("Verified %s rows in staging", actual_rows)
 
         # Step 4: Build the MERGE using the schema BigQuery just
         # inferred for staging.

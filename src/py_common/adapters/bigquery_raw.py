@@ -60,6 +60,9 @@ RAW_SCHEMA = [
 
 _COLUMNS = ", ".join(field.name for field in STAGING_SCHEMA)
 
+#: Raw tables are clustered on these, in this order.
+CLUSTERING_FIELDS = ["source_file", "source_generation"]
+
 
 class RawJsonWarehouse:
     """Transactional loading of raw JSON rows, one table per sheet.
@@ -287,7 +290,7 @@ class RawJsonWarehouse:
         )
         return committed(job, result, key)
 
-        logger.debug(f"Inserted {rows} raw rows for {key}")
+        logger.debug("Inserted %d raw rows for %s", rows, key)
 
     def _split_by_sheet(self, data: bytes) -> dict[str, list[bytes]]:
         """Group NDJSON lines by their sheet_name, keeping order.
@@ -318,7 +321,10 @@ class RawJsonWarehouse:
         return by_sheet
 
     def _ensure_raw_table(self, table_id: str) -> None:
-        """Create a raw table, partitioned by day, if it's missing.
+        """Create a raw table if it's missing.
+
+        Partitioned by day of ingested_at and clustered on
+        CLUSTERING_FIELDS.
 
         Args:
             table_id (str): Raw table name.
@@ -330,12 +336,16 @@ class RawJsonWarehouse:
         try:
             self.client.get_table(full_id)
         except NotFound:
-            logger.info(f"Creating raw table {full_id}")
+            logger.info("Creating raw table %s", full_id)
             table = bigquery.Table(full_id, schema=RAW_SCHEMA)
             table.time_partitioning = bigquery.TimePartitioning(
                 type_=bigquery.TimePartitioningType.DAY,
                 field="ingested_at",
             )
+            # The "latest upload" query partitions by source_file and
+            # filters on source_generation; clustering on them lets
+            # BigQuery prune blocks instead of scanning every upload.
+            table.clustering_fields = CLUSTERING_FIELDS
             self.client.create_table(table, exists_ok=True)
 
     def _transaction_sql(self, staging: dict[str, str]) -> str:

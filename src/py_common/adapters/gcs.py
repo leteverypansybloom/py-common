@@ -96,7 +96,7 @@ class GCSObjectStore:
         self.lease_seconds = lease_seconds
         # Normalize bucket name (remove gs:// prefix if present).
         # This allows users to specify either "bucket" or "gs://bucket".
-        self.bucket_name = bucket_name.replace("gs://", "")
+        self.bucket_name = bucket_name.removeprefix("gs://")
         self.project_id = project_id
         self.client = storage.Client(project=project_id)
         self.bucket = self.client.bucket(self.bucket_name)
@@ -431,7 +431,7 @@ class GCSSource:
                 f"got {extensions!r}"
             )
         self.project_id = project_id
-        self.bucket_name = bucket_name.replace("gs://", "")
+        self.bucket_name = bucket_name.removeprefix("gs://")
         folder = prefix.strip("/")
         self.prefix = f"{folder}/" if folder else ""
         self.extensions = tuple(e.lower() for e in extensions)
@@ -471,8 +471,10 @@ class GCSSource:
         ]
         items.sort(key=lambda item: item.identity)
         logger.info(
-            f"Found {len(items)} file(s) in "
-            f"gs://{self.bucket_name}/{self.prefix}"
+            "Found %d file(s) in gs://%s/%s",
+            len(items),
+            self.bucket_name,
+            self.prefix,
         )
         return items
 
@@ -521,7 +523,7 @@ class GCSSource:
         except GoogleAPICallError as e:
             raise ServiceError(f"Cannot download {where}: {e}") from e
 
-        logger.debug(f"Downloaded {where} ({len(data)} bytes)")
+        logger.debug("Downloaded %s (%d bytes)", where, len(data))
         return data
 
 

@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from time import perf_counter
 from typing import Literal
 
-from py_common.contract import Contract
+from py_common.contract import Contract, SheetRows
 from py_common.errors import (
     IndeterminateCommitError,
     ServiceError,
@@ -124,10 +124,10 @@ class Pipeline:
                     item, Outcome.SKIPPED, checksum, 0, errors, start_time
                 )
 
+            # One parse validates and reads every worksheet; the
+            # conversion below works from these rows.
             try:
-                rows_processed = self.contract.validate(
-                    data, item.name, warnings=warnings
-                )
+                sheets = self.contract.read(data, item.name, warnings=warnings)
             except ValidationError as e:
                 errors = self._quarantine_invalid(item, data, checksum, e)
                 return self._make_result(
@@ -141,7 +141,7 @@ class Pipeline:
 
             self._store_raw(item, data, checksum)
             processed, rows_processed = self._convert(
-                item, data, checksum, rows_processed, warnings
+                item, sheets, checksum, warnings
             )
 
             # Logged at WARNING so an alert can be raised on them: in
@@ -351,19 +351,16 @@ class Pipeline:
     def _convert(
         self,
         item: SourceItem,
-        data: bytes,
+        sheets: dict[str, SheetRows],
         checksum: str,
-        validated_rows: int,
         warnings: list[str] | None = None,
     ) -> tuple[bytes, int]:
-        """Convert the workbook into what the warehouse loads.
+        """Convert the workbook's rows into what the warehouse loads.
 
         Args:
             item: SourceItem being processed.
-            data: Raw Excel bytes.
-            checksum: SHA-256 of data.
-            validated_rows: Row count validate() returned for the
-                primary worksheet.
+            sheets: Rows per worksheet, from Contract.read().
+            checksum: SHA-256 of the source bytes.
             warnings: Where Parquet conversion reports values loaded
                 as NULL (mutated).
 
@@ -373,8 +370,10 @@ class Pipeline:
             JSON it is the rows of every configured worksheet.
         """
         if self.output_format == "raw_json":
-            return to_ndjson(self.contract.extract(data), item, checksum)
-        return self._to_parquet(data, item.name, warnings), validated_rows
+            return to_ndjson(sheets, item, checksum)
+        primary = self.contract.worksheets[0]
+        parquet = self._sheets_to_parquet(sheets, item.name, warnings)
+        return parquet, len(sheets[primary.name].rows)
 
     def _to_parquet(
         self,
@@ -408,8 +407,27 @@ class Pipeline:
         Returns:
             Parquet-encoded bytes of the primary worksheet.
         """
+        sheets = self.contract.extract(data, source_name)
+        return self._sheets_to_parquet(sheets, source_name, warnings)
+
+    def _sheets_to_parquet(
+        self,
+        sheets: dict[str, SheetRows],
+        source_name: str = "workbook",
+        warnings: list[str] | None = None,
+    ) -> bytes:
+        """Write the primary worksheet's rows as typed Parquet.
+
+        Args:
+            sheets: Rows per worksheet, from Contract.read().
+            source_name: File name, for warnings.
+            warnings: Where values loaded as NULL are reported
+                (mutated).
+
+        Returns:
+            Parquet-encoded bytes of the primary worksheet.
+        """
         primary = self.contract.worksheets[0]
-        sheets = self.contract.extract(data)
         return to_parquet(sheets[primary.name], primary, source_name, warnings)
 
     def _store_processed(

@@ -17,7 +17,7 @@ import pandas as pd
 import pytest
 from openpyxl import Workbook
 
-from py_common.contract import Column, Contract, Worksheet
+from py_common.contract import Column, Contract, SheetRows, Worksheet
 from py_common.errors import (
     ContractError,
     IndeterminateCommitError,
@@ -40,7 +40,7 @@ def item() -> SourceItem:
 
 @pytest.fixture
 def pipeline(item):
-    """Pipeline wired to mocks; contract.validate() controlled per test."""
+    """Pipeline wired to mocks; contract.read() controlled per test."""
     source = Mock()
     source.download.return_value = b"excel bytes"
     store = Mock()
@@ -63,7 +63,7 @@ class TestPipelineProcessQuarantineOutcomes:
 
     def test_contract_error_is_quarantined(self, pipeline, item):
         """A missing worksheet/column (ContractError) quarantines."""
-        pipeline.contract.validate.side_effect = ContractError(
+        pipeline.contract.read.side_effect = ContractError(
             "Missing worksheet 'Events'"
         )
 
@@ -75,7 +75,7 @@ class TestPipelineProcessQuarantineOutcomes:
 
     def test_validation_error_is_quarantined(self, pipeline, item):
         """A bad data row (ValidationError) quarantines, unchanged."""
-        pipeline.contract.validate.side_effect = ValidationError(
+        pipeline.contract.read.side_effect = ValidationError(
             "Row 2: 'attendees' is required"
         )
 
@@ -89,7 +89,7 @@ class TestPipelineProcessQuarantineOutcomes:
     ):
         """ContractError still stores raw + quarantine copies for
         triage, same as any other quarantine outcome."""
-        pipeline.contract.validate.side_effect = ContractError(
+        pipeline.contract.read.side_effect = ContractError(
             "Missing column 'attendees'"
         )
 
@@ -129,7 +129,7 @@ class TestPipelineProcessSkipOutcomes:
 
         assert result.outcome == Outcome.SKIPPED
         assert result.checksum == ""
-        pipeline.contract.validate.assert_not_called()
+        pipeline.contract.read.assert_not_called()
 
     def test_duplicate_checksum_is_skipped(self, pipeline, item):
         """A checksum already recorded in the store skips the file.
@@ -150,7 +150,7 @@ class TestPipelineProcessSkipOutcomes:
 
         assert result.outcome == Outcome.SKIPPED
         assert result.checksum != ""
-        pipeline.contract.validate.assert_not_called()
+        pipeline.contract.read.assert_not_called()
 
 
 class TestPipelineProcessWarehouseOutcomes:
@@ -747,8 +747,10 @@ class TestPipelineProcessWarnings:
     """Warnings from a "warn" contract are kept, logged and audited."""
 
     @staticmethod
-    def _warn(data: bytes, name: str, warnings: list[str]) -> int:
-        """Stand-in for Contract.validate() that records a warning.
+    def _warn(
+        data: bytes, name: str, warnings: list[str]
+    ) -> dict[str, SheetRows]:
+        """Stand-in for Contract.read() that records a warning.
 
         Args:
             data: Workbook bytes (unused).
@@ -756,16 +758,17 @@ class TestPipelineProcessWarnings:
             warnings: List to append to.
 
         Returns:
-            Row count.
+            One row of the "Events" sheet.
         """
         warnings.append(f"{name} [Events]: Unexpected columns: extra")
-        return 1
+        return {"Events": SheetRows(["a"], [(2, (1,))])}
 
     @pytest.fixture
     def warn_pipeline(self, pipeline: Pipeline) -> Pipeline:
         """Pipeline whose contract passes the file with one warning."""
-        pipeline.contract.validate.side_effect = self._warn
-        pipeline._to_parquet = Mock(return_value=b"parquet")
+        pipeline.contract.worksheets = [Worksheet("Events")]
+        pipeline.contract.read.side_effect = self._warn
+        pipeline._sheets_to_parquet = Mock(return_value=b"parquet")
         return pipeline
 
     def test_file_with_warnings_loads(
@@ -834,8 +837,11 @@ class TestPipelineProcessWarnings:
             pipeline: Pipeline fixture.
             item: SourceItem fixture.
         """
-        pipeline.contract.validate.return_value = 1
-        pipeline._to_parquet = Mock(return_value=b"parquet")
+        pipeline.contract.worksheets = [Worksheet("Events")]
+        pipeline.contract.read.return_value = {
+            "Events": SheetRows(["a"], [(2, (1,))])
+        }
+        pipeline._sheets_to_parquet = Mock(return_value=b"parquet")
 
         assert pipeline.process(item).warnings == []
 

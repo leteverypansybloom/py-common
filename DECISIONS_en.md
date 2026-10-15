@@ -136,8 +136,10 @@ but never loaded. In `listed` mode only the contract's columns are
 loaded, and an excluded column is not counted as unexpected. In
 `all_except` mode every column except the excluded ones is loaded,
 so a column added to a form is picked up without a contract change.
-`Contract.extract()` applies the selection; the Parquet conversion
-now uses it rather than reading the sheet itself.
+`Contract.read()` validates and applies the selection in one
+read-only parse (0.2.0; `validate()` and `extract()` remain as thin
+wrappers), and the conversion uses its rows rather than reading the
+sheet itself.
 
 Most HWW sources hold far more columns than the analysis needs,
 including names, email addresses and contact details. Loading every

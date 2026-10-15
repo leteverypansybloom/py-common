@@ -7,11 +7,11 @@ Audit: Record of an attempt for compliance and debugging.
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from hashlib import sha256
 
 
-class Outcome(str, Enum):
+class Outcome(StrEnum):
     """Result of processing a single file."""
 
     LOADED = "loaded"

@@ -4,10 +4,12 @@ A contract specifies required worksheets, columns, data types,
 and business rules. Validation is deterministic and repeatable.
 """
 
+import zipfile
 from dataclasses import dataclass, field
 from datetime import date
 from io import BytesIO
-from typing import Any, Literal
+from typing import IO, Any, Literal
+from xml.etree import ElementTree
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
@@ -179,18 +181,20 @@ class Contract:
                     "is nullable; key columns need nullable=False"
                 )
 
-    def validate(
+    def read(
         self,
         excel_bytes: bytes,
         source_name: str,
         warnings: list[str] | None = None,
-    ) -> int:
-        """Validate workbook against this contract.
+    ) -> dict[str, SheetRows]:
+        """Validate the workbook and read its rows, in one parse.
 
-        Every worksheet in `self.worksheets` is validated against its
-        matching sheet, looked up by name — never the workbook's
-        active sheet, which has no relation to what the contract
-        expects and can silently differ from it.
+        The workbook is opened once, read-only (streamed, not built
+        into a full in-memory grid), and each worksheet's rows are
+        both checked against the contract and selected for loading.
+        Every worksheet in `self.worksheets` is looked up by name,
+        never the workbook's active sheet, which has no relation to
+        what the contract expects.
 
         Args:
             excel_bytes: Raw Excel file bytes.
@@ -200,6 +204,33 @@ class Contract:
                 problems are still tolerated but not reported.
 
         Returns:
+            SheetRows for each configured worksheet, keyed by name,
+            in contract order.
+
+        Raises:
+            ContractError: Contract is misconfigured, or worksheet
+                structure doesn't match it.
+            ValidationError: Data violates contract rules.
+        """
+        return self._read(excel_bytes, source_name, warnings, check=True)
+
+    def validate(
+        self,
+        excel_bytes: bytes,
+        source_name: str,
+        warnings: list[str] | None = None,
+    ) -> int:
+        """Validate workbook against this contract.
+
+        A thin wrapper over read(), kept for callers that only want
+        the check.
+
+        Args:
+            excel_bytes: Raw Excel file bytes.
+            source_name: Filename for error messages.
+            warnings: As read().
+
+        Returns:
             Row count of the first configured worksheet if valid.
 
         Raises:
@@ -207,22 +238,8 @@ class Contract:
                 structure doesn't match it.
             ValidationError: Data violates contract rules.
         """
-        wb = self._open(excel_bytes, source_name)
-        if warnings is None:
-            warnings = []
-
-        primary_rows = 0
-        for index, ws_def in enumerate(self.worksheets):
-            ws = wb[ws_def.name]
-            # Keys belong to the primary worksheet (see __post_init__).
-            keys = self.key_columns if index == 0 else []
-            rows = self._validate_worksheet(
-                ws, ws_def, source_name, warnings, keys
-            )
-            if index == 0:
-                primary_rows = rows
-
-        return primary_rows
+        sheets = self.read(excel_bytes, source_name, warnings)
+        return len(sheets[self.worksheets[0].name].rows)
 
     def extract(
         self,
@@ -232,7 +249,7 @@ class Contract:
         """Read the columns and rows to load from every worksheet.
 
         Applies each worksheet's header_row, heading names and column
-        selection. Does not validate: call validate() first.
+        selection. Does not validate: use read() to do both at once.
 
         Args:
             excel_bytes: Raw Excel file bytes.
@@ -246,30 +263,98 @@ class Contract:
             ContractError: Contract is misconfigured, the workbook
                 can't be parsed, or a worksheet is missing.
         """
+        return self._read(excel_bytes, source_name, None, check=False)
+
+    def _read(
+        self,
+        excel_bytes: bytes,
+        source_name: str,
+        warnings: list[str] | None,
+        check: bool,
+    ) -> dict[str, SheetRows]:
+        """Body of read() and extract().
+
+        Args:
+            excel_bytes: Raw Excel file bytes.
+            source_name: Filename for error messages.
+            warnings: As read().
+            check: Validate as well as extract.
+
+        Returns:
+            SheetRows per configured worksheet.
+        """
         wb = self._open(excel_bytes, source_name)
-        sheets: dict[str, SheetRows] = {}
-        for ws_def in self.worksheets:
-            names, rows = read_sheet(wb[ws_def.name], ws_def.header_row)
-            index = {name: i for i, name in enumerate(names)}
-            if ws_def.column_selection == "listed":
-                selected = [col.name for col in ws_def.columns]
-            else:
-                skip = set(ws_def.excluded)
-                selected = [name for name in names if name not in skip]
-            sheets[ws_def.name] = SheetRows(
-                columns=selected,
-                rows=[
-                    (
-                        row_number,
-                        tuple(
-                            values[index[name]] if name in index else None
-                            for name in selected
-                        ),
-                    )
-                    for row_number, values in rows
-                ],
+        if warnings is None:
+            warnings = []
+        try:
+            uncached = (
+                formulas_without_values(
+                    excel_bytes, [ws_def.name for ws_def in self.worksheets]
+                )
+                if check
+                else {}
             )
-        return sheets
+            sheets: dict[str, SheetRows] = {}
+            for index, ws_def in enumerate(self.worksheets):
+                ws = wb[ws_def.name]
+                # Read-only mode trusts the sheet's stored dimensions,
+                # which some tools write wrongly; read what is there.
+                ws.reset_dimensions()
+                names, rows = read_sheet(ws, ws_def.header_row)
+                if check:
+                    self._check_formulas(
+                        uncached.get(ws_def.name, []),
+                        ws_def,
+                        source_name,
+                        warnings,
+                    )
+                    # Keys belong to the primary worksheet (see
+                    # __post_init__).
+                    keys = self.key_columns if index == 0 else []
+                    self._validate_worksheet(
+                        names, rows, ws_def, source_name, warnings, keys
+                    )
+                sheets[ws_def.name] = _select(names, rows, ws_def)
+            return sheets
+        finally:
+            wb.close()
+
+    @staticmethod
+    def _check_formulas(
+        cells: list[tuple[int, str]],
+        ws_def: Worksheet,
+        source_name: str,
+        warnings: list[str],
+    ) -> None:
+        """Report formula cells that have no saved result.
+
+        Files written by tools other than Excel (or generated by
+        code) often store a formula without its result. Read for its
+        values, such a cell is empty, so it would load as NULL or
+        fail a "required" check with a misleading message.
+
+        Args:
+            cells: (row, cell reference) of each such formula cell.
+            ws_def: The worksheet's contract.
+            source_name: Filename for messages.
+            warnings: Where the problem goes in "warn" mode (mutated).
+
+        Raises:
+            ValidationError: There are such cells at or below the
+                heading row, and on_mismatch is "quarantine".
+        """
+        found = [ref for row, ref in cells if row >= ws_def.header_row]
+        if not found:
+            return
+        shown = ", ".join(found[:5]) + (", ..." if len(found) > 5 else "")
+        message = (
+            f"{source_name} [{ws_def.name}]: {len(found)} formula "
+            f"cell(s) have no saved value and read as empty ({shown}); "
+            "open and save the file in Excel to store the results"
+        )
+        if ws_def.on_mismatch == "quarantine":
+            raise ValidationError(message)
+        warnings.append(message)
 
     def _open(self, excel_bytes: bytes, source_name: str) -> Workbook:
         """Parse the workbook and check every worksheet is present.
@@ -295,7 +380,9 @@ class Contract:
                 # file-like object:
                 filename=BytesIO(excel_bytes),
                 data_only=True,
-                read_only=False,
+                # Streams the sheets instead of building every cell
+                # object; nothing here needs merged-cell or style info.
+                read_only=True,
             )
         except Exception as e:
             raise ContractError(
@@ -319,7 +406,8 @@ class Contract:
 
     def _validate_worksheet(
         self,
-        ws: XlWorksheet,
+        headers: list[str],
+        rows: list[tuple[int, tuple[Any, ...]]],
         ws_def: Worksheet,
         source_name: str,
         warnings: list[str],
@@ -328,7 +416,8 @@ class Contract:
         """Validate one worksheet against its Worksheet definition.
 
         Args:
-            ws: The openpyxl worksheet to validate.
+            headers: Column names, from read_sheet().
+            rows: Data rows, from read_sheet().
             ws_def: Contract definition for this worksheet.
             source_name: Filename for error messages.
             warnings: Where problems go when ws_def.on_mismatch is
@@ -349,7 +438,6 @@ class Contract:
         errors: list[str] = []
         header = f"{source_name} [{ws_def.name}]"
 
-        headers, rows = read_sheet(ws, ws_def.header_row)
         for col_def in ws_def.columns:
             if col_def.name not in headers:
                 errors.append(f"Missing column '{col_def.name}'")
@@ -418,11 +506,13 @@ class Contract:
                 col_idx = header_index[col_def.name]
                 value = row[col_idx] if col_idx < len(row) else None
 
-                # Check nullable
-                if value is None and not col_def.nullable:
-                    row_errors.append(
-                        f"Row {row_idx}: '{col_def.name}' is required"
-                    )
+                # Whitespace-only text counts as empty, as it does for
+                # skipping blank rows and naming blank headings.
+                if _is_blank(value):
+                    if not col_def.nullable:
+                        row_errors.append(
+                            f"Row {row_idx}: '{col_def.name}' is required"
+                        )
                     continue
 
                 if value is not None:
@@ -492,7 +582,10 @@ def read_sheet(
     grid = list(ws.iter_rows(min_row=header_row, values_only=True))
     if not grid:
         return [], []
-    headings = list(grid[0])
+    # Read-only worksheets give each row only up to its last stored
+    # cell, so a heading row can be shorter than the data under it.
+    width = max(len(values) for values in grid)
+    headings = list(grid[0]) + [None] * (width - len(grid[0]))
     data = [
         (header_row + offset, values)
         for offset, values in enumerate(grid[1:], start=1)
@@ -544,3 +637,148 @@ def _is_blank(value: Any) -> bool:
         True for None or a whitespace-only string.
     """
     return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _select(
+    names: list[str],
+    rows: list[tuple[int, tuple[Any, ...]]],
+    ws_def: Worksheet,
+) -> SheetRows:
+    """Pick the columns a worksheet loads, in load order.
+
+    Args:
+        names: Column names from read_sheet().
+        rows: Data rows from read_sheet().
+        ws_def: The worksheet's contract.
+
+    Returns:
+        SheetRows with the selected columns; a listed column missing
+        from the sheet is None in every row.
+    """
+    index = {name: i for i, name in enumerate(names)}
+    if ws_def.column_selection == "listed":
+        selected = [col.name for col in ws_def.columns]
+    else:
+        skip = set(ws_def.excluded)
+        selected = [name for name in names if name not in skip]
+    return SheetRows(
+        columns=selected,
+        rows=[
+            (
+                row_number,
+                tuple(
+                    (
+                        values[index[name]]
+                        if name in index and index[name] < len(values)
+                        else None
+                    )
+                    for name in selected
+                ),
+            )
+            for row_number, values in rows
+        ],
+    )
+
+
+def formulas_without_values(
+    excel_bytes: bytes, sheet_names: list[str]
+) -> dict[str, list[tuple[int, str]]]:
+    """Find formula cells stored with no cached result.
+
+    Reading values (data_only=True) can't tell such a cell from an
+    empty one, so the sheet XML is scanned directly: a <c> element
+    with an <f> (formula) child and no <v> (value), or an empty one
+    for a non-text result. The scan
+    streams the XML and builds no cell objects.
+
+    Args:
+        excel_bytes: Raw .xlsx bytes.
+        sheet_names: Worksheets to scan.
+
+    Returns:
+        Sheet name -> [(row number, cell reference), ...], only for
+        sheets that have such cells. A workbook whose parts can't be
+        found returns {} (openpyxl has already opened it, so this is
+        only a non-standard layout).
+    """
+    try:
+        with zipfile.ZipFile(BytesIO(excel_bytes)) as archive:
+            paths = _sheet_paths(archive)
+            found: dict[str, list[tuple[int, str]]] = {}
+            for name in sheet_names:
+                path = paths.get(name)
+                if path is None or path not in archive.namelist():
+                    continue
+                with archive.open(path) as part:
+                    cells = _uncached_formula_cells(part)
+                if cells:
+                    found[name] = cells
+            return found
+    except (zipfile.BadZipFile, KeyError, ElementTree.ParseError):
+        return {}
+
+
+def _local(tag: str) -> str:
+    """XML tag without its namespace."""
+    return tag.rsplit("}", 1)[-1]
+
+
+def _sheet_paths(archive: zipfile.ZipFile) -> dict[str, str]:
+    """Map each worksheet name to its part in the .xlsx archive.
+
+    Args:
+        archive: The open .xlsx zip.
+
+    Returns:
+        Sheet name -> path such as "xl/worksheets/sheet1.xml".
+    """
+    targets: dict[str, str] = {}
+    with archive.open("xl/_rels/workbook.xml.rels") as rels:
+        for _, element in ElementTree.iterparse(rels):
+            if _local(element.tag) == "Relationship":
+                target = element.get("Target", "")
+                targets[element.get("Id", "")] = (
+                    target.lstrip("/")
+                    if target.startswith("/")
+                    else f"xl/{target}"
+                )
+    paths: dict[str, str] = {}
+    with archive.open("xl/workbook.xml") as workbook:
+        for _, element in ElementTree.iterparse(workbook):
+            if _local(element.tag) != "sheet":
+                continue
+            rel_id = next(
+                (v for k, v in element.attrib.items() if _local(k) == "id"),
+                "",
+            )
+            if rel_id in targets:
+                paths[element.get("name", "")] = targets[rel_id]
+    return paths
+
+
+def _uncached_formula_cells(part: IO[bytes]) -> list[tuple[int, str]]:
+    """Scan one worksheet part for formulas with no stored value.
+
+    Args:
+        part: The worksheet XML, open for reading.
+
+    Returns:
+        [(row number, cell reference), ...] in sheet order.
+    """
+    cells: list[tuple[int, str]] = []
+    for _, element in ElementTree.iterparse(part):
+        if _local(element.tag) != "c":
+            continue
+        children = {_local(child.tag): child for child in element}
+        value = children.get("v")
+        # openpyxl and others write an empty <v/> for "no result";
+        # only a text result (t="str") can legitimately be empty.
+        cached = value is not None and (
+            bool(value.text) or element.get("t") == "str"
+        )
+        if "f" in children and not cached:
+            ref = element.get("r", "")
+            digits = "".join(ch for ch in ref if ch.isdigit())
+            cells.append((int(digits) if digits else 0, ref))
+        element.clear()
+    return cells

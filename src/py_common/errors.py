@@ -25,13 +25,9 @@ from py_common.model import Result
 class IngestionError(Exception):
     """Base exception for ingestion pipeline."""
 
-    pass
-
 
 class SourceError(IngestionError):
     """Error reading from source."""
-
-    pass
 
 
 class VersionMismatch(SourceError):
@@ -42,19 +38,13 @@ class VersionMismatch(SourceError):
     partially-written file.
     """
 
-    pass
-
 
 class NotFound(SourceError):
     """Source item no longer exists."""
 
-    pass
-
 
 class ValidationError(IngestionError):
     """Workbook failed validation against contract rules."""
-
-    pass
 
 
 class ContractError(ValidationError):
@@ -67,16 +57,12 @@ class ContractError(ValidationError):
     - Required value is null
     """
 
-    pass
-
 
 class ServiceError(IngestionError):
     """Cloud service failed (permission denied, unavailable, quota).
 
     Caller should determine if retry is safe.
     """
-
-    pass
 
 
 class ObjectStoreConflict(IngestionError):
@@ -87,8 +73,6 @@ class ObjectStoreConflict(IngestionError):
     the immutable store if allowed.
     """
 
-    pass
-
 
 class IndeterminateCommitError(IngestionError):
     """Don't know if warehouse committed data.
@@ -96,8 +80,6 @@ class IndeterminateCommitError(IngestionError):
     Raised when connection to warehouse fails during commit.
     Caller must check warehouse state before retrying.
     """
-
-    pass
 
 
 class RunFailed(IngestionError):

@@ -200,14 +200,14 @@ class TestBigQueryWarehouseLoad:
         Raises:
             AssertionError: If row count not verified
         """
-        # Mock query result for row count check (matches expectation).
+        # Staged row count (the load job's output_rows) matches.
         mock_query_job = Mock()
         mock_query_result = [(42,)]  # Actual row count
         mock_query_job.result.return_value = mock_query_result
         mock_bq_client.query.side_effect = _jobs(mock_query_job)
 
         # Mock load_table_from_file.
-        mock_load_job = Mock()
+        mock_load_job = Mock(output_rows=42)
         mock_load_job.result.return_value = None
         mock_bq_client.load_table_from_file.return_value = mock_load_job
 
@@ -238,14 +238,14 @@ class TestBigQueryWarehouseLoad:
         Raises:
             AssertionError: If ValueError not raised
         """
-        # Mock query result with mismatched row count.
+        # Staged row count (the load job's output_rows) differs.
         mock_query_job = Mock()
         mock_query_result = [(50,)]  # Different from expected (42)
         mock_query_job.result.return_value = mock_query_result
         mock_bq_client.query.side_effect = _jobs(mock_query_job)
 
         # Mock load_table_from_file.
-        mock_load_job = Mock()
+        mock_load_job = Mock(output_rows=50)
         mock_load_job.result.return_value = None
         mock_bq_client.load_table_from_file.return_value = mock_load_job
 
@@ -281,7 +281,7 @@ class TestBigQueryWarehouseLoad:
         mock_bq_client.query.side_effect = _jobs(mock_query_job)
 
         # Mock load_table_from_file.
-        mock_load_job = Mock()
+        mock_load_job = Mock(output_rows=42)
         mock_load_job.result.return_value = None
         mock_bq_client.load_table_from_file.return_value = mock_load_job
 
@@ -330,7 +330,7 @@ class TestBigQueryWarehouseLoad:
         mock_bq_client.get_table.return_value = _staging_table(
             "event_id", "attendees"
         )
-        mock_load_job = Mock()
+        mock_load_job = Mock(output_rows=1)
         mock_load_job.result.return_value = None
         mock_bq_client.load_table_from_file.return_value = mock_load_job
 
@@ -380,19 +380,16 @@ class TestBigQueryWarehouseLoad:
             AssertionError: If ServiceError not raised
         """
         mock_bq_client.get_table.return_value = _staging_table("event_id")
-        mock_load_job = Mock()
+        mock_load_job = Mock(output_rows=1)
         mock_load_job.result.return_value = None
         mock_bq_client.load_table_from_file.return_value = mock_load_job
-
-        mock_count_job = Mock()
-        mock_count_job.result.return_value = [(1,)]
 
         mock_txn_job = Mock()
         mock_txn_job.result.side_effect = Exception("audit insert failed")
         mock_txn_job.state = "DONE"
         mock_txn_job.error_result = {"message": "audit insert failed"}
 
-        mock_bq_client.query.side_effect = [mock_count_job, mock_txn_job]
+        mock_bq_client.query.side_effect = [mock_txn_job]
 
         with pytest.raises(ServiceError, match="audit insert failed"):
             warehouse.load(
@@ -596,7 +593,7 @@ class TestBigQueryWarehouseMergeSql:
         mock_bq_client.get_table.return_value = _staging_table(
             "event_id", "employer_id", "attendees"
         )
-        mock_load_job = Mock()
+        mock_load_job = Mock(output_rows=1)
         mock_load_job.result.return_value = None
         mock_bq_client.load_table_from_file.return_value = mock_load_job
 
@@ -649,7 +646,7 @@ class TestBigQueryWarehouseMergeSql:
             )
 
         mock_bq_client.get_table.return_value = _staging_table("event_id")
-        mock_load_job = Mock()
+        mock_load_job = Mock(output_rows=1)
         mock_load_job.result.return_value = None
         mock_bq_client.load_table_from_file.return_value = mock_load_job
 
@@ -700,6 +697,7 @@ class TestBigQueryWarehouseLoadedAt:
         mock_bq_client.get_table.return_value = _staging_table(
             *staging_columns
         )
+        mock_bq_client.load_table_from_file.return_value.output_rows = 1
         mock_query_job = Mock()
         mock_query_job.result.return_value = [(1,)]
         mock_bq_client.query.side_effect = _jobs(mock_query_job)

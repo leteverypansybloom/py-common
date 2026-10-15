@@ -20,7 +20,9 @@ so the SQL that reads them doesn't have to guess.
 | `payload` | JSON | The row's values, one key per loaded column. |
 | `ingested_at` | TIMESTAMP | When the load committed. All rows of one file share it, and it equals the audit record's `timestamp`. |
 
-Tables are partitioned by day of `ingested_at`.
+Tables are partitioned by day of `ingested_at` and clustered on
+`source_file, source_generation`, so the "latest upload" query below
+reads only the blocks it needs instead of every upload ever loaded.
 
 Rows are only ever inserted. Each monthly upload of a file adds all
 of that file's rows again, under a new `source_generation`, and earlier
@@ -88,8 +90,9 @@ Keys are column names as py-common reads them from the heading row
 | Text | string | `"Org 1"` |
 | Whole number | number | `1234` |
 | Decimal | number | `0.25` |
+| Decimal (Python `Decimal`) | number: integer if whole | `7`, `1.25` |
 | TRUE / FALSE | boolean | `true` |
-| Date and time | string, ISO 8601, no time zone | `"2025-12-16T11:46:00"` |
+| Date and time | string, ISO 8601, no time zone (converted to UTC if the value had one) | `"2025-12-16T11:46:00"` |
 | Date only | string, ISO 8601 | `"2025-11-17"` |
 | Time only | string, ISO 8601 | `"09:30:00"` |
 | Duration | string, ISO 8601 seconds | `"PT5400S"` |

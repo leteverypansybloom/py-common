@@ -204,10 +204,10 @@ than the choice between JSON and typed columns.
 - **Excel can't hold that much.** A worksheet holds at most 1,048,576
   rows, so this data would arrive as CSV or similar, or as several
   files. py-common's contract check only reads Excel.
-- **It's slow and memory-hungry.** The workbook is loaded fully into
-  memory, then parsed a second time to create the Parquet file.
-  Validation checks each cell in a Python loop, and the converter
-  then builds a 6M-row table in memory. Expect very long runs and many GB
+- **It's slow and memory-hungry.** The workbook is parsed once,
+  read-only, but every row is still held in memory, validation
+  checks each cell in a Python loop, and the converter then builds a
+  6M-row table in memory. Expect very long runs and many GB
   of memory, if it fits at all.
 - **One bad row rejects the whole file.** With 50 rows a month,
   fixing a file by hand is quick. With 6M rows a day, a few bad rows

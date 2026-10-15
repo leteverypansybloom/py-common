@@ -18,8 +18,6 @@ from py_common.errors import IngestionError
 class ConfigError(IngestionError):
     """Configuration file is missing or malformed."""
 
-    pass
-
 
 def interpolate(text: str) -> str:
     """Replace ${VAR_NAME} placeholders with environment values.

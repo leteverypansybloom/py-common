@@ -119,7 +119,14 @@ loaded again (for the raw JSON route the pipeline checks the old
 checksum-keyed marker as well as the new one).
 
 The raw tables themselves are created by `RawJsonWarehouse` on first
-load, partitioned by day of `ingested_at`. Their layout is in
+load, partitioned by day of `ingested_at` and clustered on
+`source_file, source_generation`, the columns the "latest upload"
+query filters on. Raw tables created before py-common 0.2.0 are not
+clustered; add it to each (it applies to data written from then on):
+
+```bash
+bq update --clustering_fields=source_file,source_generation   "$PROJECT:$RAW_DATASET.<raw table>"
+``` Their layout is in
 [`RAW_TABLE_LAYOUT.md`](RAW_TABLE_LAYOUT.md).
 
 **Restrict this dataset.** Even with personal columns excluded by the
@@ -410,7 +417,7 @@ permissions listed in `upcoming_work.md`.
 
 | Setting | Why |
 |---|---|
-| `--event-types=OBJECT_FINALIZE` | Only new uploads start a run, not deletes or metadata changes. `handle_upload()` ignores other event types too. |
+| `--event-types=OBJECT_FINALIZE` | Only new uploads start a run, not deletes or metadata changes. `handle_upload()` ignores other event types too, and a message with no `eventType` attribute: Cloud Storage always sets it (with `bucketId`, `objectId` and others) whatever `--payload-format` is, so such a message didn't come from this notification. |
 | Separate landing and store buckets (section 1) | The pipeline's own writes go to the store bucket, which has no notification, so they can't start another run. |
 | `--max-instances=1 --concurrency=1` | One run at a time. When several files land together, later events wait their turn instead of being refused by the lock. Cloud Run can briefly exceed the maximum, for example during a deploy; the lock then refuses the extra run, and Pub/Sub retries it. |
 | `--timeout=540`, `--ack-deadline=600` | The acknowledgement deadline starts at 10 seconds, so a longer run would be delivered again while it was still going. Keep the service timeout below the deadline. |
