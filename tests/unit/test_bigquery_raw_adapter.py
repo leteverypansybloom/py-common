@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 from google.api_core.exceptions import NotFound
 
+from py_common.errors import ServiceError
 from py_common.adapters.bigquery_raw import (
     RAW_SCHEMA,
     STAGING_SCHEMA,
@@ -417,10 +418,13 @@ class TestRawJsonWarehouseLoad:
             "timestamp",
         }
 
-    def test_failed_transaction_raises_runtime_error(
+    def test_failed_transaction_raises_service_error(
         self, warehouse, mock_bq_client
     ):
-        """A rolled-back transaction surfaces as RuntimeError.
+        """A transaction BigQuery reports as failed is a ServiceError.
+
+        More outcomes (timeouts, unknown state) are covered for both
+        adapters in test_bigquery_errors.py.
 
         Args:
             warehouse: RawJsonWarehouse fixture
@@ -430,13 +434,14 @@ class TestRawJsonWarehouseLoad:
             None
 
         Raises:
-            AssertionError: If RuntimeError isn't raised
+            AssertionError: If ServiceError isn't raised
         """
-        mock_bq_client.query.return_value.result.side_effect = Exception(
-            "quota exceeded"
-        )
+        job = mock_bq_client.query.return_value
+        job.result.side_effect = Exception("quota exceeded")
+        job.state = "DONE"
+        job.error_result = {"reason": "quotaExceeded"}
 
-        with pytest.raises(RuntimeError, match="rolled back together"):
+        with pytest.raises(ServiceError, match="quotaExceeded"):
             warehouse.load(
                 key="hww.xlsx",
                 checksum="abc123",

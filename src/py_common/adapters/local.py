@@ -12,7 +12,12 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Generator, Iterable
 
-from py_common.errors import NotFound, ObjectStoreConflict, VersionMismatch
+from py_common.errors import (
+    NotFound,
+    ObjectStoreConflict,
+    ServiceError,
+    VersionMismatch,
+)
 from py_common.model import SourceItem
 
 logger = logging.getLogger("py_common.adapters.local")
@@ -136,12 +141,18 @@ class LocalObjectStore:
             File bytes if exists, None otherwise.
 
         Raises:
+            ServiceError: The file exists but can't be read. Like
+                GCSObjectStore, a failed read is never reported as
+                "missing".
             ValueError: Key escapes the object store root.
         """
         path = self._resolve_path(key)
         if not path.exists():
             return None
-        return path.read_bytes()
+        try:
+            return path.read_bytes()
+        except OSError as e:
+            raise ServiceError(f"Cannot read {path}: {e}") from e
 
     def put(self, key: str, data: bytes) -> None:
         """Write file; idempotent if identical content exists.

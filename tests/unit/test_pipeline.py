@@ -233,8 +233,11 @@ class TestPipelineProcessWarehouseOutcomes:
         assert result.warehouse_key
         pipeline.warehouse.load.assert_called_once()
 
-    def test_warehouse_service_error_quarantines(self, pipeline, item):
-        """A ServiceError from the warehouse quarantines the file.
+    def test_warehouse_service_error_fails_for_retry(self, pipeline, item):
+        """A warehouse ServiceError is FAILED (retryable), not quarantined.
+
+        The file is fine; the service isn't. QUARANTINED would ack
+        the upload event and fire the bad-file alert (review M3).
 
         Args:
             pipeline: Pipeline fixture with real Contract + workbook.
@@ -244,7 +247,7 @@ class TestPipelineProcessWarehouseOutcomes:
             None
 
         Raises:
-            AssertionError: If outcome is not QUARANTINED.
+            AssertionError: If outcome is not FAILED.
         """
         pipeline.warehouse.load.side_effect = ServiceError(
             "warehouse unavailable"
@@ -252,8 +255,41 @@ class TestPipelineProcessWarehouseOutcomes:
 
         result = pipeline.process(item)
 
-        assert result.outcome == Outcome.QUARANTINED
+        assert result.outcome == Outcome.FAILED
         assert any("Warehouse error" in e for e in result.errors)
+        written = [c.args[0] for c in pipeline.store.put.call_args_list]
+        assert not any(k.startswith("quarantine/") for k in written)
+
+    def test_warehouse_validation_error_quarantines(
+        self, contract, workbook_bytes, item
+    ):
+        """A file the warehouse rejects as invalid is quarantined.
+
+        Args:
+            contract: Real Contract fixture.
+            workbook_bytes: Workbook fixture.
+            item: SourceItem fixture.
+
+        Returns:
+            None
+
+        Raises:
+            AssertionError: If outcome isn't QUARANTINED or no
+                quarantine copy is kept.
+        """
+        source = Mock()
+        source.download.return_value = workbook_bytes
+        store = InMemoryStore()
+        warehouse = Mock()
+        warehouse.identity = "p.d.events"
+        warehouse.load.side_effect = ValidationError("duplicate keys: 7")
+        pipeline = Pipeline(source, store, warehouse, contract)
+
+        result = pipeline.process(item)
+
+        assert result.outcome == Outcome.QUARANTINED
+        assert result.errors == ["duplicate keys: 7"]
+        assert any(k.startswith("quarantine/") for k in store.objects)
 
     def test_warehouse_indeterminate_commit_fails(self, pipeline, item):
         """An indeterminate commit is reported as FAILED, not LOADED.
@@ -577,7 +613,7 @@ class TestPipelineRetryAfterWarehouseFailure:
     @pytest.mark.parametrize(
         ("error", "first_outcome"),
         [
-            (ServiceError("BigQuery unavailable"), Outcome.QUARANTINED),
+            (ServiceError("BigQuery unavailable"), Outcome.FAILED),
             (RuntimeError("transaction rolled back"), Outcome.FAILED),
         ],
     )

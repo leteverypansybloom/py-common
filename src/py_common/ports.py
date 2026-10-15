@@ -95,9 +95,25 @@ class ObjectStore(Protocol):
 
 
 class Warehouse(Protocol):
-    """Stage, validate and transactionally append data.
+    """Transactionally load one file's rows plus an audit record.
 
     Examples: BigQuery, Snowflake, PostgreSQL.
+
+    Pipeline decides what happens to a file from the type of error
+    load() raises, so implementations must use these types:
+
+    - ServiceError: the warehouse failed and nothing was committed
+      (permission, quota, outage, a job reported as failed). The file
+      is FAILED and retried.
+    - IndeterminateCommitError: it is unknown whether the commit
+      happened (e.g. the connection dropped while waiting). The file
+      is FAILED and retried.
+    - ValidationError (including ContractError): the file's data
+      can't be loaded as it is (e.g. duplicate merge keys). The file
+      is QUARANTINED and not retried.
+
+    Any other exception is treated as FAILED too, but is a bug in
+    the adapter: map it to one of the types above.
     """
 
     @property
@@ -115,24 +131,18 @@ class Warehouse(Protocol):
         data: bytes,
         rows: int,
     ) -> None:
-        """Atomically commit data or fail; never partial writes.
-
-        Steps:
-        1. Load data into staging table (truncate before each run)
-        2. Verify row count matches expectation
-        3. Merge or append into final table on contract key columns
-        4. Record audit entry with checksum and row count
-        5. Commit transaction or roll back everything
+        """Atomically commit the data and its audit record, or neither.
 
         Args:
             key: Unique identifier for this load (filename or ID).
-            checksum: SHA-256 of data for duplicate detection.
-            data: Parquet bytes to load.
-            rows: Expected row count; verify before committing.
+            checksum: SHA-256 of the source file.
+            data: Converted bytes to load (Parquet or NDJSON).
+            rows: Expected row count; verified before committing.
 
         Raises:
-            ValueError: Row count mismatch or schema error.
-            RuntimeError: Cannot acquire write lock.
+            ServiceError: Nothing was committed; safe to retry.
+            IndeterminateCommitError: Commit state unknown.
+            ValidationError: The data itself can't be loaded.
         """
         ...
 

@@ -275,13 +275,12 @@ exact; where nothing exists, that's stated plainly rather than implied.
   `BigQueryWarehouse`. If you don't, re-loading a file whose checksum
   changed (say, a formula recalculated) appends every row again
   instead of updating them.
-- A BigQuery failure during `load()` is re-raised as `RuntimeError`;
-  `Pipeline` records that file as `FAILED` and moves on to the next.
-  `errors.py` also defines `IndeterminateCommitError` ("unknown
-  whether the warehouse committed"), and `Pipeline` records that as
-  `FAILED` too — but `BigQueryWarehouse` doesn't raise it yet, so a
-  connection dropped mid-commit looks like any other failure. Check
-  BigQuery before re-running a `FAILED` file.
+- A BigQuery failure during `load()` is raised as `ServiceError`
+  (BigQuery reported the job failed, so nothing committed) or
+  `IndeterminateCommitError` (waiting for the commit failed and the
+  job's final state couldn't be confirmed by re-reading it).
+  `Pipeline` records both as `FAILED`, so they are retried, and moves
+  on to the next file.
 - **No delete handling policy** exists or is documented — if a row
   disappears from a source export, nothing in `py-common` decides
   whether that should be propagated, ignored, or flagged.

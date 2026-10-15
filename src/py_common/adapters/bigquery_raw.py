@@ -23,8 +23,11 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from io import BytesIO
 
-from google.api_core.exceptions import NotFound
+from google.api_core.exceptions import GoogleAPICallError, NotFound
 from google.cloud import bigquery
+
+from py_common.adapters._bq_jobs import run_query, wait_for_load
+from py_common.errors import ServiceError
 
 logger = logging.getLogger("py_common.adapters.bigquery_raw")
 
@@ -148,7 +151,24 @@ class RawJsonWarehouse:
         Raises:
             ValueError: A line is not valid JSON or names a sheet
                 with no table, or the staged row count is wrong.
-            RuntimeError: The transaction failed and was rolled back.
+            ServiceError: BigQuery reported a failure; nothing was
+                committed, so a retry is safe.
+            IndeterminateCommitError: The transaction's outcome could
+                not be confirmed.
+        """
+        try:
+            self._load(key, checksum, data, rows)
+        except GoogleAPICallError as e:
+            raise ServiceError(f"BigQuery failed for {key}: {e}") from e
+
+    def _load(self, key: str, checksum: str, data: bytes, rows: int) -> None:
+        """Body of load(); GoogleAPICallErrors are wrapped by load().
+
+        Args:
+            key (str): Unique identifier for this load.
+            checksum (str): SHA-256 of the source file.
+            data (bytes): NDJSON from py_common.raw.to_ndjson().
+            rows (int): Expected row count across all sheets.
         """
         by_sheet = self._split_by_sheet(data)
         unknown = sorted(set(by_sheet) - set(self.tables))
@@ -173,7 +193,7 @@ class RawJsonWarehouse:
                 self._full_id(f"{table_id}_staging"),
                 job_config=job_config,
             )
-            load_job.result()
+            wait_for_load(load_job, key)
             staged += load_job.output_rows or 0
             logger.debug(f"Staged {sheet} for {key}")
 
@@ -194,17 +214,12 @@ class RawJsonWarehouse:
                 ),
             ]
         )
-        try:
-            txn_job = self.client.query(
-                self._transaction_sql(list(by_sheet)),
-                job_config=job_config_txn,
-            )
-            txn_job.result()
-        except Exception as e:
-            raise RuntimeError(
-                f"BigQuery transaction failed for {key}; raw table "
-                f"inserts and audit record were rolled back together: {e}"
-            ) from e
+        run_query(
+            self.client,
+            self._transaction_sql(list(by_sheet)),
+            job_config_txn,
+            key,
+        )
 
         logger.debug(f"Inserted {rows} raw rows for {key}")
 

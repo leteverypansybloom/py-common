@@ -157,6 +157,7 @@ class Pipeline:
             warehouse_key = f"{item.identity}_{checksum[:8]}"
             outcome = self._load_to_warehouse(
                 item,
+                data,
                 warehouse_key,
                 checksum,
                 processed,
@@ -164,12 +165,13 @@ class Pipeline:
                 errors,
             )
 
-            logger.info(
-                "Loaded %s (%d rows, %s)",
-                item.name,
-                rows_processed,
-                checksum[:8],
-            )
+            if outcome == Outcome.LOADED:
+                logger.info(
+                    "Loaded %s (%d rows, %s)",
+                    item.name,
+                    rows_processed,
+                    checksum[:8],
+                )
 
         except Exception as e:
             if outcome != Outcome.QUARANTINED:
@@ -376,6 +378,7 @@ class Pipeline:
     def _load_to_warehouse(
         self,
         item: SourceItem,
+        data: bytes,
         warehouse_key: str,
         checksum: str,
         processed: bytes,
@@ -386,6 +389,8 @@ class Pipeline:
 
         Args:
             item: SourceItem being processed (for logging).
+            data: Raw source bytes, kept in quarantine/ if the
+                warehouse rejects the file as invalid.
             warehouse_key: Unique identifier for this load.
             checksum: SHA-256 of the source bytes.
             processed: Converted Parquet or NDJSON data to load.
@@ -393,8 +398,10 @@ class Pipeline:
             errors: Errors list to append to on failure (mutated).
 
         Returns:
-            Outcome.LOADED on success, Outcome.QUARANTINED if the
-            warehouse service failed.
+            Outcome.LOADED on success. Outcome.FAILED if the warehouse
+            service failed (nothing committed; a retry is safe), so
+            the runner retries it. Outcome.QUARANTINED if the
+            warehouse found the file itself invalid.
 
         Raises:
             IndeterminateCommitError: Commit state could not be
@@ -413,8 +420,15 @@ class Pipeline:
             errors.append("Warehouse commit indeterminate")
             raise
         except ServiceError as e:
+            # A service problem, not a file problem: FAILED is
+            # retried (Pub/Sub redelivery, next job run), whereas
+            # QUARANTINED would be acknowledged and raise the
+            # bad-file alert.
             logger.error("Warehouse service error: %s", e)
             errors.append(f"Warehouse error: {e}")
+            return Outcome.FAILED
+        except ValidationError as e:
+            errors.extend(self._quarantine_invalid(item, data, checksum, e))
             return Outcome.QUARANTINED
 
     def _make_result(

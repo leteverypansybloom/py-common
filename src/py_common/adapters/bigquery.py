@@ -13,7 +13,11 @@ import logging
 from datetime import datetime, timezone
 from io import BytesIO
 
+from google.api_core.exceptions import GoogleAPICallError, NotFound
 from google.cloud import bigquery
+
+from py_common.adapters._bq_jobs import run_query, wait_for_load
+from py_common.errors import ServiceError
 
 logger = logging.getLogger("py_common.adapters.bigquery")
 
@@ -133,7 +137,24 @@ class BigQueryWarehouse:
         Raises:
             ValueError: Row count mismatch, schema error, data issues,
                 or the data has its own _loaded_at column.
-            RuntimeError: Cannot acquire write lock or BigQuery failure.
+            ServiceError: BigQuery reported a failure; nothing was
+                committed, so a retry is safe.
+            IndeterminateCommitError: The transaction's outcome could
+                not be confirmed.
+        """
+        try:
+            self._load(key, checksum, data, rows)
+        except GoogleAPICallError as e:
+            raise ServiceError(f"BigQuery failed for {key}: {e}") from e
+
+    def _load(self, key: str, checksum: str, data: bytes, rows: int) -> None:
+        """Body of load(); GoogleAPICallErrors are wrapped by load().
+
+        Args:
+            key (str): Unique identifier for this load.
+            checksum (str): SHA-256 checksum for deduplication.
+            data (bytes): Parquet-encoded data to load.
+            rows (int): Expected row count.
         """
         logger.debug(
             f"Loading {key}: {len(data)} bytes, {rows} rows, {checksum}"
@@ -163,7 +184,7 @@ class BigQueryWarehouse:
             staging_full_id,
             job_config=job_config,
         )
-        load_job.result()
+        wait_for_load(load_job, key)
         logger.debug("Loaded Parquet into staging table")
 
         # Step 3: Verify row count.
@@ -236,16 +257,7 @@ class BigQueryWarehouse:
             ]
         )
 
-        try:
-            txn_job = self.client.query(
-                transaction_sql, job_config=job_config_txn
-            )
-            txn_job.result()
-        except Exception as e:
-            raise RuntimeError(
-                f"BigQuery transaction failed for {key}; final table "
-                f"merge and audit record were rolled back together: {e}"
-            ) from e
+        run_query(self.client, transaction_sql, job_config_txn, key)
 
         logger.debug(f"Merged data into {self.table_id} and recorded audit")
 
@@ -321,7 +333,8 @@ class BigQueryWarehouse:
             None
 
         Raises:
-            RuntimeError: Cannot create table (permission or error).
+            ServiceError: The table can't be read or created
+                (permission, outage).
         """
         staging_full_id = (
             f"{self.project_id}.{self.dataset_id}." f"{self.staging_table_id}"
@@ -329,11 +342,16 @@ class BigQueryWarehouse:
 
         try:
             self.client.get_table(staging_full_id)
-            logger.debug(f"Staging table {self.staging_table_id} exists")
-        except Exception as e:
-            logger.debug(
-                f"Creating staging table {self.staging_table_id}: {e}"
-            )
+            logger.debug("Staging table %s exists", self.staging_table_id)
+        except NotFound:
+            logger.info("Creating staging table %s", staging_full_id)
             # Create empty table; schema comes from Parquet.
             table = bigquery.Table(staging_full_id)
-            self.client.create_table(table)
+            try:
+                self.client.create_table(table, exists_ok=True)
+            except GoogleAPICallError as e:
+                raise ServiceError(
+                    f"Cannot create {staging_full_id}: {e}"
+                ) from e
+        except GoogleAPICallError as e:
+            raise ServiceError(f"Cannot read {staging_full_id}: {e}") from e

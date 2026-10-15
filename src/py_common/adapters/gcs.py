@@ -3,7 +3,7 @@
 GCSObjectStore implements the ObjectStore protocol. All writes are
 append-only: if a key already exists with identical content, put()
 succeeds (idempotent). If content differs, put() fails with
-ValueError (prevents corruption).
+ObjectStoreConflict (prevents corruption).
 
 GCSSource implements the Source protocol: it lists workbooks in a
 landing folder of a bucket and downloads the exact object generation
@@ -17,6 +17,8 @@ RAP Compliance:
 lock() gives real mutual exclusion via atomic create-if-absent.
 """
 
+import base64
+import hashlib
 import json
 import logging
 import os
@@ -31,10 +33,15 @@ from google.api_core.exceptions import (
     NotFound,
     PreconditionFailed,
 )
+import google_crc32c
 import google.cloud.storage as storage
 
 from py_common.errors import NotFound as ItemNotFound
-from py_common.errors import ServiceError, VersionMismatch
+from py_common.errors import (
+    ObjectStoreConflict,
+    ServiceError,
+    VersionMismatch,
+)
 from py_common.model import SourceItem
 
 logger = logging.getLogger("py_common.adapters.gcs")
@@ -48,7 +55,8 @@ class GCSObjectStore:
     data pipelines.
 
     Key invariant: put(k, d); put(k, d) succeeds both times.
-    If data differs: put(k, d1); put(k, d2) raises ValueError.
+    If data differs: put(k, d1); put(k, d2) raises
+    ObjectStoreConflict.
 
     Attributes:
         project_id (str): GCP project ID.
@@ -81,36 +89,42 @@ class GCSObjectStore:
     def get(self, key: str) -> Optional[bytes]:
         """Read object by key.
 
-        Returns bytes if object exists, None if not found or on error.
-        Never raises on missing object (graceful degradation).
+        Fail-closed: only a missing object reads as None. Any other
+        failure (permission, outage, timeout) raises, because the
+        pipeline's "already loaded?" check would otherwise take an
+        unreadable marker as "never loaded" and load the file again.
 
         Args:
             key (str): Object path, e.g.,
                 "raw/<identity>/<checksum>/events.xlsx".
 
         Returns:
-            Optional[bytes]: Bytes if object exists, None otherwise.
+            Optional[bytes]: Bytes if the object exists, None if not.
 
         Raises:
-            None (missing objects return None, not exception)
+            ServiceError: GCS failed for a reason other than the
+                object being missing.
         """
         blob = self.bucket.blob(key)
         try:
             data: bytes = blob.download_as_bytes()
-            logger.debug(f"Read object {key} ({len(data)} bytes)")
-            return data
-        except Exception as e:
-            # Object missing, not readable, or transient error.
-            # Log at debug level (not warning) since missing is expected.
-            logger.debug(f"Object {key} not found or read failed: {e}")
+        except NotFound:
+            logger.debug("Object %s not found", key)
             return None
+        except GoogleAPICallError as e:
+            raise ServiceError(
+                f"Cannot read gs://{self.bucket_name}/{key}: {e}"
+            ) from e
+        logger.debug("Read object %s (%d bytes)", key, len(data))
+        return data
 
     def put(self, key: str, data: bytes) -> None:
         """Write object; idempotent if identical data exists.
 
         If object exists with identical bytes, succeeds without
         re-upload (idempotent). If object exists with different
-        bytes, raises ValueError (prevents silent corruption).
+        bytes, raises ObjectStoreConflict (prevents silent
+        corruption).
 
         This is critical for retryable pipelines: a network failure
         cannot be distinguished from success + network loss, so we
@@ -125,9 +139,11 @@ class GCSObjectStore:
             None
 
         Raises:
-            ValueError: Object exists with different content.
+            ObjectStoreConflict: Object exists with different content.
+            ServiceError: GCS failed (permission, outage).
         """
         blob = self.bucket.blob(key)
+        where = f"gs://{self.bucket_name}/{key}"
 
         try:
             # if_generation_match=0 tells GCS "only write if no
@@ -137,20 +153,32 @@ class GCSObjectStore:
             # uploaded, and both then thought they held a fresh key.
             # See: google.cloud.storage.blob.Blob#if_generation_match
             blob.upload_from_string(data, if_generation_match=0)
-            logger.debug(f"Writing object {key} ({len(data)} bytes)")
+            logger.debug("Wrote object %s (%d bytes)", key, len(data))
+            return
         except PreconditionFailed:
-            # Object already exists (created by us on a retry, or by
-            # a concurrent writer). Compare content to decide between
-            # idempotent success and a real conflict.
-            existing = blob.download_as_bytes()
-            if existing == data:
-                logger.debug(f"Object {key} already exists (idempotent)")
-                return
-            raise ValueError(
-                f"Object {key} exists with different content. "
-                f"Existing: {len(existing)} bytes, "
-                f"New: {len(data)} bytes"
-            ) from None
+            pass
+        except GoogleAPICallError as e:
+            raise ServiceError(f"Cannot write {where}: {e}") from e
+
+        # The object already exists (written by us on a retry, or by
+        # a concurrent writer). Compare hashes from its metadata to
+        # decide between idempotent success and a real conflict,
+        # rather than downloading what may be a large workbook.
+        try:
+            existing = self.bucket.get_blob(key)
+        except GoogleAPICallError as e:
+            raise ServiceError(f"Cannot read {where}: {e}") from e
+        if existing is None:
+            raise ServiceError(
+                f"{where} existed on write but is gone now; "
+                "something is deleting store objects"
+            )
+        if _same_content(existing, data):
+            logger.debug("Object %s already exists (idempotent)", key)
+            return
+        raise ObjectStoreConflict(
+            f"Object {where} exists with different content"
+        )
 
     @contextmanager
     def lock(self, key: str) -> Generator[None, None, None]:
@@ -181,8 +209,8 @@ class GCSObjectStore:
 
         Raises:
             RuntimeError: Another process holds the lock.
-            google.api_core.exceptions.GoogleAPICallError: GCS failed
-                for a reason other than the lock being held.
+            ServiceError: GCS failed for a reason other than the lock
+                being held.
         """
         blob = self.bucket.blob(key)
         holder = {
@@ -199,6 +227,10 @@ class GCSObjectStore:
                 f"{self._describe_holder(key)}. If no run is active, "
                 f"delete gs://{self.bucket_name}/{key} and retry."
             ) from None
+        except GoogleAPICallError as e:
+            raise ServiceError(
+                f"Cannot create lock gs://{self.bucket_name}/{key}: {e}"
+            ) from e
 
         generation = blob.generation
         logger.info(f"Acquired lock {key} (run_id={holder['run_id']})")
@@ -399,3 +431,26 @@ class GCSSource:
 
         logger.debug(f"Downloaded {where} ({len(data)} bytes)")
         return data
+
+
+def _same_content(blob: Any, data: bytes) -> bool:
+    """Whether a stored object holds exactly `data`, by its hashes.
+
+    GCS records an MD5 for objects uploaded in one piece (all of
+    ours) and a CRC32C for every object, both base64-encoded. MD5 is
+    preferred; CRC32C covers composite objects, which have no MD5.
+
+    Args:
+        blob (Any): Blob with metadata loaded (from get_blob()).
+        data (bytes): Bytes we tried to write.
+
+    Returns:
+        bool: True if the hashes match.
+    """
+    if blob.md5_hash:
+        md5 = base64.b64encode(hashlib.md5(data).digest()).decode()
+        return bool(blob.md5_hash == md5)
+    # google_crc32c is untyped; value() is its CRC32C as an int.
+    crc32c: Any = google_crc32c
+    raw = int(crc32c.value(data)).to_bytes(4, "big")
+    return bool(blob.crc32c == base64.b64encode(raw).decode())

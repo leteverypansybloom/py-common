@@ -15,6 +15,7 @@ import pytest
 from unittest.mock import Mock, MagicMock, patch
 
 from py_common.adapters.bigquery import BigQueryWarehouse
+from py_common.errors import ServiceError
 
 
 def _staging_table(*column_names: str) -> Mock:
@@ -335,10 +336,10 @@ class TestBigQueryWarehouseLoad:
         assert "COMMIT TRANSACTION" in txn_calls[0]
         assert "ROLLBACK TRANSACTION" in txn_calls[0]
 
-    def test_load_raises_runtime_error_when_transaction_fails(
+    def test_load_raises_service_error_when_transaction_fails(
         self, warehouse, mock_bq_client
     ):
-        """A failed transaction surfaces as RuntimeError, not silently.
+        """A failed transaction surfaces as ServiceError, not silently.
 
         Also proves the merge and audit are one job: the same
         (simulated) failure that would break the audit INSERT is
@@ -353,7 +354,7 @@ class TestBigQueryWarehouseLoad:
             None
 
         Raises:
-            AssertionError: If RuntimeError not raised
+            AssertionError: If ServiceError not raised
         """
         mock_bq_client.get_table.return_value = _staging_table("event_id")
         mock_load_job = Mock()
@@ -365,10 +366,12 @@ class TestBigQueryWarehouseLoad:
 
         mock_txn_job = Mock()
         mock_txn_job.result.side_effect = Exception("audit insert failed")
+        mock_txn_job.state = "DONE"
+        mock_txn_job.error_result = {"message": "audit insert failed"}
 
         mock_bq_client.query.side_effect = [mock_count_job, mock_txn_job]
 
-        with pytest.raises(RuntimeError, match="transaction failed"):
+        with pytest.raises(ServiceError, match="audit insert failed"):
             warehouse.load(
                 key="test.xlsx",
                 checksum="abc123",

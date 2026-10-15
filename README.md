@@ -179,10 +179,20 @@ except ValidationError as e:
 
 `ContractError` (wrong worksheets or columns) is a subclass of
 `ValidationError`, so one `except` covers both. `Pipeline` already
-does this for you: validation failures and warehouse `ServiceError`s
-are quarantined, and any other error (including
-`IndeterminateCommitError`) marks that file `FAILED` while the run
-carries on with the next file. The full hierarchy is in
+does this for you, and carries on with the next file whatever
+happens to one:
+
+| Error | Meaning | Outcome |
+|---|---|---|
+| `ValidationError` (from the contract or the warehouse) | The file itself is wrong | `QUARANTINED`: copied to `quarantine/`, not retried |
+| `ServiceError` from the warehouse | A cloud service failed; nothing was committed | `FAILED`: retried by the runner |
+| `IndeterminateCommitError` | Unknown whether the warehouse committed | `FAILED`: retried by the runner |
+| Anything else | Unexpected | `FAILED` |
+
+The BigQuery adapters raise only these types: a job BigQuery reports
+as failed is a `ServiceError` naming the job ID, and if waiting for
+the commit job fails (timeout, dropped connection) the job is re-read
+by ID before anything is reported. The full hierarchy is in
 `src/py_common/errors.py`.
 
 A worksheet with `on_mismatch="warn"` doesn't raise for a header or
