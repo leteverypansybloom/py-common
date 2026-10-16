@@ -205,6 +205,9 @@ L7, ...) refer to them, and git still has them, e.g. `git show
 - Pre-commit hooks match CI's versions (black 26.10.1, ruff 0.17.0,
   mypy 2.4.0), and the mypy hook passes in its own environment.
 - Every live-cloud test is marked `integration`.
+- CI doesn't run `tests/scripts/`, the tests of the parked
+  `scripts/gcp_auth.py`, until both are deleted: one of them fakes
+  Windows, which Python 3.11 refuses on Linux.
 - Live BigQuery tests (`tests/integration/test_bigquery_live.py`) run
   both warehouses in a real test dataset: merges, deleted rows,
   restores, safe column names, schema changes, rollback, the "latest
