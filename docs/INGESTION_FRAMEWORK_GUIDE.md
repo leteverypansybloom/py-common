@@ -348,7 +348,7 @@ exact; where nothing exists, that's stated plainly rather than implied.
 - **Audit trail:** every file processed produces an `AuditRecord`
   (`model.py`) with timestamp, item identity, filename, version,
   checksum, row count, outcome, errors and processing time, written to
-  `audit/records/{timestamp}_{identity}.json` (`pipeline.py`). It
+  `audit/records/{timestamp}_{random}_{identity}.json` (`pipeline.py`). It
   also names the converted copy that was loaded (`processed_key`),
   the contract it was converted with (`contract_fingerprint`) and
   the py-common version, so a load can be traced to its inputs.

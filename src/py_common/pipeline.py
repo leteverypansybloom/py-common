@@ -789,7 +789,12 @@ class Pipeline:
         # replace them (2026-09-22T14-30-45.123456+00-00, not
         # 14:30:45.123456+00:00) before using the timestamp as a key.
         timestamp_key = record.timestamp.isoformat().replace(":", "-")
+        # The time orders the records; the random part keeps two from
+        # one clock tick apart (Python before 3.13 reads the Windows
+        # clock about every 15 ms), which the write-once store would
+        # otherwise refuse.
         audit_key = (
-            f"audit/records/{timestamp_key}_{result.item.identity}.json"
+            f"audit/records/{timestamp_key}_{uuid.uuid4().hex[:8]}_"
+            f"{result.item.identity}.json"
         )
         self.store.put(audit_key, audit_json.encode())

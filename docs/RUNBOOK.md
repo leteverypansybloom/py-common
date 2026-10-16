@@ -23,7 +23,7 @@ file's *identity* is its object name, folder included, e.g.
 - **Its versions:** `gcloud storage ls -a "gs://$LANDING_BUCKET/was/"`
   lists every upload as `...#<generation>`.
 - **What happened to it:** the audit record in the store bucket,
-  `audit/records/<time>_<identity>.json`: outcome, errors, checksum,
+  `audit/records/<time>_<random>_<identity>.json`: outcome, errors, checksum,
   the converted copy loaded (`processed_key`) and the contract used
   (`contract_fingerprint`). Or the logs:
   `jsonPayload.item_identity="was/WAS export.xlsx"`.
