@@ -161,6 +161,10 @@ L7, ...) refer to them, and git still has them, e.g. `git show
   is cancelled and the file FAILED for a retry.
 - Only parser errors in a worksheet quarantine the file; anything
   else (e.g. `MemoryError`) fails it.
+- Audit record keys have a random part
+  (`audit/records/{time}_{random}_{identity}.json`), so two runs of a
+  file in one clock tick (Python before 3.13 reads the Windows clock
+  about every 15 ms) no longer collide and fail the second run.
 
 ### Known limitations
 
