@@ -293,6 +293,20 @@ needs `roles/bigquery.dataEditor` and `roles/bigquery.jobUser` in the
 project. It is skipped when `GCP_PROJECT_ID` is unset, and no
 emulator is involved.
 
+### Live BigQuery tests
+
+`tests/integration/test_bigquery_live.py` runs both warehouses in
+real BigQuery, in an existing test dataset, and checks what lands
+(merges, deleted rows, restores, rollback, the "latest upload"
+query). GitHub Actions runs it nightly and on demand
+(`.github/workflows/bigquery-live.yml`); the one-off set-up is in
+[`docs/CI_SETUP.md`](docs/CI_SETUP.md). To run it yourself:
+
+```bash
+GCP_PROJECT_ID=my-project BQ_TEST_DATASET=py_common_ci \
+  pytest -m integration tests/integration/test_bigquery_live.py
+```
+
 ### Fixtures
 
 Use pytest fixtures in `conftest.py`:

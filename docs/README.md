@@ -1,6 +1,6 @@
 # py-common Documentation
 
-Seven documents, each answering a different question. Start at the
+Eight documents, each answering a different question. Start at the
 top; go deeper only as your question demands it.
 
 | Doc | Answers | Read this if... |
@@ -12,6 +12,7 @@ top; go deeper only as your question demands it.
 | [`RAW_TABLE_LAYOUT.md`](RAW_TABLE_LAYOUT.md) | What exactly is in a raw JSON table: columns, payload key names, value formats? How do I read the latest upload in SQL? | You're writing the Dataform layer on top of the raw tables. |
 | [`GCP_SETUP.md`](GCP_SETUP.md) | Which buckets, datasets, permissions, jobs and alerts does the raw JSON route need, and how do I create them? | You're deploying a pipeline to Google Cloud. |
 | [`RUNBOOK.md`](RUNBOOK.md) | How do I reload a file after fixing its contract, undo a bad upload, remove one completely, or rename a workbook? | You support a running pipeline. |
+| [`CI_SETUP.md`](CI_SETUP.md) | How do the nightly live BigQuery tests sign in, and how do I set them up? | You're setting up or looking after the automated tests. |
 
 Three other files live outside `docs/` and are referenced from the
 documents above rather than repeated here:

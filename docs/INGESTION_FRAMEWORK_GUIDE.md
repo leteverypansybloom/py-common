@@ -510,7 +510,7 @@ behaviour doesn't match the promise), **Missing** (nothing exists).
 | Data classification / policy controls | Partial | Contracts can exclude columns (`Worksheet.excluded`) so personal data isn't loaded; no classification tags. The audit trail's "store checksum, not content" design (`pipeline.py`) is a reasonable privacy default to build on. |
 | Environment management | Partial | `config.py` supports named sections (e.g. `dev`/`prod`) with `${VAR}` interpolation; no enforced separation beyond that convention. |
 | Infrastructure as code | Missing | No Terraform; `deploy/` is an empty folder. |
-| Testing and release controls | **Have** | `pytest`, `pre-commit` (black/ruff/mypy/detect-secrets), GitHub Actions CI (`.github/workflows/tests.yml`). |
+| Testing and release controls | **Have** | `pytest`, `pre-commit` (black/ruff/mypy/detect-secrets), GitHub Actions CI (`.github/workflows/tests.yml`), and nightly live BigQuery tests in a test dataset (`.github/workflows/bigquery-live.yml`, `docs/CI_SETUP.md`). |
 | Cost and capacity controls | Missing | Not applicable yet — no deployment exists to size or budget. |
 
 ---

@@ -195,6 +195,12 @@ loaded into BigQuery twice, whatever fails and wherever it fails.
 - Pre-commit hooks match CI's versions (black 26.10.1, ruff 0.17.0,
   mypy 2.4.0), and the mypy hook passes in its own environment.
 - Every live-cloud test is marked `integration`.
+- Live BigQuery tests (`tests/integration/test_bigquery_live.py`) run
+  both warehouses in a real test dataset: merges, deleted rows,
+  restores, safe column names, schema changes, rollback, the "latest
+  upload" query and the duplicate-load check. GitHub Actions runs
+  them nightly and on demand, signing in without a stored key
+  (`docs/CI_SETUP.md`).
 
 ## 0.1.0
 
