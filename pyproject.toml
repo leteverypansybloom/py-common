@@ -26,9 +26,12 @@ dependencies = [
 dev = [
     "pytest>=7.4.0",
     "pytest-cov>=4.1.0",
-    "black>=23.0",
-    "ruff>=0.1.0",
-    "mypy>=1.5.0",
+    # Exact pins, kept equal to the hook revs in
+    # .pre-commit-config.yaml, so local runs, hooks and CI all use the
+    # same versions. Bump both files together.
+    "black==26.10.1",
+    "ruff==0.17.0",
+    "mypy==2.4.0",
     "pre-commit>=3.7.0",
     "detect-secrets>=1.5.0",
     # mypy --strict needs type stubs for untyped runtime deps, or it

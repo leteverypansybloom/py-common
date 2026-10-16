@@ -5,8 +5,8 @@
 
 repos:
   # Code formatting
-  # Hook versions match what CI installs from the dev extra, so a
-  # commit that passes here passes CI (REVIEW_.md L7).
+  # Hook revs match the exact pins in pyproject.toml's dev extra, so
+  # a commit that passes here passes CI. Bump both files together.
   - repo: https://github.com/psf/black
     rev: 26.10.1
     hooks:
