@@ -21,6 +21,10 @@ from py_common.contract import Column, Contract, Worksheet
 from py_common.logging import JsonFormatter, configure_json_logging
 from py_common.model import SourceItem
 from py_common.pipeline import Pipeline
+import pytest
+from py_common.model import Outcome
+import ast
+from pathlib import Path
 
 
 def _workbook() -> bytes:
@@ -136,3 +140,88 @@ def test_configure_twice_installs_one_handler() -> None:
         assert len(ours) == 1
     finally:
         root.handlers[:], root.level = before
+
+
+class TestJsonLoggingReplacesHandlers:
+    """Each line is written once, as JSON, unless asked otherwise."""
+
+    @pytest.fixture(autouse=True)
+    def restore_root(self) -> Any:
+        root = logging.getLogger()
+        saved = list(root.handlers), root.level
+        yield
+        root.handlers[:], root.level = saved
+
+    @pytest.fixture
+    def plain(self) -> logging.Handler:
+        """A plain-text handler, as logging.basicConfig() would add.
+
+        Added directly: under pytest the root logger already has
+        pytest's capture handlers, so basicConfig() would do nothing.
+        """
+        handler = logging.StreamHandler(io.StringIO())
+        logging.getLogger().addHandler(handler)
+        return handler
+
+    def test_existing_handlers_are_replaced(
+        self, plain: logging.Handler
+    ) -> None:
+        configure_json_logging(stream=io.StringIO())
+
+        handlers = logging.getLogger().handlers
+        assert plain not in handlers
+        assert [type(h.formatter) for h in handlers] == [JsonFormatter]
+
+    def test_replace_false_keeps_them(self, plain: logging.Handler) -> None:
+        configure_json_logging(stream=io.StringIO(), replace=False)
+        configure_json_logging(stream=io.StringIO(), replace=False)
+
+        handlers = logging.getLogger().handlers
+        assert plain in handlers
+        assert [
+            h for h in handlers if isinstance(h.formatter, JsonFormatter)
+        ] == [handlers[-1]]
+
+
+ITEM = SourceItem("f.xlsx", "f.xlsx", "1", 1)
+
+
+class TestFailureSeverity:
+    """H06: alerts match structured outcomes at the right severity."""
+
+    @pytest.mark.parametrize(
+        ("outcome", "severity"),
+        [
+            (Outcome.FAILED, "ERROR"),
+            (Outcome.QUARANTINED, "WARNING"),
+            (Outcome.LOADED, "INFO"),
+        ],
+    )
+    def test_summary_line_severity(
+        self, outcome: Outcome, severity: str
+    ) -> None:
+        from py_common.model import Result
+
+        stream = io.StringIO()
+        root = logging.getLogger()
+        before = list(root.handlers), root.level
+        configure_json_logging(stream=stream)
+        try:
+            Pipeline._log_summary(Result(ITEM, outcome, "c", 0, [], 0.1))
+        finally:
+            root.handlers[:], root.level = before
+
+        [line] = [json.loads(x) for x in stream.getvalue().splitlines()]
+        assert line["severity"] == severity
+        assert line["outcome"] == outcome.value
+
+
+def test_smoke_script_enables_json_logging() -> None:
+    """N01: the alert test recipe needs JSON log lines."""
+    tree = ast.parse(Path("scripts/demo.py").read_text(encoding="utf-8"))
+    calls = {
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "configure_json_logging" in calls

@@ -20,6 +20,21 @@ from py_common.contract import (
     formulas_without_values,
 )
 from py_common.errors import ValidationError
+import io
+import zipfile
+from pathlib import Path
+from unittest.mock import MagicMock
+from unittest.mock import Mock
+from _memory_store import MemoryStore
+from google.api_core.exceptions import BadRequest
+from py_common.adapters._bq_jobs import run_query
+from py_common.adapters._bq_jobs import wait_for_load
+from py_common.adapters.local import LocalSource
+from py_common.errors import ContractError
+from py_common.errors import ServiceError
+from py_common.model import Outcome
+from py_common.pipeline import Pipeline
+from py_common.contract import read_sheet
 
 
 def _book(rows: list[list[Any]], title: str = "Events") -> bytes:
@@ -184,3 +199,226 @@ def test_pipeline_parses_each_workbook_once(output_format: str) -> None:
 
     assert result.outcome == Outcome.LOADED, result.errors
     opened.assert_called_once()
+
+
+SECRET = "jo.bloggs@example.org"
+
+
+def _book_qw(rows: list[list[Any]], title: str = "Events") -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    assert ws is not None
+    ws.title = title
+    for row in rows:
+        ws.append(row)
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
+def _warehouse() -> Mock:
+    warehouse = Mock(identity="p.d.t")
+    warehouse.load.return_value = True
+    return warehouse
+
+
+def _contract_qw(**limits: int) -> Contract:
+    return Contract(
+        worksheets=[Worksheet("Events", [Column("name", "string")])],
+        **limits,
+    )
+
+
+def _with_cell_text(text: str) -> bytes:
+    good = _book_qw([["name", "n"], ["a", 1]])
+    out = io.BytesIO()
+    with (
+        zipfile.ZipFile(io.BytesIO(good)) as src,
+        zipfile.ZipFile(out, "w") as dst,
+    ):
+        for info in src.infolist():
+            body = src.read(info)
+            if info.filename == "xl/worksheets/sheet1.xml":
+                body = body.replace(b"<v>1</v>", f"<v>{text}</v>".encode())
+            dst.writestr(info, body)
+    return out.getvalue()
+
+
+class TestWorkbookLimits:
+    """Oversized uploads are refused before they're parsed."""
+
+    def test_file_over_max_file_bytes_is_quarantined(self) -> None:
+        data = _book_qw([["name"], ["x"]])
+
+        with pytest.raises(ContractError, match="max_file_bytes"):
+            _contract_qw(max_file_bytes=len(data) - 1).read(data, "f.xlsx")
+
+    def test_uncompressed_size_over_limit_is_quarantined(self) -> None:
+        """Guards against zip bombs: checked from the zip directory."""
+        data = _book_qw([["name"]] + [["x" * 50]] * 200)
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            unpacked = sum(i.file_size for i in archive.infolist())
+
+        with pytest.raises(ContractError, match="max_uncompressed_bytes"):
+            _contract_qw(max_uncompressed_bytes=unpacked - 1).read(
+                data, "f.xlsx"
+            )
+
+    def test_defaults_accept_ordinary_workbooks(self) -> None:
+        assert (
+            _contract_qw().validate(_book_qw([["name"], ["x"]]), "f.xlsx") == 1
+        )
+
+    @pytest.mark.parametrize(
+        "limits", [{"max_file_bytes": 0}, {"max_uncompressed_bytes": -1}]
+    )
+    def test_limits_must_be_positive(self, limits: dict[str, int]) -> None:
+        with pytest.raises(ValueError, match="must be positive"):
+            _contract_qw(**limits)
+
+    def test_pipeline_quarantines_and_keeps_the_original(
+        self, tmp_path: Path
+    ) -> None:
+        folder = tmp_path / "in"
+        folder.mkdir()
+        (folder / "big.xlsx").write_bytes(_book_qw([["name"], ["x"]]))
+        store = MemoryStore()
+
+        [result] = Pipeline(
+            LocalSource(folder),
+            store,
+            _warehouse(),
+            _contract_qw(max_file_bytes=100),
+        ).run()
+
+        assert result.outcome == Outcome.QUARANTINED
+        assert any(
+            k.startswith("quarantine/") and k.endswith("/big.xlsx")
+            for k in store.objects
+        )
+
+
+class TestNoCellTextInErrors:
+    """Parser and BigQuery error text can quote data; it's left out."""
+
+    def test_unreadable_sheet_reason_has_no_cell_text(self) -> None:
+        contract = Contract(
+            worksheets=[
+                Worksheet(
+                    "Events",
+                    [Column("name", "string"), Column("n", "integer")],
+                )
+            ]
+        )
+
+        with pytest.raises(ContractError) as info:
+            contract.read(_with_cell_text(SECRET), "f.xlsx")
+
+        assert SECRET not in str(info.value)
+        assert "ValueError" in str(info.value)
+        assert info.value.__cause__ is None  # not in tracebacks either
+
+    def test_load_job_error_message_is_not_repeated(self) -> None:
+        job = Mock(job_id="load-9")
+        job.result.side_effect = BadRequest(
+            f"Could not parse '{SECRET}' as INT64 for field n"
+        )
+
+        with pytest.raises(ServiceError, match="load-9") as info:
+            wait_for_load(job, "k")
+
+        assert SECRET not in str(info.value)
+        assert "bq show -j load-9" in str(info.value)
+        assert info.value.__cause__ is None
+
+    def test_failed_job_error_result_message_is_not_repeated(self) -> None:
+        client = MagicMock()
+        job = Mock(job_id="q-1", state="DONE")
+        job.result.side_effect = BadRequest("job failed")
+        job.error_result = {
+            "reason": "invalidQuery",
+            "location": "query",
+            "message": f"Bad int64 value: {SECRET}",
+        }
+        client.query.return_value = job
+
+        with pytest.raises(ServiceError, match="invalidQuery") as info:
+            run_query(client, "SELECT 1", MagicMock(), "k")
+
+        assert SECRET not in str(info.value)
+        assert "q-1" in str(info.value)
+
+
+class TestSynthesisedNames:
+    """M04: a literal "col_A" heading keeps its name."""
+
+    def test_blank_heading_never_takes_a_written_name(self) -> None:
+        wb = Workbook()
+        ws = wb.active
+        ws.append([None, "col_A"])
+        ws.append(["x", "y"])
+
+        names, rows = read_sheet(ws, 1)
+
+        assert names == ["col_A_2", "col_A"]
+        assert rows == [(2, ("x", "y"))]
+
+
+def _book_r3(rows: list[list[Any]]) -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    assert ws is not None
+    ws.title = "Events"
+    for row in rows:
+        ws.append(row)
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
+def _with_sheet_target(data: bytes, target: str) -> bytes:
+    """Rewrite the workbook's relationship target for sheet1."""
+    out = io.BytesIO()
+    with (
+        zipfile.ZipFile(io.BytesIO(data)) as src,
+        zipfile.ZipFile(out, "w") as dst,
+    ):
+        for info in src.infolist():
+            body = src.read(info)
+            if info.filename == "xl/_rels/workbook.xml.rels":
+                body = body.replace(
+                    b'Target="/xl/worksheets/sheet1.xml"',
+                    f'Target="{target}"'.encode(),
+                )
+            dst.writestr(info, body)
+    return out.getvalue()
+
+
+class TestFormulaPaths:
+    """N03: every spelling of the sheet's part path is scanned."""
+
+    @pytest.mark.parametrize(
+        "target",
+        [
+            "/xl/worksheets/sheet1.xml",
+            "worksheets/sheet1.xml",
+            "./worksheets/sheet1.xml",
+            "worksheets/../worksheets/sheet1.xml",
+        ],
+    )
+    def test_uncached_formula_is_found(self, target: str) -> None:
+        data = _with_sheet_target(
+            _book_r3([["a", "b"], ["x", "=1+1"]]), target
+        )
+
+        assert formulas_without_values(data, ["Events"]) == {
+            "Events": [(2, "B2")]
+        }
+
+    def test_unresolvable_sheet_part_is_an_error(self) -> None:
+        data = _with_sheet_target(
+            _book_r3([["a"], ["x"]]), "../../outside/sheet1.xml"
+        )
+
+        with pytest.raises(ContractError, match="Events"):
+            formulas_without_values(data, ["Events"])

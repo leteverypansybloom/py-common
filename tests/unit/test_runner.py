@@ -24,6 +24,9 @@ from py_common.runner import (
     run_job,
     run_or_raise,
 )
+from unittest.mock import MagicMock
+from unittest.mock import patch
+from py_common.adapters.gcs import GCSSource
 
 
 def _result(name: str, outcome: Outcome) -> Result:
@@ -459,3 +462,65 @@ class TestCheckFreshness:
 
         with pytest.raises(RuntimeError, match="access denied"):
             check_freshness(client, "p.raw_hww.source_freshness")
+
+
+def _event_qw(bucket: str, name: str) -> dict[str, Any]:
+    import base64
+    import json
+
+    data = json.dumps({"bucket": bucket, "name": name, "generation": "7"})
+    return {
+        "message": {
+            "data": base64.b64encode(data.encode()).decode(),
+            "attributes": {"eventType": "OBJECT_FINALIZE"},
+        }
+    }
+
+
+class TestUploadBucketCheck:
+    """Only uploads to the bucket a pipeline reads start it."""
+
+    @pytest.fixture
+    def pipeline(self) -> MagicMock:
+        with patch("py_common.adapters.gcs.storage.Client"):
+            source = GCSSource("p", "hww-landing", "was")
+        pipeline = MagicMock()
+        pipeline.source = source
+        pipeline.run.return_value = []
+        return pipeline
+
+    def test_other_bucket_is_ignored(self, pipeline: MagicMock) -> None:
+        assert (
+            handle_upload(
+                _event_qw("elsewhere", "was/x.xlsx"), {"was/": pipeline}
+            )
+            == []
+        )
+        pipeline.run.assert_not_called()
+
+    def test_own_bucket_runs(self, pipeline: MagicMock) -> None:
+        handle_upload(
+            _event_qw("hww-landing", "was/x.xlsx"), {"was/": pipeline}
+        )
+
+        pipeline.run.assert_called_once()
+
+
+class TestUploadShape:
+    """M07: a notification without a string name is ignored, not a crash."""
+
+    @pytest.mark.parametrize("name", [None, 7, ["x"]])
+    def test_bad_name_is_rejected(self, name: Any) -> None:
+        payload = {"bucket": "b", "name": name}
+        data = {
+            "message": {
+                "data": base64.b64encode(
+                    json.dumps(payload).encode()
+                ).decode(),
+                "attributes": {"eventType": "OBJECT_FINALIZE"},
+            }
+        }
+
+        with pytest.raises(ValueError, match="name"):
+            parse_upload(data)
+        assert handle_upload(data, {"": Mock()}) == []
