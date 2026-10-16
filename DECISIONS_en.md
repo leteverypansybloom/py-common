@@ -8,6 +8,85 @@ Entries are not rewritten once made. When a decision changes, add a
 new dated entry saying which earlier entry it replaces, and mark the
 earlier entry as superseded.
 
+## 2026-10-16 — The open review items (REVIEW_.md H1–H3, M4, M6, M10, M12)
+
+Taken with the data owner's answers: production files always reach
+the pipeline through the GCS landing bucket (SharePoint files are
+copied there first); both load routes are in use; and each of the
+three cumulative workbooks keeps one file name and its own landing
+folder.
+
+### A source is tracked by its agreed file name (H1)
+
+The raw tables' "latest upload" and the typed route's deleted-row
+marking both work per file name, so a copy under another name became
+a second "latest" upload. Rather than add a "feed" above the file
+name (and columns to every raw row), `Contract.file_name` states the
+agreed name, and any other name is quarantined before parsing, with
+the expected name in the message. Renaming a workbook is a deliberate
+change with a clean-up step (`docs/RUNBOOK.md`). The raw table layout
+is unchanged.
+
+### Uploads are ordered by GCS generation (M6)
+
+Only GCS versions (generations) are numbers that grow with each
+upload. As every production file arrives through the landing bucket,
+the "latest upload" query keeps ordering by generation, and nothing
+was built for other sources (`docs/RAW_TABLE_LAYOUT.md` says so).
+
+### Converted copies are keyed by upload and content (H2)
+
+Supersedes the `processed/` part of "Stored copies are keyed by
+identity and checksum" (2026-09-30). A processed copy was keyed by the
+source file's checksum alone, so converting the same file again with
+a different result (a contract fix, a pyarrow upgrade) broke the
+store's write-once rule and failed on every retry. The key now adds
+the upload's version and a digest of the converted bytes. A digest of
+the output, rather than a list of the settings behind it, can't miss
+whatever changed. Audit records name the copy, the contract
+(`Contract.fingerprint()`) and the py-common version.
+
+### Typed column names are made BigQuery-safe (M4)
+
+Headings became column names as written, and one BigQuery refuses
+failed the file on every retry. Fixed rules now convert them
+(`py_common.parquet.column_name()`; README, "Typed column names"):
+`Date of Enquiry` becomes `date_of_enquiry`. Not chosen: quarantining
+such files (the data waits until someone renames a heading), or a
+BigQuery name for every contract column (more to write and keep in
+step). Contracts, key columns and raw JSON keys keep the headings.
+
+### A double load is detected, not prevented (H3)
+
+Two commits of one upload running at once could both pass the
+in-transaction "already loaded?" check. That needs a commit still
+running ten minutes after the pipeline stopped waiting, overlapping
+its retry: unlikely for small monthly files. So rather than resumable
+commits with predictable job IDs, the raw "latest upload" query reads
+one load per upload, a second typed commit merges the same values,
+and `runner.check_duplicate_loads()` alerts if it ever happens.
+Revisit if that alert fires.
+
+### Reprocessing is an upload, not a command (M12)
+
+Every new upload loads, and each upload of a cumulative workbook holds
+its full history. Uploading a file again therefore reloads it with the
+current contract, and restoring an earlier GCS version undoes a bad
+upload; a replay command would add nothing for these files.
+`docs/RUNBOOK.md` gives the steps, including removing an upload
+completely, by hand.
+
+### BigQuery is tested for real, nightly (M10)
+
+Nothing checked that BigQuery does what the SQL intends, and a dry run
+can't reach the statements inside the commit script's `IF` blocks.
+`tests/integration/test_bigquery_live.py` runs both warehouses in a
+test dataset, from GitHub Actions nightly and on demand, signing in
+through Workload Identity Federation (no stored key) as a service
+account limited to that dataset. It doesn't run on pull requests, so
+their code never gets the credentials. No emulator: BigQuery's
+scripts and transactions are what most need checking.
+
 ## 2026-10-15 — Runner helpers for scheduled and upload-triggered runs
 
 ### A run with a FAILED file fails
@@ -232,6 +311,10 @@ can be added to the extra once the flow is approved.
 maintain. Benefit: they are small, visible and fully unit-tested.
 
 ### Stored copies are keyed by identity and checksum
+
+*Superseded in part on 2026-10-16: `processed/` keys also have the
+upload's version and a digest of the converted bytes. See "Converted
+copies are keyed by upload and content".*
 
 `raw/`, `quarantine/` and `processed/` keys are now
 `{identity}/{checksum}/{name}` instead of `{identity}`. Before, a file
