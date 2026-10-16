@@ -24,7 +24,11 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
+          # setuptools too: Python 3.11 comes with an old copy that
+          # pip-audit flags below (3.12 doesn't install one). Nothing
+          # here uses it, as builds get their own; upgrading it clears
+          # the advisories.
+          python -m pip install --upgrade pip setuptools
           # Tests import google.cloud.storage and google.cloud.bigquery,
           # which only ship in the [gcp] extra — without it, the
           # BigQuery/GCS adapter test modules fail to collect and CI
