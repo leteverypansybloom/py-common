@@ -344,7 +344,10 @@ exact; where nothing exists, that's stated plainly rather than implied.
 - **Audit trail:** every file processed produces an `AuditRecord`
   (`model.py`) with timestamp, item identity, filename, version,
   checksum, row count, outcome, errors and processing time, written to
-  `audit/records/{timestamp}_{identity}.json` (`pipeline.py`).
+  `audit/records/{timestamp}_{identity}.json` (`pipeline.py`). It
+  also names the converted copy that was loaded (`processed_key`),
+  the contract it was converted with (`contract_fingerprint`) and
+  the py-common version, so a load can be traced to its inputs.
   This is genuinely solid, append-only, and doesn't store the raw data
   itself — only the checksum — so it's safe to keep without extra
   redaction work.
@@ -496,7 +499,7 @@ behaviour doesn't match the promise), **Missing** (nothing exists).
 | Quarantine / dead-letter storage | **Have** (file-level) | `pipeline.py`, `quarantine/{identity}/{checksum}/{name}` key, with the original file also kept in `raw/`. Row-level quarantine belongs in the Dataform layer for the raw JSON route. |
 | Reconciliation | Missing | No source-count vs. destination-count check after a load completes. |
 | Backfill and replay | Missing | No rebuild/replay command; manual procedure only (clear the checksum audit key). |
-| Lineage and audit trail | **Have** (file-level) | `model.py`, written by `pipeline.py`. No run-level record, no code/config version stamped per record. |
+| Lineage and audit trail | **Have** (file-level) | `model.py`, written by `pipeline.py`. Each record names the converted copy loaded, the contract (`contract_fingerprint`) and the py-common version used. No run-level record. |
 | Logging, metrics, alerts | Partial | Plain-text logging exists, with contract warnings at WARNING. `runner.run_job()`/`handle_upload()` turn FAILED files into a failed job or a retried event, and `runner.check_freshness()` logs overdue sources. Alerts are documented as manual steps (`GCP_SETUP.md`), not built as code. |
 | Run-status API/dashboard | Missing | Nothing queries the audit trail for a status view. |
 | Secrets and identity management | Partial | GCP identity comes from Application Default Credentials (the job's service account on Cloud Run); the `SecretStore` protocol (`ports.py`) has **no implementation** for application secrets (e.g. a SharePoint client secret). |

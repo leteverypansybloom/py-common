@@ -197,15 +197,16 @@ def main() -> None:
     check(results[0].outcome == Outcome.LOADED, "valid file LOADED")
     check(results[0].rows_processed == 2, "2 rows")
 
-    # Stored copies are keyed {identity}/{checksum}/{name}; for
+    # Raw copies are keyed {identity}/{checksum}/{name}; for
     # LocalSource the identity is the file name. Processed copies
-    # are also scoped by the warehouse identity.
+    # are also keyed by warehouse, version and their own digest, so
+    # the result says where its copy went.
     version_key = f"{valid_file.name}/{checksum}/{valid_file.name}"
     check(bucket.blob(f"raw/{version_key}").exists(), "raw/ copy exists")
+    processed_key = results[0].processed_key
     check(
-        bucket.blob(
-            f"processed/{typed.identity}/{version_key}.parquet"
-        ).exists(),
+        processed_key.startswith(f"processed/{typed.identity}/")
+        and bucket.blob(processed_key).exists(),
         "processed/ Parquet exists",
     )
     rows = list(

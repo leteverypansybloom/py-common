@@ -4,11 +4,13 @@ A contract specifies required worksheets, columns, data types,
 and business rules. Validation is deterministic and repeatable.
 """
 
+import json
 import posixpath
 import zipfile
 import zlib
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import date
+from hashlib import sha256
 from io import BytesIO
 from typing import IO, Any, Literal
 from xml.etree import ElementTree
@@ -246,6 +248,23 @@ class Contract:
                     f"Key column '{key}' of worksheet '{primary.name}' "
                     "is nullable; key columns need nullable=False"
                 )
+
+    def fingerprint(self) -> str:
+        """A short ID for this contract's settings.
+
+        Recorded in every audit record, so the audit trail shows
+        which contract each upload was loaded with. Equal contracts
+        have equal fingerprints, and changing any setting (a column,
+        a worksheet option, a limit, file_name) changes it.
+
+        Returns:
+            The first 16 hex digits of the SHA-256 of the contract's
+            settings, written as canonical JSON.
+        """
+        settings = json.dumps(
+            asdict(self), sort_keys=True, separators=(",", ":")
+        )
+        return sha256(settings.encode()).hexdigest()[:16]
 
     def read(
         self,

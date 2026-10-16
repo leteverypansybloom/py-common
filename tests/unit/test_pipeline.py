@@ -513,7 +513,7 @@ class TestPipelineStorageKeysAreVersioned:
     def test_processed_key_includes_checksum(
         self, store: InMemoryStore, contract: Contract
     ) -> None:
-        """Parquet is stored per content version too.
+        """Parquet is stored per content version and upload too.
 
         Args:
             store: In-memory store.
@@ -521,12 +521,12 @@ class TestPipelineStorageKeysAreVersioned:
         """
         data = _workbook([("a", 1)])
         item = SourceItem("events.xlsx", "ID1", "v1", 10)
-        self._pipeline(data, store, contract).process(item)
+        result = self._pipeline(data, store, contract).process(item)
 
-        assert (
-            f"processed/project.dataset.events/ID1/{digest(data)}/"
-            "events.xlsx.parquet" in store.objects
-        )
+        prefix = f"processed/project.dataset.events/ID1/{digest(data)}/v1/"
+        assert result.processed_key.startswith(prefix)
+        assert result.processed_key.endswith("/events.xlsx.parquet")
+        assert result.processed_key in store.objects
 
     def test_quarantine_keys_include_checksum(
         self, store: InMemoryStore, contract: Contract
@@ -938,12 +938,13 @@ class TestPipelineKeysPerDestination:
         data = self._two_sheet_workbook()
         item = SourceItem("hww.xlsx", "ID1", "v1", 10)
 
-        self._sheet_pipeline("A", "p.d.a", data, store).process(item)
-        self._sheet_pipeline("B", "p.d.b", data, store).process(item)
+        a = self._sheet_pipeline("A", "p.d.a", data, store).process(item)
+        b = self._sheet_pipeline("B", "p.d.b", data, store).process(item)
 
-        suffix = f"ID1/{digest(data)}/hww.xlsx.parquet"
-        assert f"processed/p.d.a/{suffix}" in store.objects
-        assert f"processed/p.d.b/{suffix}" in store.objects
+        upload = f"ID1/{digest(data)}/v1/"
+        assert a.processed_key.startswith(f"processed/p.d.a/{upload}")
+        assert b.processed_key.startswith(f"processed/p.d.b/{upload}")
+        assert {a.processed_key, b.processed_key} <= set(store.objects)
 
     def test_audit_record_names_the_destination(self) -> None:
         """The audit record says which table the attempt was for."""
@@ -1061,17 +1062,16 @@ class TestPipelineOutputFormat:
         item = SourceItem("hww.xlsx", "ID1", "v1", 10)
         data = pipeline.source.download.return_value
 
-        pipeline.process(item)
+        result = pipeline.process(item)
 
-        # Keyed by version too: the NDJSON embeds source_generation.
+        # Keyed by upload and by the NDJSON's own digest.
+        ndjson = pipeline.warehouse.load.call_args.kwargs["data"]
         key = (
             f"processed/p.raw.signups+survey/ID1/{digest(data)}/v1/"
-            "hww.xlsx.ndjson"
+            f"{digest(ndjson)[:16]}/hww.xlsx.ndjson"
         )
-        assert (
-            store.objects[key]
-            == pipeline.warehouse.load.call_args.kwargs["data"]
-        )
+        assert result.processed_key == key
+        assert store.objects[key] == ndjson
 
     def test_raw_json_retry_after_failure_loads(self) -> None:
         """Identical NDJSON on retry: no processed/ conflict."""

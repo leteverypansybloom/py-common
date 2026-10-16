@@ -30,8 +30,14 @@ loaded into BigQuery twice, whatever fails and wherever it fails.
   generation), not its bytes: every new upload loads, even if it
   repeats an earlier one, so a restore (A, then B, then A again)
   puts A back. The same upload never loads twice. Store markers are
-  `audit/{warehouse}/versions/{sha256(identity)}/{version}`; raw-route
-  `processed/` copies include the version.
+  `audit/{warehouse}/versions/{sha256(identity)}/{version}`.
+- **Processed copies are keyed by upload and content:**
+  `processed/{warehouse}/{identity}/{checksum}/{version}/{digest}/{name}.parquet`
+  (or `.ndjson`), where `{digest}` is the first 16 hex digits of the
+  converted bytes' SHA-256. Converting an upload again with a
+  different result (a contract fix, a pyarrow upgrade) writes a new
+  copy, where it used to fail with `ObjectStoreConflict` on every
+  retry; a plain retry reuses its copy.
 - **One audit row per destination table.** `RawJsonWarehouse` checks
   and records each raw table separately, so adding a table to its
   mapping loads only that table. A mapped sheet with no rows still
@@ -96,6 +102,11 @@ loaded into BigQuery twice, whatever fails and wherever it fails.
 - `Contract(file_name=...)`: the name every upload of a workbook must
   have. A file under any other name is quarantined before it is
   parsed, so it can't become a second "latest" upload.
+- Audit records (`audit/records/*.json`) name the converted copy
+  that was loaded (`processed_key`, also on `Result`), the contract it
+  was converted with (`contract_fingerprint`, from the new
+  `Contract.fingerprint()`) and `py_common_version`, so every load can
+  be traced to the contract and library that produced it.
 - `GCSObjectStore(lease_seconds=3600)`: the run lock is a lease that
   a later run takes over, atomically, once it has expired.
 - `BigQueryWarehouse` creates a missing final table and adds new
@@ -156,10 +167,6 @@ loaded into BigQuery twice, whatever fails and wherever it fails.
   Set `Contract.file_name` so any other name is quarantined, and
   treat renaming a workbook as a one-off change with a clean-up step
   (`docs/RAW_TABLE_LAYOUT.md`).
-- **Restoring an earlier upload on the typed route can fail** with
-  `ObjectStoreConflict` if the contract or pyarrow changed since it
-  first loaded: its processed copy's key has no version or contract
-  fingerprint.
 
 ### Tooling
 

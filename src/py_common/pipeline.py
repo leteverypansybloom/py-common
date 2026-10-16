@@ -56,6 +56,20 @@ def _fields(**more: Any) -> dict[str, Any]:
     return fields
 
 
+def _library_version() -> str:
+    """py-common's version, for the audit record.
+
+    Imported when needed: py_common/__init__.py imports this module,
+    so importing the package at the top would be circular.
+
+    Returns:
+        e.g. "0.2.0".
+    """
+    import py_common
+
+    return py_common.__version__
+
+
 @dataclass
 class Pipeline:
     """Orchestrate file processing with cloud services.
@@ -243,6 +257,7 @@ class Pipeline:
         checksum = ""
         rows_processed = 0
         warehouse_key = ""
+        processed_key = ""
 
         try:
             # The marker is keyed by identity and version, so an upload
@@ -294,7 +309,7 @@ class Pipeline:
                 logger.warning(
                     "Contract warning: %s", warning, extra=_fields()
                 )
-            self._store_processed(item, checksum, processed)
+            processed_key = self._store_processed(item, checksum, processed)
 
             warehouse_key = f"{item.identity}_{checksum[:8]}"
             outcome = self._load_to_warehouse(
@@ -340,6 +355,7 @@ class Pipeline:
             start_time,
             warehouse_key,
             warnings,
+            processed_key,
         )
 
     def _download(self, item: SourceItem) -> bytes | None:
@@ -556,33 +572,39 @@ class Pipeline:
 
     def _store_processed(
         self, item: SourceItem, checksum: str, processed: bytes
-    ) -> None:
+    ) -> str:
         """Store the converted bytes (Parquet or NDJSON).
 
-        Keyed by destination as well as content: pipelines reading
-        different sheets of the same workbook produce different
-        bytes, which would otherwise collide under one key. Raw JSON
-        copies are keyed by source version too:
-        "processed/{warehouse}/{identity}/{checksum}/{version}/
-        {name}.ndjson".
+        The store is write-once, so the key must change whenever the
+        bytes do. It is "processed/{warehouse}/{identity}/{checksum}/
+        {version}/{digest}/{name}.parquet" (or ".ndjson"):
+
+        - the warehouse: pipelines reading different sheets of one
+          workbook write different bytes;
+        - the version: each upload has its own copy, even when its
+          bytes repeat an earlier upload's (a restore);
+        - the digest, the first 16 hex digits of the converted bytes'
+          SHA-256: converting the same upload again with a different
+          result (a contract fix, a library upgrade) writes a new
+          copy instead of failing with ObjectStoreConflict on every
+          retry, while a plain retry reuses its copy.
 
         Args:
             item: SourceItem being processed.
             checksum: SHA-256 of the source bytes.
             processed: Converted bytes to store.
+
+        Returns:
+            The key written.
         """
-        version_key = self._version_key(item, checksum)
-        if self.output_format == "raw_json":
-            # NDJSON embeds source_generation, so one content under
-            # two generations (a revert) is two different files.
-            identity, _, name = version_key.rpartition("/")
-            key = (
-                f"processed/{self.warehouse.identity}/{identity}/"
-                f"{item.version}/{name}.ndjson"
-            )
-        else:
-            key = f"processed/{self.warehouse.identity}/{version_key}.parquet"
+        extension = "ndjson" if self.output_format == "raw_json" else "parquet"
+        key = (
+            f"processed/{self.warehouse.identity}/{item.identity}/"
+            f"{checksum}/{item.version}/{digest(processed)[:16]}/"
+            f"{item.name}.{extension}"
+        )
         self.store.put(key, processed)
+        return key
 
     def _load_to_warehouse(
         self,
@@ -665,6 +687,7 @@ class Pipeline:
         start_time: float,
         warehouse_key: str = "",
         warnings: list[str] | None = None,
+        processed_key: str = "",
     ) -> Result:
         """Assemble a Result with elapsed processing time.
 
@@ -677,6 +700,7 @@ class Pipeline:
             start_time: perf_counter() value at start of process().
             warehouse_key: Reference in final table, if loaded.
             warnings: Problems tolerated in "warn" mode, if any.
+            processed_key: Key of the stored converted copy, if any.
 
         Returns:
             Populated Result.
@@ -690,6 +714,7 @@ class Pipeline:
             processing_time_seconds=perf_counter() - start_time,
             warehouse_key=warehouse_key,
             warnings=list(warnings or []),
+            processed_key=processed_key,
         )
 
     def _audit_or_fail(self, result: Result) -> Result:
@@ -740,6 +765,13 @@ class Pipeline:
             warehouse_key=result.warehouse_key,
             warnings=result.warnings,
             warehouse=self.warehouse.identity,
+            processed_key=result.processed_key,
+            contract_fingerprint=(
+                self.contract.fingerprint()
+                if isinstance(self.contract, Contract)
+                else ""
+            ),
+            py_common_version=_library_version(),
         )
 
         audit_json = json.dumps(

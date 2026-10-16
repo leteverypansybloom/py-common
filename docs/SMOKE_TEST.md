@@ -161,11 +161,14 @@ source system to resend the file.
 The pipeline reads the `Events` sheet into a table-like structure and creates:
 
 ```text
-processed/<warehouse identity>/<identity>/<checksum>/<filename>.xlsx.parquet
+processed/<warehouse identity>/<identity>/<checksum>/<version>/<digest>/<filename>.xlsx.parquet
 ```
 
 It holds only the worksheet's own columns, so the same workbook always
-produces the same Parquet bytes. That lets a failed load be retried safely.
+produces the same Parquet bytes, and a failed load is retried with the
+same copy. `<digest>` is the start of the Parquet file's own SHA-256:
+if the contract or a library changes what the file converts to, the new
+result is stored next to the old one instead of clashing with it.
 
 Parquet is efficient for analytics and works well with BigQuery. The original
 Excel workbook remains unchanged in `raw/`, while the Parquet file is the

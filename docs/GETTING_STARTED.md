@@ -255,13 +255,15 @@ hww_repeated_other.xlsx quarantined 0
 
 - a `raw/` copy of every file, even the quarantined ones;
 - a `quarantine/` copy of the ten rejected ones;
-- `processed/fake-warehouse/events_valid.xlsx/<checksum>/events_valid.xlsx.parquet`;
+- `processed/fake-warehouse/events_valid.xlsx/<checksum>/<version>/<digest>/events_valid.xlsx.parquet`;
 - one JSON audit record per file under `audit/records/`.
 
 Stored copies are keyed `{identity}/{checksum}/{name}`, so an edited
 file lands next to its earlier version rather than clashing with it.
 Processed copies are also keyed by the warehouse's `identity`, so
-pipelines reading different sheets of one workbook don't clash.
+pipelines reading different sheets of one workbook don't clash, and
+by the upload's version and a digest of the converted bytes, so
+converting a file again after a contract change writes a new copy.
 
 ### The raw JSON route
 
