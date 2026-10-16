@@ -104,8 +104,9 @@ detect-secrets scan --baseline .secrets.baseline
 ### Docker Image
 
 The `Dockerfile` builds py-common into a base image for projects
-that deploy to Cloud Run. It installs the core dependencies only; a
-child image adds its own extras (such as `gcp`) and entry point.
+that deploy to Cloud Run. It installs py-common with the `gcp` extra
+(GCS and BigQuery); a child image adds its own entry point and any
+further extras (such as `sharepoint`).
 
 ```bash
 docker build -t py-common:latest .
@@ -345,7 +346,8 @@ Update documentation when:
 ### Add a New Validation Rule
 
 1. Add test to `tests/unit/test_contract.py`
-2. Implement in `Contract.validate()`
+2. Implement in `Contract._validate_worksheet()` (`contract.py`);
+   `Contract.validate()` is the public wrapper that calls it
 3. Add a fixture case to `make_fixtures()` in
    `src/py_common/fixtures.py` demonstrating the rule
 4. Regenerate fixtures (see `docs/GETTING_STARTED.md`, Section 2)

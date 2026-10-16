@@ -1,27 +1,25 @@
 """Unit tests for Pipeline outcome handling and storage keys.
 
 Uses mocked Source/Warehouse/Contract and either a Mock or a small
-in-memory ObjectStore (InMemoryStore, which enforces the real put()
+in-memory ObjectStore (the shared MemoryStore, which enforces the real put()
 conflict rule), not the local adapters (LocalObjectStore/LocalSource
 have a separate, already-tracked Windows path issue unrelated to
 what's being tested here).
 """
 
 import json
-from collections.abc import Iterator
-from contextlib import contextmanager
 from io import BytesIO
 from unittest.mock import Mock
 
 import pandas as pd
 import pytest
+from _memory_store import MemoryStore
 from openpyxl import Workbook
 
 from py_common.contract import Column, Contract, SheetRows, Worksheet
 from py_common.errors import (
     ContractError,
     IndeterminateCommitError,
-    ObjectStoreConflict,
     ServiceError,
     ValidationError,
     VersionMismatch,
@@ -284,7 +282,7 @@ class TestPipelineProcessWarehouseOutcomes:
         """
         source = Mock()
         source.download.return_value = workbook_bytes
-        store = InMemoryStore()
+        store = MemoryStore()
         warehouse = Mock()
         warehouse.identity = "p.d.events"
         warehouse.load.side_effect = ValidationError("duplicate keys: 7")
@@ -357,51 +355,6 @@ class TestPipelineAuditKey:
         assert ":" not in audit_key
 
 
-class InMemoryStore:
-    """Dict-backed ObjectStore with the real put() conflict rule."""
-
-    def __init__(self) -> None:
-        """Start empty."""
-        self.objects: dict[str, bytes] = {}
-
-    def get(self, key: str) -> bytes | None:
-        """Return stored bytes or None.
-
-        Args:
-            key: Object key.
-
-        Returns:
-            Stored bytes, or None if absent.
-        """
-        return self.objects.get(key)
-
-    def put(self, key: str, data: bytes) -> None:
-        """Store bytes; identical rewrite is fine, different raises.
-
-        Args:
-            key: Object key.
-            data: Bytes to store.
-
-        Raises:
-            ObjectStoreConflict: Key holds different bytes.
-        """
-        if key in self.objects and self.objects[key] != data:
-            raise ObjectStoreConflict(key)
-        self.objects[key] = data
-
-    @contextmanager
-    def lock(self, key: str) -> Iterator[None]:
-        """No-op lock.
-
-        Args:
-            key: Lock key.
-
-        Yields:
-            None.
-        """
-        yield
-
-
 def _workbook(rows: list[tuple[str, int]]) -> bytes:
     """Build an "Events" workbook with name/count rows.
 
@@ -447,12 +400,12 @@ class TestPipelineStorageKeysAreVersioned:
         )
 
     @pytest.fixture
-    def store(self) -> InMemoryStore:
+    def store(self) -> MemoryStore:
         """Empty in-memory store."""
-        return InMemoryStore()
+        return MemoryStore()
 
     def _pipeline(
-        self, data: bytes, store: InMemoryStore, contract: Contract
+        self, data: bytes, store: MemoryStore, contract: Contract
     ) -> Pipeline:
         """Pipeline whose source returns data for any item.
 
@@ -473,7 +426,7 @@ class TestPipelineStorageKeysAreVersioned:
         )
 
     def test_edited_file_with_same_identity_loads(
-        self, store: InMemoryStore, contract: Contract
+        self, store: MemoryStore, contract: Contract
     ) -> None:
         """Second version of the same item loads, not FAILED.
 
@@ -492,7 +445,7 @@ class TestPipelineStorageKeysAreVersioned:
         assert result.outcome == Outcome.LOADED, result.errors
 
     def test_both_raw_versions_are_kept(
-        self, store: InMemoryStore, contract: Contract
+        self, store: MemoryStore, contract: Contract
     ) -> None:
         """Each version's original bytes stay recoverable.
 
@@ -511,7 +464,7 @@ class TestPipelineStorageKeysAreVersioned:
         assert store.objects[f"raw/ID1/{digest(new)}/events.xlsx"] == new
 
     def test_processed_key_includes_checksum(
-        self, store: InMemoryStore, contract: Contract
+        self, store: MemoryStore, contract: Contract
     ) -> None:
         """Parquet is stored per content version and upload too.
 
@@ -529,7 +482,7 @@ class TestPipelineStorageKeysAreVersioned:
         assert result.processed_key in store.objects
 
     def test_quarantine_keys_include_checksum(
-        self, store: InMemoryStore, contract: Contract
+        self, store: MemoryStore, contract: Contract
     ) -> None:
         """Invalid versions are also kept side by side.
 
@@ -547,7 +500,7 @@ class TestPipelineStorageKeysAreVersioned:
         assert store.objects[f"quarantine/{key}"] == bad
 
     def test_corrected_file_loads_after_quarantine(
-        self, store: InMemoryStore, contract: Contract
+        self, store: MemoryStore, contract: Contract
     ) -> None:
         """Fixing a quarantined file in place lets it load.
 
@@ -644,7 +597,7 @@ class TestPipelineRetryAfterWarehouseFailure:
         warehouse = Mock()
         warehouse.identity = "project.dataset.events"
         warehouse.load.side_effect = [error, True]
-        pipeline = Pipeline(source, InMemoryStore(), warehouse, contract)
+        pipeline = Pipeline(source, MemoryStore(), warehouse, contract)
 
         first = pipeline.run()
         second = pipeline.run()
@@ -858,7 +811,7 @@ class TestPipelineKeysPerDestination:
 
     @staticmethod
     def _sheet_pipeline(
-        sheet: str, table: str, data: bytes, store: InMemoryStore
+        sheet: str, table: str, data: bytes, store: MemoryStore
     ) -> Pipeline:
         """Pipeline loading one sheet of `data` into `table`.
 
@@ -906,7 +859,7 @@ class TestPipelineKeysPerDestination:
 
     def test_second_pipeline_on_same_file_is_not_skipped(self) -> None:
         """Loading sheet A doesn't mark the file done for sheet B."""
-        store = InMemoryStore()
+        store = MemoryStore()
         data = self._two_sheet_workbook()
         item = SourceItem("hww.xlsx", "ID1", "v1", 10)
         first = self._sheet_pipeline("A", "p.d.a", data, store)
@@ -922,7 +875,7 @@ class TestPipelineKeysPerDestination:
 
     def test_same_pipeline_still_skips_a_repeat(self) -> None:
         """A rerun into the same table is still a duplicate."""
-        store = InMemoryStore()
+        store = MemoryStore()
         data = self._two_sheet_workbook()
         item = SourceItem("hww.xlsx", "ID1", "v1", 10)
         pipeline = self._sheet_pipeline("A", "p.d.a", data, store)
@@ -934,7 +887,7 @@ class TestPipelineKeysPerDestination:
 
     def test_each_destination_keeps_its_own_processed_copy(self) -> None:
         """Different sheets' Parquet doesn't collide in the store."""
-        store = InMemoryStore()
+        store = MemoryStore()
         data = self._two_sheet_workbook()
         item = SourceItem("hww.xlsx", "ID1", "v1", 10)
 
@@ -948,7 +901,7 @@ class TestPipelineKeysPerDestination:
 
     def test_audit_record_names_the_destination(self) -> None:
         """The audit record says which table the attempt was for."""
-        store = InMemoryStore()
+        store = MemoryStore()
         data = self._two_sheet_workbook()
         item = SourceItem("hww.xlsx", "ID1", "v1", 10)
         pipeline = self._sheet_pipeline("A", "p.d.a", data, store)
@@ -1006,7 +959,7 @@ class TestPipelineOutputFormat:
         wb.save(buffer)
         return buffer.getvalue()
 
-    def _raw_pipeline(self, store: InMemoryStore) -> Pipeline:
+    def _raw_pipeline(self, store: MemoryStore) -> Pipeline:
         """Pipeline in raw_json mode over the two-sheet workbook.
 
         Args:
@@ -1040,7 +993,7 @@ class TestPipelineOutputFormat:
 
     def test_raw_json_loads_rows_from_every_sheet(self) -> None:
         """The warehouse gets NDJSON for all sheets and their total."""
-        pipeline = self._raw_pipeline(InMemoryStore())
+        pipeline = self._raw_pipeline(MemoryStore())
         item = SourceItem("hww.xlsx", "ID1", "v1", 10)
 
         result = pipeline.process(item)
@@ -1057,7 +1010,7 @@ class TestPipelineOutputFormat:
 
     def test_raw_json_processed_copy_is_ndjson(self) -> None:
         """The stored copy is the NDJSON the warehouse was given."""
-        store = InMemoryStore()
+        store = MemoryStore()
         pipeline = self._raw_pipeline(store)
         item = SourceItem("hww.xlsx", "ID1", "v1", 10)
         data = pipeline.source.download.return_value
@@ -1075,7 +1028,7 @@ class TestPipelineOutputFormat:
 
     def test_raw_json_retry_after_failure_loads(self) -> None:
         """Identical NDJSON on retry: no processed/ conflict."""
-        store = InMemoryStore()
+        store = MemoryStore()
         pipeline = self._raw_pipeline(store)
         pipeline.warehouse.load.side_effect = [RuntimeError("boom"), True]
         item = SourceItem("hww.xlsx", "ID1", "v1", 10)
