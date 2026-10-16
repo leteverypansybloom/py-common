@@ -10,14 +10,15 @@ jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.11"]
+        python-version: ["3.11", "3.12"]
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -28,26 +29,36 @@ jobs:
           # which only ship in the [gcp] extra — without it, the
           # BigQuery/GCS adapter test modules fail to collect and CI
           # was silently not running them.
-          pip install -e ".[dev,gcp]"
+          pip install -e ".[dev,gcp]" pip-audit
 
-      - name: Run tests
-        run: |
-          pytest tests/ -v --cov=src/py_common --cov-report=xml
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v3
-        with:
-          file: ./coverage.xml
-          fail_ci_if_error: false
-
+      # Static checks run first: they take seconds and fail fast.
       - name: Lint with ruff
         run: |
           ruff check src/ tests/
 
       - name: Format check with black
         run: |
-          black --check --line-length=79 src/ tests/
+          black --check src/ tests/
 
       - name: Type check with mypy
         run: |
           mypy src/py_common --strict
+
+      - name: Audit dependencies for known vulnerabilities
+        run: |
+          # --skip-editable: py-common itself isn't on PyPI.
+          pip-audit --skip-editable
+          # The pinned set deployments install (Dockerfile). Fully
+          # pinned, so it is audited as listed, without resolving.
+          pip-audit -r constraints.txt --no-deps --disable-pip
+
+      - name: Run tests
+        run: |
+          pytest tests/ -v -m "not integration" \
+            --cov=src/py_common --cov-report=xml
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: false

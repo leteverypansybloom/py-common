@@ -13,26 +13,61 @@ Orchestrates:
 
 import json
 import logging
-from dataclasses import asdict, dataclass
+import uuid
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
-from io import BytesIO
 from time import perf_counter
-from typing import Literal
+from typing import Any, Literal
 
-import pandas as pd
-
-from py_common.contract import Contract
+from py_common.contract import Contract, SheetRows
 from py_common.errors import (
+    ConfigError,
     IndeterminateCommitError,
     ServiceError,
     ValidationError,
     VersionMismatch,
 )
+from py_common.logging import add_log_fields, context_fields, log_context
 from py_common.model import AuditRecord, Outcome, Result, SourceItem, digest
+from py_common.parquet import to_parquet
 from py_common.ports import ObjectStore, Source, Warehouse
 from py_common.raw import to_ndjson
 
 logger = logging.getLogger("py_common.pipeline")
+
+
+def _fields(**more: Any) -> dict[str, Any]:
+    """`extra=` for a pipeline log call: the run and file fields.
+
+    The same fields also reach adapter log lines, through the
+    ContextFilter that configure_json_logging() installs; passing
+    them here as well keeps them on the pipeline's own lines under
+    any handler.
+
+    Args:
+        **more: Fields for this line only; None values are dropped.
+
+    Returns:
+        Field name -> value.
+    """
+    fields = context_fields()
+    fields.update({k: v for k, v in more.items() if v is not None})
+    return fields
+
+
+def _library_version() -> str:
+    """py-common's version, for the audit record.
+
+    Imported when needed: py_common/__init__.py imports this module,
+    so importing the package at the top would be circular.
+
+    Returns:
+        e.g. "0.2.0".
+    """
+    import py_common
+
+    return py_common.__version__
 
 
 @dataclass
@@ -58,15 +93,75 @@ class Pipeline:
     output_format: Literal["parquet", "raw_json"] = "parquet"
 
     def __post_init__(self) -> None:
-        """Reject an unknown output_format when the pipeline is built.
+        """Reject a configuration that can't load correctly.
+
+        Checked when the pipeline is built, so a mistake fails the
+        deployment instead of failing (or silently mis-loading) every
+        file at run time.
 
         Raises:
             ValueError: output_format is not "parquet" or "raw_json".
+            ConfigError: The warehouse's merge keys differ from the
+                contract's, or a raw warehouse's sheet-to-table
+                mapping doesn't match the contract's worksheets.
         """
         if self.output_format not in ("parquet", "raw_json"):
             raise ValueError(
                 f"output_format must be 'parquet' or 'raw_json', "
                 f"got {self.output_format!r}"
+            )
+        if isinstance(self.contract, Contract):
+            self._check_keys_match()
+            self._check_tables_match()
+
+    def _check_keys_match(self) -> None:
+        """The typed warehouse merges on the contract's key columns.
+
+        They are configured twice (Contract.key_columns and
+        BigQueryWarehouse(key_columns=...)). A warehouse given none
+        would append every upload again; one given other columns
+        would merge on the wrong ones.
+
+        Raises:
+            ConfigError: The two lists differ.
+        """
+        keys = getattr(self.warehouse, "key_columns", None)
+        if self.output_format != "parquet" or not isinstance(keys, list):
+            return
+        if list(keys) != list(self.contract.key_columns):
+            raise ConfigError(
+                f"Warehouse {self.warehouse.identity} merges on "
+                f"key_columns {keys!r}, but the contract's key_columns "
+                f"are {self.contract.key_columns!r}. Pass "
+                "key_columns=contract.key_columns to the warehouse."
+            )
+
+    def _check_tables_match(self) -> None:
+        """A raw warehouse maps exactly the contract's worksheets.
+
+        A sheet with no table would fail every load; a table with no
+        sheet would get an empty audit row on every load and never be
+        created.
+
+        Raises:
+            ConfigError: The mapping has missing or extra sheets.
+        """
+        tables = getattr(self.warehouse, "tables", None)
+        if self.output_format != "raw_json" or not isinstance(tables, Mapping):
+            return
+        sheets = [ws.name for ws in self.contract.worksheets]
+        missing = [name for name in sheets if name not in tables]
+        extra = [name for name in tables if name not in sheets]
+        if missing or extra:
+            problems = []
+            if missing:
+                problems.append(f"no table for sheet(s) {missing!r}")
+            if extra:
+                problems.append(f"table(s) for unknown sheet(s) {extra!r}")
+            raise ConfigError(
+                f"Warehouse {self.warehouse.identity}: "
+                f"{'; '.join(problems)}. Map exactly the contract's "
+                f"worksheets: {sheets!r}."
             )
 
     def run(self) -> list[Result]:
@@ -80,22 +175,59 @@ class Pipeline:
 
         Raises:
             RuntimeError: Another process holds the warehouse lock.
-            ServiceError: Source listing or audit store failed.
+            ServiceError: Source listing failed.
         """
         results: list[Result] = []
         lock_key = f"locks/{digest(self.warehouse.identity.encode())}"
+        run_id = uuid.uuid4().hex
 
-        try:
-            with self.store.lock(lock_key):
-                for item in self.source.items():
-                    result = self.process(item)
-                    results.append(result)
-                    self._audit(result)
-        except Exception as e:
-            logger.exception("Pipeline run failed: %s", e)
-            raise
+        # Everything logged during the run, by the pipeline or an
+        # adapter, carries run_id and warehouse (py_common.logging).
+        with log_context(run_id=run_id, warehouse=self.warehouse.identity):
+            logger.info("Run %s started", run_id, extra=_fields())
+            try:
+                with self.store.lock(lock_key):
+                    for item in self.source.items():
+                        with log_context(
+                            item_identity=item.identity, version=item.version
+                        ):
+                            result = self._audit_or_fail(self.process(item))
+                            self._log_summary(result)
+                        results.append(result)
+            except Exception as e:
+                logger.exception("Pipeline run failed: %s", e, extra=_fields())
+                raise
 
         return results
+
+    @staticmethod
+    def _log_summary(result: Result) -> None:
+        """Log the one summary line for a file.
+
+        Args:
+            result: The file's final result.
+        """
+        # Alerts match on the outcome field (docs/GCP_SETUP.md,
+        # section 7), so a failure is also an ERROR whatever path led
+        # to it, and a quarantine a WARNING.
+        level = {
+            Outcome.FAILED: logging.ERROR,
+            Outcome.QUARANTINED: logging.WARNING,
+        }.get(result.outcome, logging.INFO)
+        logger.log(
+            level,
+            "%s %s: %d rows in %.2fs",
+            result.item.name,
+            result.outcome.value,
+            result.rows_processed,
+            result.processing_time_seconds,
+            extra=_fields(
+                checksum=result.checksum or None,
+                outcome=result.outcome.value,
+                rows=result.rows_processed,
+                seconds=round(result.processing_time_seconds, 3),
+            ),
+        )
 
     def process(self, item: SourceItem) -> Result:
         """Process a single file; caller must hold warehouse lock.
@@ -106,6 +238,18 @@ class Pipeline:
         Returns:
             Result with outcome (loaded, skipped, quarantined, failed).
         """
+        with log_context(item_identity=item.identity, version=item.version):
+            return self._process(item)
+
+    def _process(self, item: SourceItem) -> Result:
+        """Body of process(), inside the file's log context.
+
+        Args:
+            item: SourceItem from source discovery.
+
+        Returns:
+            As process().
+        """
         start_time = perf_counter()
         errors: list[str] = []
         warnings: list[str] = []
@@ -113,8 +257,16 @@ class Pipeline:
         checksum = ""
         rows_processed = 0
         warehouse_key = ""
+        processed_key = ""
 
         try:
+            # The marker is keyed by identity and version, so an upload
+            # already loaded here is skipped before it is downloaded.
+            if self._is_duplicate(item):
+                return self._make_result(
+                    item, Outcome.SKIPPED, checksum, 0, errors, start_time
+                )
+
             data = self._download(item)
             if data is None:
                 return self._make_result(
@@ -122,15 +274,12 @@ class Pipeline:
                 )
 
             checksum = digest(data)
-            if self._is_duplicate(item, checksum):
-                return self._make_result(
-                    item, Outcome.SKIPPED, checksum, 0, errors, start_time
-                )
+            add_log_fields(checksum=checksum)
 
+            # One parse validates and reads every worksheet; the
+            # conversion below works from these rows.
             try:
-                rows_processed = self.contract.validate(
-                    data, item.name, warnings=warnings
-                )
+                sheets = self.contract.read(data, item.name, warnings=warnings)
             except ValidationError as e:
                 errors = self._quarantine_invalid(item, data, checksum, e)
                 return self._make_result(
@@ -142,21 +291,30 @@ class Pipeline:
                     start_time,
                 )
 
+            self._store_raw(item, data, checksum)
+            try:
+                processed, rows_processed = self._convert(
+                    item, sheets, checksum, warnings
+                )
+            except ValidationError as e:
+                errors = self._quarantine_invalid(item, data, checksum, e)
+                return self._make_result(
+                    item, Outcome.QUARANTINED, checksum, 0, errors, start_time
+                )
+
             # Logged at WARNING so an alert can be raised on them: in
             # "warn" mode the file loads, so nothing else would show
             # that the layout or data has changed.
             for warning in warnings:
-                logger.warning("Contract warning: %s", warning)
-
-            self._store_raw(item, data, checksum)
-            processed, rows_processed = self._convert(
-                item, data, checksum, rows_processed
-            )
-            self._store_processed(item, checksum, processed)
+                logger.warning(
+                    "Contract warning: %s", warning, extra=_fields()
+                )
+            processed_key = self._store_processed(item, checksum, processed)
 
             warehouse_key = f"{item.identity}_{checksum[:8]}"
             outcome = self._load_to_warehouse(
                 item,
+                data,
                 warehouse_key,
                 checksum,
                 processed,
@@ -164,19 +322,29 @@ class Pipeline:
                 errors,
             )
 
-            logger.info(
-                "Loaded %s (%d rows, %s)",
-                item.name,
-                rows_processed,
-                checksum[:8],
-            )
+            if outcome == Outcome.LOADED:
+                logger.info(
+                    "Loaded %s (%d rows, %s)",
+                    item.name,
+                    rows_processed,
+                    checksum[:8],
+                    extra=_fields(),
+                )
+            if outcome in (Outcome.LOADED, Outcome.SKIPPED):
+                # The warehouse has the file either way: record that
+                # in the marker cache before anything else can fail.
+                self.store.put(self._loaded_marker_key(item), b"processed")
+            if outcome == Outcome.SKIPPED:
+                rows_processed = 0
 
         except Exception as e:
             if outcome != Outcome.QUARANTINED:
                 outcome = Outcome.FAILED
             if str(e) not in errors:
                 errors.append(str(e))
-            logger.exception("Processing error for %s: %s", item.name, e)
+            logger.exception(
+                "Processing error for %s: %s", item.name, e, extra=_fields()
+            )
 
         return self._make_result(
             item,
@@ -187,6 +355,7 @@ class Pipeline:
             start_time,
             warehouse_key,
             warnings,
+            processed_key,
         )
 
     def _download(self, item: SourceItem) -> bytes | None:
@@ -203,46 +372,65 @@ class Pipeline:
             return self.source.download(item)
         except VersionMismatch:
             logger.info(
-                "Skipping %s: version changed during download", item.name
+                "Skipping %s: version changed during download",
+                item.name,
+                extra=_fields(),
             )
             return None
 
-    def _is_duplicate(self, item: SourceItem, checksum: str) -> bool:
-        """Check whether this exact content was already processed.
+    def _is_duplicate(self, item: SourceItem) -> bool:
+        """Check the marker cache for this upload in this warehouse.
+
+        Only a cache: a miss goes on to the warehouse, whose load()
+        checks its own audit table inside the commit transaction and
+        is the authority. A store read error raises (fail-closed)
+        rather than reading as a miss.
 
         Args:
-            item: SourceItem being processed (for logging).
-            checksum: SHA-256 of the downloaded bytes.
+            item: SourceItem being processed.
 
         Returns:
-            True if this content was already loaded into this
-            pipeline's warehouse.
+            True if the marker says this file was already loaded
+            into this pipeline's warehouse.
+
+        Raises:
+            ServiceError: The marker could not be read.
         """
-        existing = self.store.get(self._loaded_marker_key(checksum))
-        if existing:
+        key = self._loaded_marker_key(item)
+        if self.store.get(key):
             logger.info(
-                "Skipping %s: checksum %s already processed",
+                "Skipping %s: already loaded (marker %s)",
                 item.name,
-                checksum[:8],
+                key,
+                extra=_fields(),
             )
             return True
         return False
 
-    def _loaded_marker_key(self, checksum: str) -> str:
-        """Key of the marker saying this content was loaded here.
+    def _loaded_marker_key(self, item: SourceItem) -> str:
+        """Key of the marker saying this upload was loaded here.
 
-        Scoped to the destination (warehouse identity), not just the
-        content: one workbook can feed several pipelines, one per
-        worksheet or table, and the first to load it must not make
-        the others skip it as a duplicate.
+        Scoped to the destination (warehouse identity): one workbook
+        can feed several pipelines, one per worksheet or table, and
+        the first to load it must not make the others skip it.
+
+        Within a destination it follows the warehouses' own dedup
+        rule: the upload (source identity and version), not its
+        bytes. Every new upload loads, even one that repeats earlier
+        content: a restore must win again on the typed route, and be
+        the latest generation on the raw route.
 
         Args:
-            checksum: SHA-256 of the source bytes.
+            item: SourceItem being processed.
 
         Returns:
-            "audit/{warehouse identity}/{checksum}".
+            "audit/{warehouse}/versions/{sha256(identity)}/{version}".
         """
-        return f"audit/{self.warehouse.identity}/{checksum}"
+        identity = digest(item.identity.encode())
+        return (
+            f"audit/{self.warehouse.identity}/versions/"
+            f"{identity}/{item.version}"
+        )
 
     @staticmethod
     def _version_key(item: SourceItem, checksum: str) -> str:
@@ -282,7 +470,9 @@ class Pipeline:
         Returns:
             Single-element errors list describing the failure.
         """
-        logger.warning("Validation failed for %s: %s", item.name, error)
+        logger.warning(
+            "Validation failed for %s: %s", item.name, error, extra=_fields()
+        )
         key = self._version_key(item, checksum)
         self.store.put(f"raw/{key}", data)
         self.store.put(f"quarantine/{key}", data)
@@ -301,18 +491,18 @@ class Pipeline:
     def _convert(
         self,
         item: SourceItem,
-        data: bytes,
+        sheets: dict[str, SheetRows],
         checksum: str,
-        validated_rows: int,
+        warnings: list[str] | None = None,
     ) -> tuple[bytes, int]:
-        """Convert the workbook into what the warehouse loads.
+        """Convert the workbook's rows into what the warehouse loads.
 
         Args:
             item: SourceItem being processed.
-            data: Raw Excel bytes.
-            checksum: SHA-256 of data.
-            validated_rows: Row count validate() returned for the
-                primary worksheet.
+            sheets: Rows per worksheet, from Contract.read().
+            checksum: SHA-256 of the source bytes.
+            warnings: Where Parquet conversion reports values loaded
+                as NULL (mutated).
 
         Returns:
             (bytes to load, rows the warehouse should find in them).
@@ -320,10 +510,17 @@ class Pipeline:
             JSON it is the rows of every configured worksheet.
         """
         if self.output_format == "raw_json":
-            return to_ndjson(self.contract.extract(data), item, checksum)
-        return self._to_parquet(data), validated_rows
+            return to_ndjson(sheets, item, checksum)
+        primary = self.contract.worksheets[0]
+        parquet = self._sheets_to_parquet(sheets, item.name, warnings)
+        return parquet, len(sheets[primary.name].rows)
 
-    def _to_parquet(self, data: bytes) -> bytes:
+    def _to_parquet(
+        self,
+        data: bytes,
+        source_name: str = "workbook",
+        warnings: list[str] | None = None,
+    ) -> bytes:
         """Convert the primary worksheet to Parquet bytes.
 
         Looks up the primary worksheet by the name the contract
@@ -336,46 +533,89 @@ class Pipeline:
         identical bytes to the same processed/ key. The warehouse
         stamps _loaded_at when it commits.
 
+        Column types come from the contract (py_common.parquet), not
+        from the values, so mixed values in a "warn" sheet load (bad
+        ones as NULL, with a warning) and an empty column keeps its
+        type.
+
         Args:
             data: Raw Excel bytes.
+            source_name: File name, for warnings.
+            warnings: Where values loaded as NULL are reported
+                (mutated).
 
         Returns:
             Parquet-encoded bytes of the primary worksheet.
         """
-        sheets = self.contract.extract(data)
-        primary = sheets[self.contract.worksheets[0].name]
-        df = pd.DataFrame(
-            [dict(zip(primary.columns, values)) for _, values in primary.rows],
-            columns=primary.columns,
+        sheets = self.contract.extract(data, source_name)
+        return self._sheets_to_parquet(sheets, source_name, warnings)
+
+    def _sheets_to_parquet(
+        self,
+        sheets: dict[str, SheetRows],
+        source_name: str = "workbook",
+        warnings: list[str] | None = None,
+    ) -> bytes:
+        """Write the primary worksheet's rows as typed Parquet.
+
+        Args:
+            sheets: Rows per worksheet, from Contract.read().
+            source_name: File name, for warnings.
+            warnings: Where values loaded as NULL are reported
+                (mutated).
+
+        Returns:
+            Parquet-encoded bytes of the primary worksheet.
+        """
+        primary = self.contract.worksheets[0]
+        return to_parquet(
+            sheets[primary.name],
+            primary,
+            source_name,
+            warnings,
+            key_columns=self.contract.key_columns,
         )
-        parquet_buffer = BytesIO()
-        df.to_parquet(parquet_buffer, index=False)
-        return parquet_buffer.getvalue()
 
     def _store_processed(
         self, item: SourceItem, checksum: str, processed: bytes
-    ) -> None:
+    ) -> str:
         """Store the converted bytes (Parquet or NDJSON).
 
-        Keyed by destination as well as content: pipelines reading
-        different sheets of the same workbook produce different
-        bytes, which would otherwise collide under one key.
+        The store is write-once, so the key must change whenever the
+        bytes do. It is "processed/{warehouse}/{identity}/{checksum}/
+        {version}/{digest}/{name}.parquet" (or ".ndjson"):
+
+        - the warehouse: pipelines reading different sheets of one
+          workbook write different bytes;
+        - the version: each upload has its own copy, even when its
+          bytes repeat an earlier upload's (a restore);
+        - the digest, the first 16 hex digits of the converted bytes'
+          SHA-256: converting the same upload again with a different
+          result (a contract fix, a library upgrade) writes a new
+          copy instead of failing with ObjectStoreConflict on every
+          retry, while a plain retry reuses its copy.
 
         Args:
             item: SourceItem being processed.
             checksum: SHA-256 of the source bytes.
             processed: Converted bytes to store.
+
+        Returns:
+            The key written.
         """
-        suffix = ".ndjson" if self.output_format == "raw_json" else ".parquet"
+        extension = "ndjson" if self.output_format == "raw_json" else "parquet"
         key = (
-            f"processed/{self.warehouse.identity}/"
-            f"{self._version_key(item, checksum)}{suffix}"
+            f"processed/{self.warehouse.identity}/{item.identity}/"
+            f"{checksum}/{item.version}/{digest(processed)[:16]}/"
+            f"{item.name}.{extension}"
         )
         self.store.put(key, processed)
+        return key
 
     def _load_to_warehouse(
         self,
         item: SourceItem,
+        data: bytes,
         warehouse_key: str,
         checksum: str,
         processed: bytes,
@@ -386,6 +626,8 @@ class Pipeline:
 
         Args:
             item: SourceItem being processed (for logging).
+            data: Raw source bytes, kept in quarantine/ if the
+                warehouse rejects the file as invalid.
             warehouse_key: Unique identifier for this load.
             checksum: SHA-256 of the source bytes.
             processed: Converted Parquet or NDJSON data to load.
@@ -393,28 +635,52 @@ class Pipeline:
             errors: Errors list to append to on failure (mutated).
 
         Returns:
-            Outcome.LOADED on success, Outcome.QUARANTINED if the
-            warehouse service failed.
+            Outcome.LOADED on success. Outcome.SKIPPED if the
+            warehouse found it already loaded (a retry after a lost
+            commit confirmation). Outcome.FAILED if the warehouse
+            service failed (nothing committed; a retry is safe), so
+            the runner retries it. Outcome.QUARANTINED if the
+            warehouse found the file itself invalid.
 
         Raises:
             IndeterminateCommitError: Commit state could not be
                 confirmed; caller must treat this as a failure.
         """
         try:
-            self.warehouse.load(
+            inserted = self.warehouse.load(
                 key=warehouse_key,
                 checksum=checksum,
                 data=processed,
                 rows=rows_processed,
+                item=item,
             )
+            if not inserted:
+                logger.info(
+                    "Skipping %s: the warehouse audit shows it already "
+                    "loaded",
+                    item.name,
+                    extra=_fields(),
+                )
+                return Outcome.SKIPPED
             return Outcome.LOADED
         except IndeterminateCommitError:
-            logger.error("Cannot confirm warehouse commit for %s", item.name)
+            logger.error(
+                "Cannot confirm warehouse commit for %s",
+                item.name,
+                extra=_fields(),
+            )
             errors.append("Warehouse commit indeterminate")
             raise
         except ServiceError as e:
-            logger.error("Warehouse service error: %s", e)
+            # A service problem, not a file problem: FAILED is
+            # retried (Pub/Sub redelivery, next job run), whereas
+            # QUARANTINED would be acknowledged and raise the
+            # bad-file alert.
+            logger.error("Warehouse service error: %s", e, extra=_fields())
             errors.append(f"Warehouse error: {e}")
+            return Outcome.FAILED
+        except ValidationError as e:
+            errors.extend(self._quarantine_invalid(item, data, checksum, e))
             return Outcome.QUARANTINED
 
     def _make_result(
@@ -427,6 +693,7 @@ class Pipeline:
         start_time: float,
         warehouse_key: str = "",
         warnings: list[str] | None = None,
+        processed_key: str = "",
     ) -> Result:
         """Assemble a Result with elapsed processing time.
 
@@ -439,6 +706,7 @@ class Pipeline:
             start_time: perf_counter() value at start of process().
             warehouse_key: Reference in final table, if loaded.
             warnings: Problems tolerated in "warn" mode, if any.
+            processed_key: Key of the stored converted copy, if any.
 
         Returns:
             Populated Result.
@@ -452,7 +720,37 @@ class Pipeline:
             processing_time_seconds=perf_counter() - start_time,
             warehouse_key=warehouse_key,
             warnings=list(warnings or []),
+            processed_key=processed_key,
         )
+
+    def _audit_or_fail(self, result: Result) -> Result:
+        """Write the audit record; a failure fails this file only.
+
+        The loaded marker was already written by process(), so even
+        when this write fails a retry finds the file loaded.
+
+        Args:
+            result: Processing result to record.
+
+        Returns:
+            `result`, or a FAILED copy of it if the record could not
+            be written.
+        """
+        try:
+            self._audit(result)
+            return result
+        except Exception as e:
+            logger.exception(
+                "Audit write failed for %s: %s",
+                result.item.name,
+                e,
+                extra=_fields(),
+            )
+            return replace(
+                result,
+                outcome=Outcome.FAILED,
+                errors=[*result.errors, f"Audit write failed: {e}"],
+            )
 
     def _audit(self, result: Result) -> None:
         """Write audit record to object store.
@@ -473,6 +771,13 @@ class Pipeline:
             warehouse_key=result.warehouse_key,
             warnings=result.warnings,
             warehouse=self.warehouse.identity,
+            processed_key=result.processed_key,
+            contract_fingerprint=(
+                self.contract.fingerprint()
+                if isinstance(self.contract, Contract)
+                else ""
+            ),
+            py_common_version=_library_version(),
         )
 
         audit_json = json.dumps(
@@ -488,9 +793,3 @@ class Pipeline:
             f"audit/records/{timestamp_key}_{result.item.identity}.json"
         )
         self.store.put(audit_key, audit_json.encode())
-
-        # Also store duplicate check record if loaded
-        if result.outcome == Outcome.LOADED:
-            self.store.put(
-                self._loaded_marker_key(result.checksum), b"processed"
-            )

@@ -17,11 +17,17 @@ from unittest.mock import MagicMock, Mock, patch
 
 from google.api_core.exceptions import NotFound
 
+from py_common.errors import ServiceError
+from py_common.model import SourceItem
 from py_common.adapters.bigquery_raw import (
     RAW_SCHEMA,
     STAGING_SCHEMA,
     RawJsonWarehouse,
 )
+
+#: Source file passed to every load().
+ITEM = SourceItem("test.xlsx", "landing/test.xlsx", "1", 10)
+
 
 TABLES = {
     "Account signups": "hww_account_signups",
@@ -167,6 +173,7 @@ class TestRawJsonWarehouseLoad:
         """Fixture: Mock BigQuery client whose tables all exist."""
         client = MagicMock()
         client.load_table_from_file.return_value = _load_job(1)
+        client.query.return_value.result.return_value = [("LOADED",)]
         return client
 
     @pytest.fixture
@@ -193,14 +200,17 @@ class TestRawJsonWarehouseLoad:
         """
         data = _ndjson("Account signups", "Survey info")
 
-        warehouse.load(key="hww.xlsx", checksum="abc123", data=data, rows=2)
+        warehouse.load(
+            key="hww.xlsx", checksum="abc123", data=data, rows=2, item=ITEM
+        )
 
         calls = mock_bq_client.load_table_from_file.call_args_list
         destinations = [c.args[1] for c in calls]
-        assert destinations == [
-            "p.raw_hww.hww_account_signups_staging",
-            "p.raw_hww.hww_survey_info_staging",
+        assert [d.split("_stg_")[0] for d in destinations] == [
+            "p.raw_hww.hww_account_signups",
+            "p.raw_hww.hww_survey_info",
         ]
+        assert len(set(destinations)) == 2
         staged = [c.args[0].getvalue() for c in calls]
         assert b"".join(staged) == data
 
@@ -224,6 +234,7 @@ class TestRawJsonWarehouseLoad:
             checksum="abc123",
             data=_ndjson("Survey info"),
             rows=1,
+            item=ITEM,
         )
 
         config = mock_bq_client.load_table_from_file.call_args.kwargs[
@@ -255,9 +266,14 @@ class TestRawJsonWarehouseLoad:
             checksum="abc123",
             data=_ndjson("Survey info"),
             rows=1,
+            item=ITEM,
         )
 
-        table = mock_bq_client.create_table.call_args.args[0]
+        [table] = [
+            c.args[0]
+            for c in mock_bq_client.create_table.call_args_list
+            if "_stg_" not in c.args[0].table_id
+        ]
         assert table.table_id == "hww_survey_info"
         assert table.schema == RAW_SCHEMA
         assert table.time_partitioning.field == "ingested_at"
@@ -280,9 +296,15 @@ class TestRawJsonWarehouseLoad:
             checksum="abc123",
             data=_ndjson("Survey info"),
             rows=1,
+            item=ITEM,
         )
 
-        mock_bq_client.create_table.assert_not_called()
+        created = [
+            c.args[0].table_id
+            for c in mock_bq_client.create_table.call_args_list
+        ]
+        # Only this load's own staging table is created.
+        assert [t.split("_stg_")[0] for t in created] == ["hww_survey_info"]
 
     def test_unknown_sheet_is_refused_before_loading(
         self, warehouse, mock_bq_client
@@ -303,7 +325,7 @@ class TestRawJsonWarehouseLoad:
 
         with pytest.raises(ValueError, match="Newsletter metrics"):
             warehouse.load(
-                key="hww.xlsx", checksum="abc123", data=data, rows=2
+                key="hww.xlsx", checksum="abc123", data=data, rows=2, item=ITEM
             )
         mock_bq_client.load_table_from_file.assert_not_called()
 
@@ -321,7 +343,11 @@ class TestRawJsonWarehouseLoad:
         """
         with pytest.raises(ValueError, match="Line 1"):
             warehouse.load(
-                key="hww.xlsx", checksum="abc123", data=b"{}\n", rows=1
+                key="hww.xlsx",
+                checksum="abc123",
+                data=b"{}\n",
+                rows=1,
+                item=ITEM,
             )
 
     def test_row_count_mismatch_stops_before_transaction(
@@ -347,6 +373,7 @@ class TestRawJsonWarehouseLoad:
                 checksum="abc123",
                 data=_ndjson("Survey info"),
                 rows=1,
+                item=ITEM,
             )
         mock_bq_client.query.assert_not_called()
 
@@ -370,6 +397,7 @@ class TestRawJsonWarehouseLoad:
             checksum="abc123",
             data=_ndjson("Account signups", "Survey info"),
             rows=2,
+            item=ITEM,
         )
 
         mock_bq_client.query.assert_called_once()
@@ -377,7 +405,7 @@ class TestRawJsonWarehouseLoad:
         assert "BEGIN TRANSACTION" in sql
         assert "INSERT INTO `p.raw_hww.hww_account_signups`" in sql
         assert "INSERT INTO `p.raw_hww.hww_survey_info`" in sql
-        assert "FROM `p.raw_hww.hww_survey_info_staging`" in sql
+        assert "FROM `p.raw_hww.hww_survey_info_stg_abc123_" in sql
         assert "INSERT INTO `p.raw_hww.audit`" in sql
         assert "COMMIT TRANSACTION" in sql
         assert "ROLLBACK TRANSACTION" in sql
@@ -402,6 +430,7 @@ class TestRawJsonWarehouseLoad:
             checksum="abc123",
             data=_ndjson("Survey info"),
             rows=1,
+            item=ITEM,
         )
 
         sql = mock_bq_client.query.call_args.args[0]
@@ -409,18 +438,27 @@ class TestRawJsonWarehouseLoad:
         params = {p.name for p in config.query_parameters}
         assert "ingested_at) SELECT" in sql
         assert "@timestamp FROM" in sql
+        # Shared parameters, plus a destination and row count for
+        # each of the two mapped tables (one audit row per table).
         assert params == {
             "filename",
             "checksum",
-            "row_count",
+            "source_version",
             "outcome",
             "timestamp",
+            "destination_0",
+            "row_count_0",
+            "destination_1",
+            "row_count_1",
         }
 
-    def test_failed_transaction_raises_runtime_error(
+    def test_failed_transaction_raises_service_error(
         self, warehouse, mock_bq_client
     ):
-        """A rolled-back transaction surfaces as RuntimeError.
+        """A transaction BigQuery reports as failed is a ServiceError.
+
+        More outcomes (timeouts, unknown state) are covered for both
+        adapters in test_bigquery_errors.py.
 
         Args:
             warehouse: RawJsonWarehouse fixture
@@ -430,18 +468,20 @@ class TestRawJsonWarehouseLoad:
             None
 
         Raises:
-            AssertionError: If RuntimeError isn't raised
+            AssertionError: If ServiceError isn't raised
         """
-        mock_bq_client.query.return_value.result.side_effect = Exception(
-            "quota exceeded"
-        )
+        job = mock_bq_client.query.return_value
+        job.result.side_effect = Exception("quota exceeded")
+        job.state = "DONE"
+        job.error_result = {"reason": "quotaExceeded"}
 
-        with pytest.raises(RuntimeError, match="rolled back together"):
+        with pytest.raises(ServiceError, match="quotaExceeded"):
             warehouse.load(
                 key="hww.xlsx",
                 checksum="abc123",
                 data=_ndjson("Survey info"),
                 rows=1,
+                item=ITEM,
             )
 
     def test_file_with_no_rows_still_records_audit(
@@ -459,7 +499,9 @@ class TestRawJsonWarehouseLoad:
         Raises:
             AssertionError: If staging is touched or audit missing
         """
-        warehouse.load(key="hww.xlsx", checksum="abc123", data=b"", rows=0)
+        warehouse.load(
+            key="hww.xlsx", checksum="abc123", data=b"", rows=0, item=ITEM
+        )
 
         mock_bq_client.load_table_from_file.assert_not_called()
         sql = mock_bq_client.query.call_args.args[0]

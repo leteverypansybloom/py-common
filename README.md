@@ -45,6 +45,24 @@ Two load routes share the steps above:
   [`docs/RAW_TABLE_LAYOUT.md`](docs/RAW_TABLE_LAYOUT.md) and
   [`docs/GCP_SETUP.md`](docs/GCP_SETUP.md).
 
+**Typed column names.** BigQuery column names may only use letters,
+digits and underscores, can't start with a digit, ignore case, and
+are at most 300 characters. So the typed route names each column
+after its heading by these rules (`py_common.parquet.column_name()`):
+
+- accents are dropped, and `%`, `&`, `#` and `+` are spelled out
+  (`percent`, `and`, `number`, `plus`);
+- any other run of characters that aren't letters or digits becomes
+  one `_`, and letters are lower case;
+- a name starting with a digit gets `col_` in front; a heading with
+  no letters or digits is named by its position (`col_3`);
+- names that still clash get `_2`, `_3`, ... (merge keys keep theirs).
+
+For example, `Date of Enquiry` → `date_of_enquiry`, `% complete` →
+`percent_complete` and `2024 total` → `col_2024_total`. Contracts and
+`key_columns` still use the headings as written, and the raw route's
+JSON keys are not changed.
+
 ## Quick Start
 
 See [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) — the single
@@ -71,6 +89,11 @@ described in
   (`on_mismatch`)
 - Names every column: blank headings become `col_B`, repeated ones
   `Other_2`
+- Refuses oversized files before parsing them (`max_file_bytes`,
+  `max_uncompressed_bytes`, which also stops "zip bombs")
+- Can require the agreed file name (`file_name`): an upload under any
+  other name is quarantined, so it can't become a second "latest"
+  upload of the same data
 - Deterministic; same file always produces same result
 
 **ObjectStore** (protocol)
@@ -85,14 +108,19 @@ described in
 
 **Warehouse** (protocol)
 - Stages, validates, and loads data
-- Implements `load(key, checksum, data, rows)`
+- Implements `load(key, checksum, data, rows, item) -> bool`
+  (`False`: its audit table shows the file already loaded)
 - Atomically commits or rolls back entire transaction
 - Records audit entry with row count and checksum
 
 **Pipeline**
 - Orchestrates the workflow
-- Handles deduplication (by checksum, per destination) and error
-  recording
+- Loads each upload once: an upload is the file's identity and
+  version (GCS generation, SharePoint eTag, local modification time),
+  checked per destination table; a new upload always loads
+- Records errors and refuses inconsistent configuration when built
+  (warehouse keys that differ from the contract's, a raw table
+  mapping that doesn't match the contract's sheets)
 - Returns list of Result objects (one per file), with any warnings
 
 ### Concurrency
@@ -103,14 +131,20 @@ create-if-absent (`if_generation_match=0`), so if two runs start at
 once (a second scheduler trigger, a manual re-run, a retry) only one
 proceeds. The other gets a `RuntimeError` naming the holder.
 
-- The lock never expires and is never stolen, as the `ObjectStore`
-  protocol requires.
+- The lock is a lease. It records when it expires
+  (`GCSObjectStore(..., lease_seconds=3600)` by default), and an
+  unexpired lock is never taken.
 - If a run is killed without releasing it, later runs are refused
-  until someone confirms no run is active and deletes the lock
-  object named in the error message.
+  until the lease expires; the next run then takes the lock over
+  (atomically, so only one run can) and logs a WARNING naming the
+  old holder. `lease_seconds` must exceed the Cloud Run job or
+  service timeout.
 - Release only deletes the lock this run created.
-- The Cloud Run Job's service account needs create and delete
-  permission on objects in the bucket.
+- The service account needs to create objects in the store bucket,
+  and to delete them only under `locks/` (`docs/GCP_SETUP.md`,
+  section 3). If releasing the lock fails, the run's results stand:
+  the failure is logged (`Could not release lock`) and the lock
+  waits for its lease to expire.
 
 ### SharePoint source
 
@@ -179,10 +213,20 @@ except ValidationError as e:
 
 `ContractError` (wrong worksheets or columns) is a subclass of
 `ValidationError`, so one `except` covers both. `Pipeline` already
-does this for you: validation failures and warehouse `ServiceError`s
-are quarantined, and any other error (including
-`IndeterminateCommitError`) marks that file `FAILED` while the run
-carries on with the next file. The full hierarchy is in
+does this for you, and carries on with the next file whatever
+happens to one:
+
+| Error | Meaning | Outcome |
+|---|---|---|
+| `ValidationError` (from the contract or the warehouse) | The file itself is wrong | `QUARANTINED`: copied to `quarantine/`, not retried |
+| `ServiceError` from the warehouse | A cloud service failed; nothing was committed | `FAILED`: retried by the runner |
+| `IndeterminateCommitError` | Unknown whether the warehouse committed | `FAILED`: retried by the runner |
+| Anything else | Unexpected | `FAILED` |
+
+The BigQuery adapters raise only these types: a job BigQuery reports
+as failed is a `ServiceError` naming the job ID, and if waiting for
+the commit job fails (timeout, dropped connection) the job is re-read
+by ID before anything is reported. The full hierarchy is in
 `src/py_common/errors.py`.
 
 A worksheet with `on_mismatch="warn"` doesn't raise for a header or
@@ -209,7 +253,7 @@ See [`CONTRIBUTING.md`, Run Tests Locally](CONTRIBUTING.md#run-tests-locally).
 
 Also built: contract validation, the raw JSON conversion (`raw.py`),
 configuration with interpolation, fixture generation, the error
-hierarchy, and GCP authentication helpers (`gcp_auth.py`).
+and the error hierarchy.
 
 ## What's Next
 
@@ -217,7 +261,8 @@ hierarchy, and GCP authentication helpers (`gcp_auth.py`).
 - ⏳ SharePoint authentication (token provider), once IT approves a flow
 - ⏳ Live SharePoint test: one file, then the full Cloud Run job
 - ⏳ Secret Manager adapter
-- ⏳ Structured logging; alert policies as code (manual steps in `docs/GCP_SETUP.md`)
+- ✅ Structured JSON logging (`py_common.logging.configure_json_logging()`)
+- ⏳ Alert policies as code (manual steps in `docs/GCP_SETUP.md`)
 
 The agreed order, with reasoning, is in
 [`docs/INGESTION_FRAMEWORK_GUIDE.md`, Section 9](docs/INGESTION_FRAMEWORK_GUIDE.md#9-priority-order-for-closing-the-gaps).
@@ -226,15 +271,23 @@ The agreed order, with reasoning, is in
 
 Core:
 
-- openpyxl >= 3.0 — Read Excel
-- pyyaml >= 6.0 — YAML configuration
-- pandas >= 2.0 — Excel → DataFrame conversion
-- pyarrow >= 15.0 — Parquet output
+- openpyxl >= 3.1, < 4 — Read Excel
+- defusedxml >= 0.7.1, < 1 — Lets openpyxl refuse XML entity attacks
+  in uploaded workbooks
+- pyyaml >= 6.0, < 7 — YAML configuration
+- pyarrow >= 23.0.1, < 27 — Parquet output, typed from the contract
+
+Every runtime dependency has an upper bound, so a fresh install
+never picks up a major version the code hasn't been tested against,
+and lower bounds that exclude releases with known advisories.
+`constraints.txt` pins the whole runtime set for deployments: the
+`Dockerfile` builds with it, and CI audits it with pip-audit.
 
 Optional extras (`pip install -e ".[gcp]"` etc.):
 
-- `gcp`: google-cloud-storage >= 2.10, google-cloud-bigquery >= 3.13
-- `sharepoint`: requests >= 2.31 (authentication library to follow IT's decision)
+- `gcp`: google-cloud-storage >= 2.10, < 4; google-cloud-bigquery
+  >= 3.13, < 4; google-api-core >= 2.11, < 3
+- `sharepoint`: requests >= 2.33.0, < 3 (authentication library to follow IT's decision)
 - `dev`: pytest, black, ruff, mypy, pre-commit, detect-secrets and
   type stubs
 
@@ -248,8 +301,12 @@ library or the test suite:
   real cloud resources.
 - `scripts/check_gcp_auth.py` — checks your local GCP credentials can
   reach BigQuery and Cloud Storage.
+- `scripts/gcp_auth.py` — a Python port of the R `gcp_auth.R` helper.
+  Not part of the library: the adapters authenticate through Google's
+  client libraries (Application Default Credentials). Kept for code
+  ported from R; likely to be removed.
 
-Both read their project settings from environment variables; see the
+The first two read their project settings from environment variables; see the
 header of each file.
 
 ## Standards

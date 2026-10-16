@@ -17,7 +17,7 @@ import pandas as pd
 import pytest
 from openpyxl import Workbook
 
-from py_common.contract import Column, Contract, Worksheet
+from py_common.contract import Column, Contract, SheetRows, Worksheet
 from py_common.errors import (
     ContractError,
     IndeterminateCommitError,
@@ -40,7 +40,7 @@ def item() -> SourceItem:
 
 @pytest.fixture
 def pipeline(item):
-    """Pipeline wired to mocks; contract.validate() controlled per test."""
+    """Pipeline wired to mocks; contract.read() controlled per test."""
     source = Mock()
     source.download.return_value = b"excel bytes"
     store = Mock()
@@ -63,7 +63,7 @@ class TestPipelineProcessQuarantineOutcomes:
 
     def test_contract_error_is_quarantined(self, pipeline, item):
         """A missing worksheet/column (ContractError) quarantines."""
-        pipeline.contract.validate.side_effect = ContractError(
+        pipeline.contract.read.side_effect = ContractError(
             "Missing worksheet 'Events'"
         )
 
@@ -75,7 +75,7 @@ class TestPipelineProcessQuarantineOutcomes:
 
     def test_validation_error_is_quarantined(self, pipeline, item):
         """A bad data row (ValidationError) quarantines, unchanged."""
-        pipeline.contract.validate.side_effect = ValidationError(
+        pipeline.contract.read.side_effect = ValidationError(
             "Row 2: 'attendees' is required"
         )
 
@@ -89,7 +89,7 @@ class TestPipelineProcessQuarantineOutcomes:
     ):
         """ContractError still stores raw + quarantine copies for
         triage, same as any other quarantine outcome."""
-        pipeline.contract.validate.side_effect = ContractError(
+        pipeline.contract.read.side_effect = ContractError(
             "Missing column 'attendees'"
         )
 
@@ -129,10 +129,14 @@ class TestPipelineProcessSkipOutcomes:
 
         assert result.outcome == Outcome.SKIPPED
         assert result.checksum == ""
-        pipeline.contract.validate.assert_not_called()
+        pipeline.contract.read.assert_not_called()
 
-    def test_duplicate_checksum_is_skipped(self, pipeline, item):
-        """A checksum already recorded in the store skips the file.
+    def test_already_loaded_upload_is_skipped(self, pipeline, item):
+        """An upload whose marker exists is skipped without a download.
+
+        The marker is keyed by identity and version, so nothing needs
+        downloading (or hashing) to find it: the result has no
+        checksum.
 
         Args:
             pipeline: Pipeline fixture wired to mocks.
@@ -149,8 +153,9 @@ class TestPipelineProcessSkipOutcomes:
         result = pipeline.process(item)
 
         assert result.outcome == Outcome.SKIPPED
-        assert result.checksum != ""
-        pipeline.contract.validate.assert_not_called()
+        assert result.checksum == ""
+        pipeline.source.download.assert_not_called()
+        pipeline.contract.read.assert_not_called()
 
 
 class TestPipelineProcessWarehouseOutcomes:
@@ -233,8 +238,11 @@ class TestPipelineProcessWarehouseOutcomes:
         assert result.warehouse_key
         pipeline.warehouse.load.assert_called_once()
 
-    def test_warehouse_service_error_quarantines(self, pipeline, item):
-        """A ServiceError from the warehouse quarantines the file.
+    def test_warehouse_service_error_fails_for_retry(self, pipeline, item):
+        """A warehouse ServiceError is FAILED (retryable), not quarantined.
+
+        The file is fine; the service isn't. QUARANTINED would ack
+        the upload event and fire the bad-file alert (review M3).
 
         Args:
             pipeline: Pipeline fixture with real Contract + workbook.
@@ -244,7 +252,7 @@ class TestPipelineProcessWarehouseOutcomes:
             None
 
         Raises:
-            AssertionError: If outcome is not QUARANTINED.
+            AssertionError: If outcome is not FAILED.
         """
         pipeline.warehouse.load.side_effect = ServiceError(
             "warehouse unavailable"
@@ -252,8 +260,41 @@ class TestPipelineProcessWarehouseOutcomes:
 
         result = pipeline.process(item)
 
-        assert result.outcome == Outcome.QUARANTINED
+        assert result.outcome == Outcome.FAILED
         assert any("Warehouse error" in e for e in result.errors)
+        written = [c.args[0] for c in pipeline.store.put.call_args_list]
+        assert not any(k.startswith("quarantine/") for k in written)
+
+    def test_warehouse_validation_error_quarantines(
+        self, contract, workbook_bytes, item
+    ):
+        """A file the warehouse rejects as invalid is quarantined.
+
+        Args:
+            contract: Real Contract fixture.
+            workbook_bytes: Workbook fixture.
+            item: SourceItem fixture.
+
+        Returns:
+            None
+
+        Raises:
+            AssertionError: If outcome isn't QUARANTINED or no
+                quarantine copy is kept.
+        """
+        source = Mock()
+        source.download.return_value = workbook_bytes
+        store = InMemoryStore()
+        warehouse = Mock()
+        warehouse.identity = "p.d.events"
+        warehouse.load.side_effect = ValidationError("duplicate keys: 7")
+        pipeline = Pipeline(source, store, warehouse, contract)
+
+        result = pipeline.process(item)
+
+        assert result.outcome == Outcome.QUARANTINED
+        assert result.errors == ["duplicate keys: 7"]
+        assert any(k.startswith("quarantine/") for k in store.objects)
 
     def test_warehouse_indeterminate_commit_fails(self, pipeline, item):
         """An indeterminate commit is reported as FAILED, not LOADED.
@@ -460,9 +501,11 @@ class TestPipelineStorageKeysAreVersioned:
             contract: Contract fixture.
         """
         old, new = _workbook([("a", 1)]), _workbook([("a", 2)])
-        item = SourceItem("events.xlsx", "ID1", "v1", 10)
-        self._pipeline(old, store, contract).process(item)
-        self._pipeline(new, store, contract).process(item)
+        # An edited file is a new version at the source.
+        v1 = SourceItem("events.xlsx", "ID1", "v1", 10)
+        v2 = SourceItem("events.xlsx", "ID1", "v2", 10)
+        self._pipeline(old, store, contract).process(v1)
+        self._pipeline(new, store, contract).process(v2)
 
         assert store.objects[f"raw/ID1/{digest(old)}/events.xlsx"] == old
         assert store.objects[f"raw/ID1/{digest(new)}/events.xlsx"] == new
@@ -470,7 +513,7 @@ class TestPipelineStorageKeysAreVersioned:
     def test_processed_key_includes_checksum(
         self, store: InMemoryStore, contract: Contract
     ) -> None:
-        """Parquet is stored per content version too.
+        """Parquet is stored per content version and upload too.
 
         Args:
             store: In-memory store.
@@ -478,12 +521,12 @@ class TestPipelineStorageKeysAreVersioned:
         """
         data = _workbook([("a", 1)])
         item = SourceItem("events.xlsx", "ID1", "v1", 10)
-        self._pipeline(data, store, contract).process(item)
+        result = self._pipeline(data, store, contract).process(item)
 
-        assert (
-            f"processed/project.dataset.events/ID1/{digest(data)}/"
-            "events.xlsx.parquet" in store.objects
-        )
+        prefix = f"processed/project.dataset.events/ID1/{digest(data)}/v1/"
+        assert result.processed_key.startswith(prefix)
+        assert result.processed_key.endswith("/events.xlsx.parquet")
+        assert result.processed_key in store.objects
 
     def test_quarantine_keys_include_checksum(
         self, store: InMemoryStore, contract: Contract
@@ -577,7 +620,7 @@ class TestPipelineRetryAfterWarehouseFailure:
     @pytest.mark.parametrize(
         ("error", "first_outcome"),
         [
-            (ServiceError("BigQuery unavailable"), Outcome.QUARANTINED),
+            (ServiceError("BigQuery unavailable"), Outcome.FAILED),
             (RuntimeError("transaction rolled back"), Outcome.FAILED),
         ],
     )
@@ -600,7 +643,7 @@ class TestPipelineRetryAfterWarehouseFailure:
         source.download.return_value = _workbook([("a", 1)])
         warehouse = Mock()
         warehouse.identity = "project.dataset.events"
-        warehouse.load.side_effect = [error, None]
+        warehouse.load.side_effect = [error, True]
         pipeline = Pipeline(source, InMemoryStore(), warehouse, contract)
 
         first = pipeline.run()
@@ -646,10 +689,10 @@ class TestPipelineToParquetHeaderRow:
 
 
 class TestPipelineToParquetHeadingNames:
-    """_to_parquet() keeps every column under its read_sheet() name."""
+    """_to_parquet() keeps every column, under a BigQuery-safe name."""
 
     def test_repeated_headings_are_all_kept(self) -> None:
-        """Both "Other" columns reach the Parquet file."""
+        """Both "Other" columns reach the Parquet file (M4 names)."""
         contract = Contract(
             worksheets=[
                 Worksheet(
@@ -674,7 +717,7 @@ class TestPipelineToParquetHeadingNames:
             BytesIO(pipeline._to_parquet(buffer.getvalue()))
         )
 
-        assert frame.to_dict("records") == [{"Other": "a", "Other_2": "b"}]
+        assert frame.to_dict("records") == [{"other": "a", "other_2": "b"}]
 
 
 class TestPipelineToParquetColumnSelection:
@@ -711,8 +754,10 @@ class TestPipelineProcessWarnings:
     """Warnings from a "warn" contract are kept, logged and audited."""
 
     @staticmethod
-    def _warn(data: bytes, name: str, warnings: list[str]) -> int:
-        """Stand-in for Contract.validate() that records a warning.
+    def _warn(
+        data: bytes, name: str, warnings: list[str]
+    ) -> dict[str, SheetRows]:
+        """Stand-in for Contract.read() that records a warning.
 
         Args:
             data: Workbook bytes (unused).
@@ -720,16 +765,17 @@ class TestPipelineProcessWarnings:
             warnings: List to append to.
 
         Returns:
-            Row count.
+            One row of the "Events" sheet.
         """
         warnings.append(f"{name} [Events]: Unexpected columns: extra")
-        return 1
+        return {"Events": SheetRows(["a"], [(2, (1,))])}
 
     @pytest.fixture
     def warn_pipeline(self, pipeline: Pipeline) -> Pipeline:
         """Pipeline whose contract passes the file with one warning."""
-        pipeline.contract.validate.side_effect = self._warn
-        pipeline._to_parquet = Mock(return_value=b"parquet")
+        pipeline.contract.worksheets = [Worksheet("Events")]
+        pipeline.contract.read.side_effect = self._warn
+        pipeline._sheets_to_parquet = Mock(return_value=b"parquet")
         return pipeline
 
     def test_file_with_warnings_loads(
@@ -798,8 +844,11 @@ class TestPipelineProcessWarnings:
             pipeline: Pipeline fixture.
             item: SourceItem fixture.
         """
-        pipeline.contract.validate.return_value = 1
-        pipeline._to_parquet = Mock(return_value=b"parquet")
+        pipeline.contract.worksheets = [Worksheet("Events")]
+        pipeline.contract.read.return_value = {
+            "Events": SheetRows(["a"], [(2, (1,))])
+        }
+        pipeline._sheets_to_parquet = Mock(return_value=b"parquet")
 
         assert pipeline.process(item).warnings == []
 
@@ -889,12 +938,13 @@ class TestPipelineKeysPerDestination:
         data = self._two_sheet_workbook()
         item = SourceItem("hww.xlsx", "ID1", "v1", 10)
 
-        self._sheet_pipeline("A", "p.d.a", data, store).process(item)
-        self._sheet_pipeline("B", "p.d.b", data, store).process(item)
+        a = self._sheet_pipeline("A", "p.d.a", data, store).process(item)
+        b = self._sheet_pipeline("B", "p.d.b", data, store).process(item)
 
-        suffix = f"ID1/{digest(data)}/hww.xlsx.parquet"
-        assert f"processed/p.d.a/{suffix}" in store.objects
-        assert f"processed/p.d.b/{suffix}" in store.objects
+        upload = f"ID1/{digest(data)}/v1/"
+        assert a.processed_key.startswith(f"processed/p.d.a/{upload}")
+        assert b.processed_key.startswith(f"processed/p.d.b/{upload}")
+        assert {a.processed_key, b.processed_key} <= set(store.objects)
 
     def test_audit_record_names_the_destination(self) -> None:
         """The audit record says which table the attempt was for."""
@@ -1012,22 +1062,22 @@ class TestPipelineOutputFormat:
         item = SourceItem("hww.xlsx", "ID1", "v1", 10)
         data = pipeline.source.download.return_value
 
-        pipeline.process(item)
+        result = pipeline.process(item)
 
+        # Keyed by upload and by the NDJSON's own digest.
+        ndjson = pipeline.warehouse.load.call_args.kwargs["data"]
         key = (
-            f"processed/p.raw.signups+survey/ID1/{digest(data)}/"
-            "hww.xlsx.ndjson"
+            f"processed/p.raw.signups+survey/ID1/{digest(data)}/v1/"
+            f"{digest(ndjson)[:16]}/hww.xlsx.ndjson"
         )
-        assert (
-            store.objects[key]
-            == pipeline.warehouse.load.call_args.kwargs["data"]
-        )
+        assert result.processed_key == key
+        assert store.objects[key] == ndjson
 
     def test_raw_json_retry_after_failure_loads(self) -> None:
         """Identical NDJSON on retry: no processed/ conflict."""
         store = InMemoryStore()
         pipeline = self._raw_pipeline(store)
-        pipeline.warehouse.load.side_effect = [RuntimeError("boom"), None]
+        pipeline.warehouse.load.side_effect = [RuntimeError("boom"), True]
         item = SourceItem("hww.xlsx", "ID1", "v1", 10)
 
         first = pipeline.process(item)

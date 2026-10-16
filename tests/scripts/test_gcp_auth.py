@@ -17,7 +17,7 @@ import urllib.request
 import pytest
 from unittest.mock import MagicMock, Mock, patch
 
-from py_common.gcp_auth import (
+from gcp_auth import (
     GCPAuthSession,
     _auth_from_json,
     _detect_environment,
@@ -43,7 +43,7 @@ def _isolated_session(monkeypatch):
     Returns:
         None
     """
-    monkeypatch.setattr("py_common.gcp_auth._session", GCPAuthSession())
+    monkeypatch.setattr("gcp_auth._session", GCPAuthSession())
 
 
 class TestDetectEnvironment:
@@ -127,7 +127,7 @@ class TestDetectEnvironment:
                 "urllib.request.urlopen", side_effect=OSError("unreachable")
             ),
             patch(
-                "py_common.gcp_auth._get_adc_path",
+                "gcp_auth._get_adc_path",
                 return_value="/fake/adc.json",
             ),
         ):
@@ -156,7 +156,7 @@ class TestDetectEnvironment:
                 "urllib.request.urlopen", side_effect=OSError("unreachable")
             ),
             patch(
-                "py_common.gcp_auth._get_adc_path",
+                "gcp_auth._get_adc_path",
                 side_effect=FileNotFoundError("no creds"),
             ),
         ):
@@ -180,10 +180,10 @@ class TestGetAdcPath:
         """
         with (
             patch(
-                "py_common.gcp_auth.os.getenv",
+                "gcp_auth.os.getenv",
                 return_value="C:/keys/creds.json",
             ),
-            patch("py_common.gcp_auth.os.path.exists", return_value=True),
+            patch("gcp_auth.os.path.exists", return_value=True),
         ):
             assert _get_adc_path() == "C:/keys/creds.json"
 
@@ -206,10 +206,10 @@ class TestGetAdcPath:
             )
 
         with (
-            patch("py_common.gcp_auth.os.getenv", side_effect=fake_getenv),
-            patch("py_common.gcp_auth.os.path.exists", return_value=False),
-            patch("py_common.gcp_auth.os.name", "nt"),
-            patch("py_common.gcp_auth.Path.exists", return_value=True),
+            patch("gcp_auth.os.getenv", side_effect=fake_getenv),
+            patch("gcp_auth.os.path.exists", return_value=False),
+            patch("gcp_auth.os.name", "nt"),
+            patch("gcp_auth.Path.exists", return_value=True),
         ):
             result = _get_adc_path()
 
@@ -228,9 +228,9 @@ class TestGetAdcPath:
             AssertionError: If FileNotFoundError is not raised
         """
         with (
-            patch("py_common.gcp_auth.os.getenv", return_value=""),
-            patch("py_common.gcp_auth.os.path.exists", return_value=False),
-            patch("py_common.gcp_auth.Path.exists", return_value=False),
+            patch("gcp_auth.os.getenv", return_value=""),
+            patch("gcp_auth.os.path.exists", return_value=False),
+            patch("gcp_auth.Path.exists", return_value=False),
         ):
             with pytest.raises(FileNotFoundError, match="No credentials"):
                 _get_adc_path()
@@ -259,7 +259,7 @@ class TestAuthFromJson:
         mock_creds = MagicMock()
 
         with patch(
-            "py_common.gcp_auth.Credentials.from_service_account_file",
+            "gcp_auth.Credentials.from_service_account_file",
             return_value=mock_creds,
         ) as mock_from_file:
             result = _auth_from_json(str(cred_file))
@@ -309,17 +309,13 @@ class TestGcpAuth:
         mock_creds = MagicMock()
 
         with (
+            patch("gcp_auth._detect_environment", return_value="adc"),
             patch(
-                "py_common.gcp_auth._detect_environment", return_value="adc"
-            ),
-            patch(
-                "py_common.gcp_auth._get_adc_path",
+                "gcp_auth._get_adc_path",
                 return_value="/fake/adc.json",
             ),
-            patch(
-                "py_common.gcp_auth._auth_from_json", return_value=mock_creds
-            ),
-            patch("py_common.gcp_auth.Request"),
+            patch("gcp_auth._auth_from_json", return_value=mock_creds),
+            patch("gcp_auth.Request"),
         ):
             gcp_auth(project="phw-eng-dev")
 
@@ -347,11 +343,11 @@ class TestGcpAuth:
         """
         with (
             patch(
-                "py_common.gcp_auth._detect_environment",
+                "gcp_auth._detect_environment",
                 return_value="interactive",
             ),
             patch(
-                "py_common.gcp_auth._get_adc_path",
+                "gcp_auth._get_adc_path",
                 side_effect=FileNotFoundError("no creds"),
             ),
         ):

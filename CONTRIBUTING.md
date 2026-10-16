@@ -91,7 +91,8 @@ Two layers of checks run without you asking:
   detect-secrets, and YAML / large-file / whitespace / merge-conflict
   checks. Run them all by hand with `pre-commit run --all-files`.
 - **On push and pull request** (`.github/workflows/tests.yml`):
-  pytest with coverage, ruff, black and mypy on Python 3.11.
+  ruff, black, mypy and pip-audit first (they fail fast), then pytest
+  with coverage, on Python 3.11 and 3.12.
 
 If detect-secrets flags something that is genuinely not a secret,
 update the baseline and commit it with your change:
@@ -270,6 +271,40 @@ pytest tests/ -m "not integration"
 
 # Run only integration tests
 pytest tests/ -m "integration"
+```
+
+### BigQuery SQL dry run
+
+`tests/integration/test_bq_dry_run.py` generates every SQL statement
+the BigQuery adapters send (the idempotent commit script for both
+warehouses, the merge-key check, the schema-update `ALTER TABLE`) and
+sends each to BigQuery with `dry_run=True`: parsed and checked
+against real tables, never run, no cost. Run it after any change to
+adapter SQL, against a sandbox project:
+
+```bash
+gcloud auth application-default login
+GCP_PROJECT_ID=my-sandbox pytest -m integration tests/integration/test_bq_dry_run.py
+```
+
+It creates a scratch dataset (`py_common_dry_run_<random>`, tables
+expiring after a day) and deletes it afterwards, so your account
+needs `roles/bigquery.dataEditor` and `roles/bigquery.jobUser` in the
+project. It is skipped when `GCP_PROJECT_ID` is unset, and no
+emulator is involved.
+
+### Live BigQuery tests
+
+`tests/integration/test_bigquery_live.py` runs both warehouses in
+real BigQuery, in an existing test dataset, and checks what lands
+(merges, deleted rows, restores, rollback, the "latest upload"
+query). GitHub Actions runs it nightly and on demand
+(`.github/workflows/bigquery-live.yml`); the one-off set-up is in
+[`docs/CI_SETUP.md`](docs/CI_SETUP.md). To run it yourself:
+
+```bash
+GCP_PROJECT_ID=my-project BQ_TEST_DATASET=py_common_ci \
+  pytest -m integration tests/integration/test_bigquery_live.py
 ```
 
 ### Fixtures

@@ -1,0 +1,61 @@
+name: Live BigQuery tests
+
+# Runs py-common's SQL against real BigQuery, in a test dataset
+# (tests/integration/test_bigquery_live.py): every night, and from
+# the "Run workflow" button on the Actions tab. It signs in to Google
+# Cloud without a stored key (Workload Identity Federation).
+# Set-up: docs/CI_SETUP.md. GitHub only runs a scheduled or manual
+# workflow once it is on the default branch.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"  # 03:17 UTC every night
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write  # to ask Google Cloud for a short-lived token
+
+concurrency:
+  group: bigquery-live
+  cancel-in-progress: false
+
+jobs:
+  bigquery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Skipped, rather than failing every night, until the repository
+    # variables are set (docs/CI_SETUP.md).
+    if: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER != '' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # The runtime versions deployments use.
+          pip install -e ".[dev,gcp]" --constraint constraints.txt
+
+      - name: Sign in to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - name: Run the live BigQuery tests
+        env:
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          BQ_TEST_DATASET: ${{ vars.BQ_TEST_DATASET }}
+        run: |
+          # Without these the tests would skip, and the run pass.
+          if [ -z "$GCP_PROJECT_ID" ] || [ -z "$BQ_TEST_DATASET" ]; then
+            echo "Set the GCP_PROJECT_ID and BQ_TEST_DATASET repository variables (docs/CI_SETUP.md)."
+            exit 1
+          fi
+          pytest -m integration tests/integration/test_bigquery_live.py -v

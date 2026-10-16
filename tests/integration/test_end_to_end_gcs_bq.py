@@ -9,10 +9,12 @@ import pyarrow.parquet as pq
 
 from py_common.adapters.gcs import GCSObjectStore
 from py_common.adapters.bigquery import BigQueryWarehouse
+from py_common.model import SourceItem
 
 HAS_CREDENTIALS = "GOOGLE_APPLICATION_CREDENTIALS" in os.environ
 
 
+@pytest.mark.integration
 @pytest.mark.skipif(not HAS_CREDENTIALS, reason="No GCP credentials")
 class TestEndToEndWorkflow:
     """Full pipeline: Create data → GCS → BigQuery."""
@@ -50,7 +52,10 @@ class TestEndToEndWorkflow:
         dataset = os.getenv("BQ_DATASET")
         bq = BigQueryWarehouse(project, dataset, "events_final")
 
-        bq.load(key=key, checksum=checksum, data=parquet_bytes, rows=2)
+        item = SourceItem("integration_events.xlsx", key, "1", 0)
+        bq.load(
+            key=key, checksum=checksum, data=parquet_bytes, rows=2, item=item
+        )
 
         # Step 4: Query audit table to verify
         query = f"""

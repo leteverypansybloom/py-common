@@ -23,8 +23,22 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from io import BytesIO
 
-from google.api_core.exceptions import NotFound
+from google.api_core.exceptions import GoogleAPICallError, NotFound
 from google.cloud import bigquery
+
+from py_common.adapters._bq_jobs import (
+    CommitPart,
+    commit_parameters,
+    commit_script,
+    committed,
+    create_staging_table,
+    drop_staging_table,
+    run_query,
+    staging_table_id,
+    wait_for_load,
+)
+from py_common.errors import ServiceError
+from py_common.model import SourceItem
 
 logger = logging.getLogger("py_common.adapters.bigquery_raw")
 
@@ -46,6 +60,9 @@ RAW_SCHEMA = [
 ]
 
 _COLUMNS = ", ".join(field.name for field in STAGING_SCHEMA)
+
+#: Raw tables are clustered on these, in this order.
+CLUSTERING_FIELDS = ["source_file", "source_generation"]
 
 
 class RawJsonWarehouse:
@@ -124,31 +141,70 @@ class RawJsonWarehouse:
         checksum: str,
         data: bytes,
         rows: int,
-    ) -> None:
-        """Atomically insert a file's rows into the raw tables.
+        item: SourceItem,
+    ) -> bool:
+        """Atomically insert a file version's rows, once.
 
         Steps:
         1. Split the NDJSON by sheet; refuse sheets with no table
         2. Create any raw table that doesn't exist yet
-        3. Load each sheet's rows into {table}_staging (truncate)
+        3. Load each sheet's rows into a staging table of this
+           load's own ({table}_stg_{checksum[:12]}_{random},
+           expiring in a day; dropped afterwards)
         4. Verify the staged row count matches `rows`
-        5. Insert every sheet's rows into its raw table and record
-           the audit entry, in one script transaction; commit, or
-           roll back everything
+        5. In one script transaction, for each raw table: if the
+           audit table already has a LOADED row for that table, this
+           load key and source version, skip it; otherwise insert the
+           sheet's rows and record the table's audit row. Commit, or
+           roll back everything. Checking per table means adding a
+           table to this warehouse later loads only the new table.
+
+        The raw route dedups on the source file's identity and
+        version (the pipeline's load key starts with the identity),
+        not its content: re-uploading earlier content as a new
+        generation must load again, or "latest generation" in the
+        transformation layer would keep serving the upload it
+        replaced. See docs/RAW_TABLE_LAYOUT.md.
 
         Args:
             key (str): Unique identifier for this load.
             checksum (str): SHA-256 of the source file.
             data (bytes): NDJSON from py_common.raw.to_ndjson().
             rows (int): Expected row count across all sheets.
+            item (SourceItem): Source file loaded; its version is
+                part of the dedup key and the audit row.
 
         Returns:
-            None
+            bool: True if any table was written, False if every
+                table already had this file version.
 
         Raises:
             ValueError: A line is not valid JSON or names a sheet
                 with no table, or the staged row count is wrong.
-            RuntimeError: The transaction failed and was rolled back.
+            ServiceError: BigQuery reported a failure; nothing was
+                committed, so a retry is safe.
+            IndeterminateCommitError: The transaction's outcome could
+                not be confirmed.
+        """
+        try:
+            return self._load(key, checksum, data, rows, item)
+        except GoogleAPICallError as e:
+            raise ServiceError(f"BigQuery failed for {key}: {e}") from e
+
+    def _load(
+        self, key: str, checksum: str, data: bytes, rows: int, item: SourceItem
+    ) -> bool:
+        """Body of load(); GoogleAPICallErrors are wrapped by load().
+
+        Args:
+            key (str): Unique identifier for this load.
+            checksum (str): SHA-256 of the source file.
+            data (bytes): NDJSON from py_common.raw.to_ndjson().
+            rows (int): Expected row count across all sheets.
+            item (SourceItem): Source file loaded.
+
+        Returns:
+            bool: As load().
         """
         by_sheet = self._split_by_sheet(data)
         unknown = sorted(set(by_sheet) - set(self.tables))
@@ -158,55 +214,80 @@ class RawJsonWarehouse:
                 f"{', '.join(unknown)} in {key}"
             )
 
-        staged = 0
+        staging: dict[str, str] = {}
+        try:
+            return self._stage_and_commit(
+                key, checksum, rows, item, by_sheet, staging
+            )
+        finally:
+            for full_id in staging.values():
+                drop_staging_table(self.client, full_id)
+
+    def _stage_and_commit(
+        self,
+        key: str,
+        checksum: str,
+        rows: int,
+        item: SourceItem,
+        by_sheet: dict[str, list[bytes]],
+        staging: dict[str, str],
+    ) -> bool:
+        """Stage every sheet, verify the count, then commit.
+
+        Args:
+            key (str): Unique identifier for this load.
+            checksum (str): SHA-256 of the source file.
+            rows (int): Expected row count across all sheets.
+            item (SourceItem): Source file loaded.
+            by_sheet (dict[str, list[bytes]]): NDJSON lines per sheet.
+            staging (dict[str, str]): Filled with sheet -> staging
+                table as each is created, so the caller can drop
+                them whatever happens (mutated).
+
+        Returns:
+            bool: As load().
+        """
+        staged: dict[str, int] = {}
         for sheet, lines in by_sheet.items():
             table_id = self.tables[sheet]
             self._ensure_raw_table(table_id)
+            staging[sheet] = self._full_id(
+                staging_table_id(table_id, checksum)
+            )
+            create_staging_table(self.client, staging[sheet], STAGING_SCHEMA)
             job_config = bigquery.LoadJobConfig(
                 source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
                 schema=STAGING_SCHEMA,
-                # WRITE_TRUNCATE: Empty staging before load (safety).
                 write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
             )
             load_job = self.client.load_table_from_file(
                 BytesIO(b"".join(lines)),
-                self._full_id(f"{table_id}_staging"),
+                staging[sheet],
                 job_config=job_config,
             )
-            load_job.result()
-            staged += load_job.output_rows or 0
-            logger.debug(f"Staged {sheet} for {key}")
+            wait_for_load(load_job, key)
+            staged[sheet] = load_job.output_rows or 0
+            logger.debug("Staged %s for %s", sheet, key)
 
-        if staged != rows:
+        total = sum(staged.values())
+        if total != rows:
             raise ValueError(
-                f"Row count mismatch: expected {rows}, got {staged}"
+                f"Row count mismatch: expected {rows}, got {total}"
             )
 
-        timestamp = datetime.now(timezone.utc)
+        parts = self._commit_parts(staging, staged)
         job_config_txn = bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ScalarQueryParameter("filename", "STRING", key),
-                bigquery.ScalarQueryParameter("checksum", "STRING", checksum),
-                bigquery.ScalarQueryParameter("row_count", "INTEGER", rows),
-                bigquery.ScalarQueryParameter("outcome", "STRING", "LOADED"),
-                bigquery.ScalarQueryParameter(
-                    "timestamp", "TIMESTAMP", timestamp
-                ),
-            ]
-        )
-        try:
-            txn_job = self.client.query(
-                self._transaction_sql(list(by_sheet)),
-                job_config=job_config_txn,
+            query_parameters=commit_parameters(
+                key, checksum, parts, item, datetime.now(timezone.utc)
             )
-            txn_job.result()
-        except Exception as e:
-            raise RuntimeError(
-                f"BigQuery transaction failed for {key}; raw table "
-                f"inserts and audit record were rolled back together: {e}"
-            ) from e
-
-        logger.debug(f"Inserted {rows} raw rows for {key}")
+        )
+        job, result = run_query(
+            self.client,
+            commit_script(parts, self._full_id(self.audit_table_id)),
+            job_config_txn,
+            key,
+        )
+        return committed(job, result, key)
 
     def _split_by_sheet(self, data: bytes) -> dict[str, list[bytes]]:
         """Group NDJSON lines by their sheet_name, keeping order.
@@ -237,7 +318,10 @@ class RawJsonWarehouse:
         return by_sheet
 
     def _ensure_raw_table(self, table_id: str) -> None:
-        """Create a raw table, partitioned by day, if it's missing.
+        """Create a raw table if it's missing.
+
+        Partitioned by day of ingested_at and clustered on
+        CLUSTERING_FIELDS.
 
         Args:
             table_id (str): Raw table name.
@@ -249,44 +333,55 @@ class RawJsonWarehouse:
         try:
             self.client.get_table(full_id)
         except NotFound:
-            logger.info(f"Creating raw table {full_id}")
+            logger.info("Creating raw table %s", full_id)
             table = bigquery.Table(full_id, schema=RAW_SCHEMA)
             table.time_partitioning = bigquery.TimePartitioning(
                 type_=bigquery.TimePartitioningType.DAY,
                 field="ingested_at",
             )
+            # The "latest upload" query partitions by source_file and
+            # filters on source_generation. Clustering on them lets
+            # BigQuery prune blocks for queries that filter on them
+            # directly (not for a window over the whole table).
+            table.clustering_fields = CLUSTERING_FIELDS
             self.client.create_table(table, exists_ok=True)
 
-    def _transaction_sql(self, sheets: list[str]) -> str:
-        """Build the script inserting every sheet plus the audit row.
+    def _commit_parts(
+        self, staging: dict[str, str], staged: dict[str, int]
+    ) -> list[CommitPart]:
+        """One commit part per raw table: its insert and row count.
+
+        Every mapped table gets a part, so each gets its own "already
+        loaded?" check and audit row (see _bq_jobs.commit_script()):
+        adding a table to this warehouse later loads only the new
+        table, and a sheet with no rows (allowed by its contract) is
+        still recorded, with row_count 0 and no insert.
 
         Args:
-            sheets (list[str]): Sheets with staged rows, in order.
+            staging (dict[str, str]): Sheet -> its staging table, for
+                every sheet with rows.
+            staged (dict[str, int]): Sheet -> rows staged.
 
         Returns:
-            str: A BigQuery script with one transaction.
+            list[CommitPart]: In mapping order.
         """
-        inserts = "".join(
-            f"  INSERT INTO `{self._full_id(self.tables[sheet])}` "
-            f"({_COLUMNS}, ingested_at) "
-            f"SELECT {_COLUMNS}, @timestamp "
-            f"FROM `{self._full_id(self.tables[sheet] + '_staging')}`;\n"
-            for sheet in sheets
-        )
-        return (
-            "BEGIN\n"
-            "  BEGIN TRANSACTION;\n"
-            f"{inserts}"
-            f"  INSERT INTO `{self._full_id(self.audit_table_id)}` "
-            "(filename, checksum, row_count, outcome, timestamp) "
-            "VALUES (@filename, @checksum, @row_count, @outcome, "
-            "@timestamp);\n"
-            "  COMMIT TRANSACTION;\n"
-            "EXCEPTION WHEN ERROR THEN\n"
-            "  ROLLBACK TRANSACTION;\n"
-            "  RAISE USING MESSAGE = @@error.message;\n"
-            "END;"
-        )
+        return [
+            CommitPart(
+                destination=self._full_id(table_id),
+                writes=(
+                    [
+                        f"INSERT INTO `{self._full_id(table_id)}` "
+                        f"({_COLUMNS}, ingested_at) "
+                        f"SELECT {_COLUMNS}, @timestamp "
+                        f"FROM `{staging[sheet]}`"
+                    ]
+                    if sheet in staging
+                    else []
+                ),
+                rows=staged.get(sheet, 0),
+            )
+            for sheet, table_id in self.tables.items()
+        ]
 
     def _full_id(self, table_id: str) -> str:
         """Fully-qualify a table name in this dataset.

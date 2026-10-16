@@ -1,5 +1,11 @@
 # How to: set up Cloud Run to move data that lands in a GCS bucket
 
+> **Archived prototype.** This is the earlier CSV-to-BigQuery design,
+> kept for reference. It predates py-common's GCS source and raw JSON
+> route and doesn't describe how they behave (for example, it reads
+> the object's current bytes rather than the event's generation). For
+> the maintained set-up, follow `docs/GCP_SETUP.md`.
+
 Please note that this may be superseded by future work using Terraform. In particular, steps relating to the creation of Docker image and Cloud Run service are expected to be further automated. 
 
 TODO: also want to update this pipeline to use the table-per-table strategy, not the single table strategy (see Patterns: ingestion framework). 

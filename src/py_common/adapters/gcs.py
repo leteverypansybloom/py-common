@@ -3,7 +3,7 @@
 GCSObjectStore implements the ObjectStore protocol. All writes are
 append-only: if a key already exists with identical content, put()
 succeeds (idempotent). If content differs, put() fails with
-ValueError (prevents corruption).
+ObjectStoreConflict (prevents corruption).
 
 GCSSource implements the Source protocol: it lists workbooks in a
 landing folder of a bucket and downloads the exact object generation
@@ -17,13 +17,15 @@ RAP Compliance:
 lock() gives real mutual exclusion via atomic create-if-absent.
 """
 
+import base64
+import hashlib
 import json
 import logging
 import os
 import socket
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Generator, Optional
 
 from google.api_core.exceptions import (
@@ -31,10 +33,15 @@ from google.api_core.exceptions import (
     NotFound,
     PreconditionFailed,
 )
-from google.cloud import storage  # type: ignore
+import google_crc32c
+import google.cloud.storage as storage
 
 from py_common.errors import NotFound as ItemNotFound
-from py_common.errors import ServiceError, VersionMismatch
+from py_common.errors import (
+    ObjectStoreConflict,
+    ServiceError,
+    VersionMismatch,
+)
 from py_common.model import SourceItem
 
 logger = logging.getLogger("py_common.adapters.gcs")
@@ -48,7 +55,8 @@ class GCSObjectStore:
     data pipelines.
 
     Key invariant: put(k, d); put(k, d) succeeds both times.
-    If data differs: put(k, d1); put(k, d2) raises ValueError.
+    If data differs: put(k, d1); put(k, d2) raises
+    ObjectStoreConflict.
 
     Attributes:
         project_id (str): GCP project ID.
@@ -57,23 +65,39 @@ class GCSObjectStore:
         bucket (storage.Bucket): Reference to GCS bucket.
     """
 
-    def __init__(self, project_id: str, bucket_name: str) -> None:
+    def __init__(
+        self,
+        project_id: str,
+        bucket_name: str,
+        lease_seconds: int = 3600,
+    ) -> None:
         """Initialize GCS adapter.
 
         Args:
             project_id (str): GCP project ID.
             bucket_name (str): GCS bucket name. If prefixed with
                 gs://, prefix is removed for normalization.
+            lease_seconds (int): How long a run's lock lasts before
+                another run may take it over. Must exceed the Cloud
+                Run job or service timeout, so a lease outlasts any
+                normal run. Not a guarantee: a service container can
+                keep running after its request times out, and the
+                lease isn't renewed. Defaults to one hour.
 
         Returns:
             None
 
         Raises:
-            None (credential errors raised on first operation)
+            ValueError: lease_seconds is not positive.
         """
+        if lease_seconds <= 0:
+            raise ValueError(
+                f"lease_seconds must be positive, got {lease_seconds}"
+            )
+        self.lease_seconds = lease_seconds
         # Normalize bucket name (remove gs:// prefix if present).
         # This allows users to specify either "bucket" or "gs://bucket".
-        self.bucket_name = bucket_name.replace("gs://", "")
+        self.bucket_name = bucket_name.removeprefix("gs://")
         self.project_id = project_id
         self.client = storage.Client(project=project_id)
         self.bucket = self.client.bucket(self.bucket_name)
@@ -81,36 +105,42 @@ class GCSObjectStore:
     def get(self, key: str) -> Optional[bytes]:
         """Read object by key.
 
-        Returns bytes if object exists, None if not found or on error.
-        Never raises on missing object (graceful degradation).
+        Fail-closed: only a missing object reads as None. Any other
+        failure (permission, outage, timeout) raises, because the
+        pipeline's "already loaded?" check would otherwise take an
+        unreadable marker as "never loaded" and load the file again.
 
         Args:
             key (str): Object path, e.g.,
                 "raw/<identity>/<checksum>/events.xlsx".
 
         Returns:
-            Optional[bytes]: Bytes if object exists, None otherwise.
+            Optional[bytes]: Bytes if the object exists, None if not.
 
         Raises:
-            None (missing objects return None, not exception)
+            ServiceError: GCS failed for a reason other than the
+                object being missing.
         """
         blob = self.bucket.blob(key)
         try:
             data: bytes = blob.download_as_bytes()
-            logger.debug(f"Read object {key} ({len(data)} bytes)")
-            return data
-        except Exception as e:
-            # Object missing, not readable, or transient error.
-            # Log at debug level (not warning) since missing is expected.
-            logger.debug(f"Object {key} not found or read failed: {e}")
+        except NotFound:
+            logger.debug("Object %s not found", key)
             return None
+        except GoogleAPICallError as e:
+            raise ServiceError(
+                f"Cannot read gs://{self.bucket_name}/{key}: {e}"
+            ) from e
+        logger.debug("Read object %s (%d bytes)", key, len(data))
+        return data
 
     def put(self, key: str, data: bytes) -> None:
         """Write object; idempotent if identical data exists.
 
         If object exists with identical bytes, succeeds without
         re-upload (idempotent). If object exists with different
-        bytes, raises ValueError (prevents silent corruption).
+        bytes, raises ObjectStoreConflict (prevents silent
+        corruption).
 
         This is critical for retryable pipelines: a network failure
         cannot be distinguished from success + network loss, so we
@@ -125,9 +155,11 @@ class GCSObjectStore:
             None
 
         Raises:
-            ValueError: Object exists with different content.
+            ObjectStoreConflict: Object exists with different content.
+            ServiceError: GCS failed (permission, outage).
         """
         blob = self.bucket.blob(key)
+        where = f"gs://{self.bucket_name}/{key}"
 
         try:
             # if_generation_match=0 tells GCS "only write if no
@@ -137,24 +169,36 @@ class GCSObjectStore:
             # uploaded, and both then thought they held a fresh key.
             # See: google.cloud.storage.blob.Blob#if_generation_match
             blob.upload_from_string(data, if_generation_match=0)
-            logger.debug(f"Writing object {key} ({len(data)} bytes)")
+            logger.debug("Wrote object %s (%d bytes)", key, len(data))
+            return
         except PreconditionFailed:
-            # Object already exists (created by us on a retry, or by
-            # a concurrent writer). Compare content to decide between
-            # idempotent success and a real conflict.
-            existing = blob.download_as_bytes()
-            if existing == data:
-                logger.debug(f"Object {key} already exists (idempotent)")
-                return
-            raise ValueError(
-                f"Object {key} exists with different content. "
-                f"Existing: {len(existing)} bytes, "
-                f"New: {len(data)} bytes"
-            ) from None
+            pass
+        except GoogleAPICallError as e:
+            raise ServiceError(f"Cannot write {where}: {e}") from e
+
+        # The object already exists (written by us on a retry, or by
+        # a concurrent writer). Compare hashes from its metadata to
+        # decide between idempotent success and a real conflict,
+        # rather than downloading what may be a large workbook.
+        try:
+            existing = self.bucket.get_blob(key)
+        except GoogleAPICallError as e:
+            raise ServiceError(f"Cannot read {where}: {e}") from e
+        if existing is None:
+            raise ServiceError(
+                f"{where} existed on write but is gone now; "
+                "something is deleting store objects"
+            )
+        if _same_content(existing, data):
+            logger.debug("Object %s already exists (idempotent)", key)
+            return
+        raise ObjectStoreConflict(
+            f"Object {where} exists with different content"
+        )
 
     @contextmanager
     def lock(self, key: str) -> Generator[None, None, None]:
-        """Acquire an exclusive write lock, or fail immediately.
+        """Acquire an exclusive write lease, or fail immediately.
 
         The lock is a small GCS object created with
         ``if_generation_match=0`` (atomic create-if-absent), so of any
@@ -162,16 +206,21 @@ class GCSObjectStore:
         trigger, a manual re-run, a retry - exactly one succeeds.
         Protection does not depend on how runs are started.
 
-        The lock never expires and is never stolen, as the
-        ObjectStore protocol requires. If a run dies without
-        releasing it (for example the container is killed), later
-        runs are refused until an operator has checked no run is
-        active and deleted the lock object named in the error.
+        The lock is a lease: it records when it expires
+        (lease_seconds after it was taken). A lock that has not
+        expired is never taken, so a live run is never robbed of it,
+        provided lease_seconds exceeds the job or service timeout.
+        A run killed without releasing its lock (Cloud Run timeout,
+        OOM, a deploy) no longer blocks every later run: once the
+        lease has expired the next run takes it over, logged at
+        WARNING with the old holder. The takeover is an overwrite
+        conditioned on the expired lock's generation, so when two
+        runs find the same expired lock only one gets it.
 
         The lock object records the holder (run ID, host, process ID,
-        UTC start time) so a refusal can say who holds it. On release
-        the object is deleted only if it is still the one this run
-        created.
+        UTC start and expiry) so a refusal can say who holds it. On
+        release the object is deleted only if it is still the one
+        this run wrote.
 
         Args:
             key (str): Lock identifier (e.g., "locks/<warehouse hash>").
@@ -180,48 +229,129 @@ class GCSObjectStore:
             None: Control while the lock is held.
 
         Raises:
-            RuntimeError: Another process holds the lock.
-            google.api_core.exceptions.GoogleAPICallError: GCS failed
-                for a reason other than the lock being held.
+            RuntimeError: Another run holds an unexpired lock, or took
+                over the expired one first.
+            ServiceError: GCS failed for a reason other than the lock
+                being held.
         """
         blob = self.bucket.blob(key)
+        now = _utcnow()
         holder = {
             "run_id": uuid.uuid4().hex,
             "host": socket.gethostname(),
             "pid": os.getpid(),
-            "acquired_at": datetime.now(timezone.utc).isoformat(),
+            "acquired_at": now.isoformat(),
+            "expires_at": (
+                now + timedelta(seconds=self.lease_seconds)
+            ).isoformat(),
         }
+        where = f"gs://{self.bucket_name}/{key}"
         try:
             blob.upload_from_string(json.dumps(holder), if_generation_match=0)
         except PreconditionFailed:
-            raise RuntimeError(
-                f"Lock {key} is held by another run: "
-                f"{self._describe_holder(key)}. If no run is active, "
-                f"delete gs://{self.bucket_name}/{key} and retry."
-            ) from None
+            self._take_over_if_expired(blob, key, holder, now)
+        except GoogleAPICallError as e:
+            raise ServiceError(f"Cannot create lock {where}: {e}") from e
 
         generation = blob.generation
-        logger.info(f"Acquired lock {key} (run_id={holder['run_id']})")
+        logger.info("Acquired lock %s (run_id=%s)", key, holder["run_id"])
         try:
             yield
         finally:
             self._release_lock(blob, key, generation)
 
-    def _describe_holder(self, key: str) -> str:
-        """Read the current lock holder for an error message.
+    def _take_over_if_expired(
+        self, blob: Any, key: str, holder: dict[str, Any], now: datetime
+    ) -> None:
+        """Take over an existing lock if, and only if, it has expired.
 
         Args:
+            blob (Any): Our lock blob (written on success).
             key (str): Lock identifier.
+            holder (dict[str, Any]): Our holder record.
+            now (datetime): Current UTC time.
+
+        Raises:
+            RuntimeError: The lock is live, unreadable, or another run
+                took it over first.
+            ServiceError: GCS failed.
+        """
+        where = f"gs://{self.bucket_name}/{key}"
+        try:
+            current = self.bucket.get_blob(key)
+            raw = None if current is None else current.download_as_bytes()
+        except NotFound:
+            current, raw = None, None
+        except GoogleAPICallError as e:
+            raise ServiceError(f"Cannot read lock {where}: {e}") from e
+
+        if current is None or raw is None:
+            # Released between our write and our read: try once more
+            # to create it, as a fresh acquire.
+            try:
+                blob.upload_from_string(
+                    json.dumps(holder), if_generation_match=0
+                )
+                return
+            except PreconditionFailed:
+                raise RuntimeError(
+                    f"Lock {key} is held by another run. If no run is "
+                    f"active, delete {where} and retry."
+                ) from None
+
+        expires = self._expiry(raw)
+        if expires is None or expires > now:
+            when = expires.isoformat() if expires else "an unknown time"
+            raise RuntimeError(
+                f"Lock {key} is held by another run: "
+                f"{raw.decode(errors='replace')}. It expires at {when}; "
+                f"if no run is active, delete {where} and retry."
+            )
+        try:
+            blob.upload_from_string(
+                json.dumps(holder), if_generation_match=current.generation
+            )
+        except PreconditionFailed:
+            raise RuntimeError(
+                f"Lock {key} had expired, but another run took it over "
+                "first"
+            ) from None
+        except GoogleAPICallError as e:
+            raise ServiceError(f"Cannot take over lock {where}: {e}") from e
+        logger.warning(
+            "Took over expired lock %s (expired %s) from %s",
+            key,
+            expires.isoformat(),
+            raw.decode(errors="replace"),
+        )
+
+    def _expiry(self, raw: bytes) -> datetime | None:
+        """When a stored lock expires, or None if that can't be told.
+
+        Locks written before leases (0.1.x) have no expires_at; they
+        expire lease_seconds after acquired_at.
+
+        Args:
+            raw (bytes): The lock object's content.
 
         Returns:
-            str: Holder details as stored, or a note that they could
-                not be read.
+            datetime | None: Expiry (UTC), or None if the lock is
+                unreadable, so it is never taken over. A time with no
+                time zone counts as unreadable: it can't be compared
+                safely, and guessing could take over a live lock.
         """
         try:
-            raw: bytes = self.bucket.blob(key).download_as_bytes()
-            return raw.decode()
-        except Exception as e:
-            return f"holder unreadable ({e})"
+            info = json.loads(raw)
+            if "expires_at" in info:
+                expires = datetime.fromisoformat(info["expires_at"])
+            else:
+                acquired = datetime.fromisoformat(info["acquired_at"])
+                expires = acquired + timedelta(seconds=self.lease_seconds)
+        except (ValueError, KeyError, TypeError):
+            return None
+        if expires.tzinfo is None:
+            return None
+        return expires
 
     def _release_lock(self, blob: Any, key: str, generation: int) -> None:
         """Delete the lock object if it is still the one we created.
@@ -239,13 +369,27 @@ class GCSObjectStore:
         """
         try:
             blob.delete(if_generation_match=generation)
-            logger.info(f"Released lock {key}")
+            logger.info("Released lock %s", key)
         except NotFound:
-            logger.warning(f"Lock {key} was already gone at release")
+            logger.warning("Lock %s was already gone at release", key)
         except PreconditionFailed:
             logger.error(
-                f"Lock {key} was replaced by another run; "
-                "not deleting it. Check for overlapping runs."
+                "Lock %s was replaced by another run; not deleting it. "
+                "Check for overlapping runs.",
+                key,
+            )
+        except Exception as e:
+            # Most likely a missing delete permission on locks/ (see
+            # docs/GCP_SETUP.md, section 3). The run's own work is
+            # done; the lock stays until its lease expires.
+            logger.error(
+                "Could not release lock %s (%s: %s); it stays until its "
+                "lease expires, or delete gs://%s/%s by hand.",
+                key,
+                type(e).__name__,
+                e,
+                self.bucket_name,
+                key,
             )
 
 
@@ -307,7 +451,7 @@ class GCSSource:
                 f"got {extensions!r}"
             )
         self.project_id = project_id
-        self.bucket_name = bucket_name.replace("gs://", "")
+        self.bucket_name = bucket_name.removeprefix("gs://")
         folder = prefix.strip("/")
         self.prefix = f"{folder}/" if folder else ""
         self.extensions = tuple(e.lower() for e in extensions)
@@ -347,8 +491,10 @@ class GCSSource:
         ]
         items.sort(key=lambda item: item.identity)
         logger.info(
-            f"Found {len(items)} file(s) in "
-            f"gs://{self.bucket_name}/{self.prefix}"
+            "Found %d file(s) in gs://%s/%s",
+            len(items),
+            self.bucket_name,
+            self.prefix,
         )
         return items
 
@@ -397,5 +543,37 @@ class GCSSource:
         except GoogleAPICallError as e:
             raise ServiceError(f"Cannot download {where}: {e}") from e
 
-        logger.debug(f"Downloaded {where} ({len(data)} bytes)")
+        logger.debug("Downloaded %s (%d bytes)", where, len(data))
         return data
+
+
+def _utcnow() -> datetime:
+    """The current UTC time (a seam for tests).
+
+    Returns:
+        datetime: Timezone-aware now.
+    """
+    return datetime.now(timezone.utc)
+
+
+def _same_content(blob: Any, data: bytes) -> bool:
+    """Whether a stored object holds exactly `data`, by its hashes.
+
+    GCS records an MD5 for objects uploaded in one piece (all of
+    ours) and a CRC32C for every object, both base64-encoded. MD5 is
+    preferred; CRC32C covers composite objects, which have no MD5.
+
+    Args:
+        blob (Any): Blob with metadata loaded (from get_blob()).
+        data (bytes): Bytes we tried to write.
+
+    Returns:
+        bool: True if the hashes match.
+    """
+    if blob.md5_hash:
+        md5 = base64.b64encode(hashlib.md5(data).digest()).decode()
+        return bool(blob.md5_hash == md5)
+    # google_crc32c is untyped; value() is its CRC32C as an int.
+    crc32c: Any = google_crc32c
+    raw = int(crc32c.value(data)).to_bytes(4, "big")
+    return bool(blob.crc32c == base64.b64encode(raw).decode())

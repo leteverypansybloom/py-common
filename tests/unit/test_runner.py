@@ -327,13 +327,21 @@ class TestHandleUpload:
         assert results == []
         was.run.assert_not_called()
 
-    def test_event_without_type_is_processed(self) -> None:
-        """A message with no eventType attribute still runs."""
+    def test_event_without_type_is_ignored(self) -> None:
+        """Only OBJECT_FINALIZE runs; GCS notifications always say so.
+
+        A message with no eventType attribute isn't a GCS upload
+        notification (perhaps mis-routed from another topic), so it
+        is acknowledged without a run (review L8).
+        """
         was = _pipeline(Outcome.LOADED)
 
-        handle_upload(_event("was/x.xlsx", event_type=None), {"was/": was})
+        results = handle_upload(
+            _event("was/x.xlsx", event_type=None), {"was/": was}
+        )
 
-        was.run.assert_called_once()
+        assert results == []
+        was.run.assert_not_called()
 
     def test_failed_file_raises_for_redelivery(self) -> None:
         """A FAILED file raises, so Pub/Sub delivers the event again."""
@@ -417,14 +425,32 @@ class TestCheckFreshness:
         assert "FROM `p.raw_hww.source_freshness`" in sql
         assert "WHERE overdue" in sql
 
-    def test_backtick_in_view_is_rejected(self) -> None:
-        """A view name can't close the quoted identifier."""
+    @pytest.mark.parametrize(
+        "view",
+        [
+            "p.d.v` OR TRUE --",
+            "p.d",
+            "p.d.v.x",
+            "p.d.v WHERE 1=1",
+            "p.d.v;DROP",
+            "",
+        ],
+    )
+    def test_view_must_be_project_dataset_view(self, view: str) -> None:
+        """Only project.dataset.view, of word characters and hyphens."""
         client = _client()
 
-        with pytest.raises(ValueError, match="must not contain"):
-            check_freshness(client, "p.d.v` OR TRUE --")
+        with pytest.raises(ValueError, match="project.dataset.view"):
+            check_freshness(client, view)
 
         client.query.assert_not_called()
+
+    def test_hyphenated_project_is_accepted(self) -> None:
+        client = _client()
+
+        check_freshness(client, "phw-prod-1.raw_hww.source_freshness")
+
+        client.query.assert_called_once()
 
     def test_query_error_propagates(self) -> None:
         """A check that couldn't run isn't reported as nothing due."""

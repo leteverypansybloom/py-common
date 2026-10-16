@@ -5,8 +5,10 @@
 
 repos:
   # Code formatting
+  # Hook versions match what CI installs from the dev extra, so a
+  # commit that passes here passes CI (REVIEW_.md L7).
   - repo: https://github.com/psf/black
-    rev: 23.9.1
+    rev: 26.10.1
     hooks:
       - id: black
         language_version: python3.11
@@ -14,17 +16,22 @@ repos:
 
   # Linting
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.1.0
+    rev: v0.17.0
     hooks:
-      - id: ruff
+      - id: ruff-check
         args: ["--line-length=79", "--select=E,F,W"]
 
   # Type checking
   - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.5.0
+    rev: v2.4.0
     hooks:
       - id: mypy
-        additional_dependencies: ["types-PyYAML"]
+        # Same scope as CI (mypy src/py_common --strict); tests are
+        # not written to strict typing.
+        files: ^src/py_common/
+        # The Google libraries aren't installed here; pyproject's
+        # mypy overrides cover them.
+        additional_dependencies: ["types-PyYAML", "types-openpyxl", "types-requests"]
         args: ["--strict"]
 
   # Secret detection

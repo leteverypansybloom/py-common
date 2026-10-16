@@ -12,7 +12,8 @@ testable offline and the output is a function of its inputs alone.
 
 import json
 import math
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
+from decimal import Decimal
 from typing import Any
 
 from py_common.contract import SheetRows
@@ -36,7 +37,11 @@ def json_value(value: Any) -> Any:
     - None, text, booleans and finite numbers are kept as they are.
     - A date and time becomes "YYYY-MM-DDTHH:MM:SS", a date
       "YYYY-MM-DD" and a time "HH:MM:SS" (ISO 8601). Excel stores
-      no time zone, so none is added.
+      no time zone, so none is added; a date and time that does
+      carry one (openpyxl never gives one today) is converted to
+      UTC first, so the output never has an offset.
+    - A Decimal becomes a JSON number: an integer if it is whole,
+      otherwise a float.
     - A duration becomes an ISO 8601 duration in seconds, e.g.
       "PT5400S".
     - Anything else becomes text.
@@ -51,7 +56,15 @@ def json_value(value: Any) -> Any:
         return None
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            return None
+        return (
+            int(value) if value == value.to_integral_value() else float(value)
+        )
     # datetime is a subclass of date, so it must be checked first.
+    if isinstance(value, datetime) and value.tzinfo is not None:
+        value = value.astimezone(timezone.utc).replace(tzinfo=None)
     if isinstance(value, (datetime, date, time)):
         return value.isoformat()
     if isinstance(value, timedelta):

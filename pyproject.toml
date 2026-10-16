@@ -4,17 +4,22 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "py-common"
-version = "0.1.0"
+version = "0.2.0"
 description = "Shared ingestion library for Excel → Cloud workflows"
 readme = "README.md"
 license = {text = "MIT"}
 authors = [{name = "Public Health Wales", email = "eoinvondy@gmail.com"}]
 requires-python = ">=3.11"
+# Upper bounds stop a fresh install pulling in a major version the
+# code was never tested against (review finding M14). Lower bounds
+# exclude releases with known advisories (pip-audit; REVIEW_.md M3).
+# defusedxml: openpyxl only guards against XML entity attacks in
+# uploaded workbooks when it is installed (REVIEW_.md M2).
 dependencies = [
-    "openpyxl>=3.0.0",
-    "pyyaml>=6.0",
-    "pandas>=2.0.0",
-    "pyarrow>=15.0.0",
+    "openpyxl>=3.1,<4",
+    "pyyaml>=6.0,<7",
+    "pyarrow>=23.0.1,<27",
+    "defusedxml>=0.7.1,<1",
 ]
 
 [project.optional-dependencies]
@@ -29,21 +34,25 @@ dev = [
     # mypy --strict needs type stubs for untyped runtime deps, or it
     # stops at the import line before checking any real code.
     "types-PyYAML>=6.0",
-    "pandas-stubs>=2.0.0",
+    # Tests read Parquet back with pandas; the library itself writes
+    # it with pyarrow and a contract-typed schema.
+    "pandas>=2.0,<3",
+    "pandas-stubs>=2.0,<3",
     "types-openpyxl>=3.0.0",
     "types-requests>=2.31.0",
     # SharePoint adapter unit tests import requests (for its
     # exception types) even though they never touch the network.
-    "requests>=2.31.0",
+    "requests>=2.33.0,<3",
 ]
 gcp = [
-    "google-cloud-storage>=2.10.0",
-    "google-cloud-bigquery>=3.13.0",
+    "google-cloud-storage>=2.10,<4",
+    "google-cloud-bigquery>=3.13,<4",
+    "google-api-core>=2.11,<3",
 ]
 # Authentication is injected (see adapters/sharepoint.py), so no
 # identity library is pinned here until IT approves a credential flow.
 sharepoint = [
-    "requests>=2.31.0",
+    "requests>=2.33.0,<3",
 ]
 
 [tool.setuptools.packages.find]
@@ -55,6 +64,8 @@ target-version = ["py311"]
 
 [tool.ruff]
 line-length = 79
+
+[tool.ruff.lint]
 select = ["E", "F", "W"]
 
 [tool.mypy]
@@ -71,6 +82,20 @@ follow_imports_for_stubs = true
 [[tool.mypy.overrides]]
 module = ["numpy", "numpy.*"]
 follow_imports = "skip"
+ignore_missing_imports = true
+
+# The Google Cloud client libraries (and google-crc32c) ship without
+# type information, so mypy --strict would stop at the import line
+# (review finding M14). "google" itself is listed for environments
+# without them, such as the pre-commit hook's (REVIEW_.md L7).
+[[tool.mypy.overrides]]
+module = [
+    "google",
+    "google.*",
+    "google_crc32c",
+    "pyarrow",
+    "pyarrow.*",
+]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

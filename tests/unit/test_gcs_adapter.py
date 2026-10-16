@@ -9,9 +9,12 @@ RAP Principles:
 - Transparent: No hardcoded secrets; mocks are explicit
 """
 
+import base64
+import hashlib
 import json
 
 import pytest
+from _fake_gcs import FakeBucket
 from unittest.mock import Mock, MagicMock, patch
 
 from google.api_core.exceptions import (
@@ -22,8 +25,26 @@ from google.api_core.exceptions import (
 
 from py_common.adapters.gcs import GCSObjectStore, GCSSource
 from py_common.errors import NotFound as ItemNotFound
-from py_common.errors import ServiceError, VersionMismatch
+from py_common.errors import (
+    ObjectStoreConflict,
+    ServiceError,
+    VersionMismatch,
+)
 from py_common.model import SourceItem
+
+
+def _stored(data: bytes) -> Mock:
+    """Metadata of an existing object holding `data`, as get_blob gives.
+
+    Args:
+        data: The object's bytes.
+
+    Returns:
+        Mock blob with a base64 md5_hash, like GCS's.
+    """
+    blob = Mock()
+    blob.md5_hash = base64.b64encode(hashlib.md5(data).digest()).decode()
+    return blob
 
 
 class TestGCSObjectStoreInit:
@@ -88,7 +109,8 @@ class TestGCSObjectStoreGet:
     """Test GCSObjectStore.get() method.
 
     Contract: get(key) returns bytes if object exists, None if not.
-    Never raises on missing object.
+    Never raises on missing object; any other failure raises
+    ServiceError (see test_object_store_contract.py).
     """
 
     @pytest.fixture
@@ -142,7 +164,7 @@ class TestGCSObjectStoreGet:
             AssertionError: If get() does not return None
         """
         blob = Mock()
-        blob.download_as_bytes.side_effect = Exception("Blob not found")
+        blob.download_as_bytes.side_effect = NotFound("Blob not found")
         mock_bucket.blob.return_value = blob
 
         result = store.get("missing-key")
@@ -163,7 +185,7 @@ class TestGCSObjectStoreGet:
             AssertionError: If debug log not captured
         """
         blob = Mock()
-        blob.download_as_bytes.side_effect = Exception("Not found")
+        blob.download_as_bytes.side_effect = NotFound("Not found")
         mock_bucket.blob.return_value = blob
 
         with patch("py_common.adapters.gcs.logger") as mock_logger:
@@ -177,7 +199,8 @@ class TestGCSObjectStorePut:
 
     Critical contract (idempotent and safe):
     - put(k, d) twice with same key and data must succeed both times
-    - put(k, d1); put(k, d2) with d1 != d2 must raise ValueError
+    - put(k, d1); put(k, d2) with d1 != d2 must raise
+      ObjectStoreConflict
     """
 
     @pytest.fixture
@@ -265,8 +288,8 @@ class TestGCSObjectStorePut:
         blob.upload_from_string.side_effect = PreconditionFailed(
             "generation exists"
         )
-        blob.download_as_bytes.return_value = b"data"
         mock_bucket.blob.return_value = blob
+        mock_bucket.get_blob.return_value = _stored(b"data")
 
         # Call put twice with same key and data
         store.put("existing-key", b"data")
@@ -277,7 +300,7 @@ class TestGCSObjectStorePut:
         assert blob.upload_from_string.call_count == 2
 
     def test_put_raises_on_conflict(self, store, mock_bucket):
-        """put() raises ValueError when data differs (prevent corruption).
+        """put() raises ObjectStoreConflict when data differs.
 
         Args:
             store: GCSObjectStore fixture
@@ -287,16 +310,16 @@ class TestGCSObjectStorePut:
             None
 
         Raises:
-            AssertionError: If ValueError not raised on conflict
+            AssertionError: If ObjectStoreConflict not raised
         """
         blob = Mock()
         blob.upload_from_string.side_effect = PreconditionFailed(
             "generation exists"
         )
-        blob.download_as_bytes.return_value = b"old data"
         mock_bucket.blob.return_value = blob
+        mock_bucket.get_blob.return_value = _stored(b"old data")
 
-        with pytest.raises(ValueError, match="different content"):
+        with pytest.raises(ObjectStoreConflict, match="different content"):
             store.put("existing-key", b"new data")
 
     def test_put_logs_debug_on_write(self, store, mock_bucket):
@@ -321,47 +344,6 @@ class TestGCSObjectStorePut:
             assert mock_logger.debug.called
 
 
-class _FakeBlob:
-    """In-memory stand-in for a GCS blob with generation checks."""
-
-    def __init__(self, objects, key):
-        self._objects = objects
-        self._key = key
-        self.generation = None
-
-    def upload_from_string(self, data, if_generation_match=None):
-        exists = self._key in self._objects
-        if if_generation_match == 0 and exists:
-            raise PreconditionFailed("exists")
-        gen = self._objects.get(self._key, (None, 0))[1] + 1
-        raw = data.encode() if isinstance(data, str) else data
-        self._objects[self._key] = (raw, gen)
-        self.generation = gen
-
-    def download_as_bytes(self):
-        if self._key not in self._objects:
-            raise NotFound("missing")
-        return self._objects[self._key][0]
-
-    def delete(self, if_generation_match=None):
-        if self._key not in self._objects:
-            raise NotFound("missing")
-        current = self._objects[self._key][1]
-        if if_generation_match not in (None, current):
-            raise PreconditionFailed("generation changed")
-        del self._objects[self._key]
-
-
-class _FakeBucket:
-    """In-memory stand-in for a GCS bucket."""
-
-    def __init__(self):
-        self.objects = {}
-
-    def blob(self, key):
-        return _FakeBlob(self.objects, key)
-
-
 class TestGCSObjectStoreLock:
     """Test GCSObjectStore.lock() context manager.
 
@@ -377,7 +359,7 @@ class TestGCSObjectStoreLock:
     @pytest.fixture
     def bucket(self):
         """Fixture: in-memory fake bucket."""
-        return _FakeBucket()
+        return FakeBucket()
 
     @pytest.fixture
     def store(self, bucket):
@@ -617,8 +599,8 @@ class TestGCSObjectStoreLock:
                 pass
         mock_logger.error.assert_called_once()
 
-    def test_unexpected_gcs_error_on_acquire_propagates(self, store):
-        """Non-conflict GCS errors are not disguised as 'lock held'.
+    def test_unexpected_gcs_error_on_acquire_is_service_error(self, store):
+        """Non-conflict GCS errors are ServiceError, not 'lock held'.
 
         Args:
             store: GCSObjectStore fixture
@@ -633,7 +615,7 @@ class TestGCSObjectStoreLock:
         blob.upload_from_string.side_effect = Forbidden("no access")
         store.bucket = MagicMock()
         store.bucket.blob.return_value = blob
-        with pytest.raises(Forbidden):
+        with pytest.raises(ServiceError, match="no access"):
             with store.lock("locks/abc"):
                 pass
 

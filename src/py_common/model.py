@@ -7,11 +7,11 @@ Audit: Record of an attempt for compliance and debugging.
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from hashlib import sha256
 
 
-class Outcome(str, Enum):
+class Outcome(StrEnum):
     """Result of processing a single file."""
 
     LOADED = "loaded"
@@ -51,6 +51,8 @@ class Result:
         warehouse_key: Reference in final table (empty if skipped).
         warnings: Problems tolerated by a worksheet whose
             on_mismatch is "warn"; the file still loaded.
+        processed_key: Object store key of the converted copy given
+            to the warehouse (empty if the file got no further).
     """
 
     item: SourceItem
@@ -61,6 +63,7 @@ class Result:
     processing_time_seconds: float
     warehouse_key: str = ""
     warnings: list[str] = field(default_factory=list)
+    processed_key: str = ""
 
 
 def digest(data: bytes) -> str:
@@ -81,7 +84,10 @@ class AuditRecord:
 
     Stored in warehouse audit table or audit log file. `warehouse` is
     the destination's identity, since one file can feed several
-    pipelines.
+    pipelines. `processed_key` is the converted copy that was loaded,
+    `contract_fingerprint` the contract it was converted with
+    (Contract.fingerprint()) and `py_common_version` the library
+    version that did it, so every load can be traced to its inputs.
     """
 
     timestamp: datetime
@@ -96,3 +102,6 @@ class AuditRecord:
     warehouse_key: str
     warnings: list[str] = field(default_factory=list)
     warehouse: str = ""
+    processed_key: str = ""
+    contract_fingerprint: str = ""
+    py_common_version: str = ""

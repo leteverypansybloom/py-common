@@ -43,7 +43,7 @@ python -m pre_commit install
 ```
 
 **Why `gcp` is included:** the unit tests for `GCSObjectStore` and
-`gcp_auth` import `google.cloud` directly (mocking the calls, not the
+`BigQueryWarehouse` import `google.cloud` directly (mocking the calls, not the
 import), so with `.[dev]` alone `pytest` fails to collect them. No GCP
 credentials are needed — only the libraries. The optional groups in
 `pyproject.toml` are `dev`, `gcp` and `sharepoint`; there is no `all`
@@ -166,6 +166,12 @@ always names the exact rule that failed, which is what makes a
 quarantined file something a data owner can act on without reading
 Python.
 
+In production, also set `file_name` to the name the workbook is
+always uploaded under, e.g. `Contract(..., file_name="events.xlsx")`.
+py-common tracks a source by its file name, so a file under any
+other name is rejected before it is parsed (see
+[`RAW_TABLE_LAYOUT.md`](RAW_TABLE_LAYOUT.md)).
+
 ## 5. Wire your first pipeline
 
 There's no `Warehouse` you can plug in without cloud credentials (see
@@ -198,8 +204,11 @@ class FakeWarehouse:
     def identity(self):
         return "fake-warehouse"
 
-    def load(self, key, checksum, data, rows):
+    def load(self, key, checksum, data, rows, item):
+        # A real warehouse checks its own audit table and returns
+        # False if this file was already loaded there.
         self.loaded.append((key, checksum, rows))
+        return True
 
 
 contract = Contract(
@@ -246,13 +255,15 @@ hww_repeated_other.xlsx quarantined 0
 
 - a `raw/` copy of every file, even the quarantined ones;
 - a `quarantine/` copy of the ten rejected ones;
-- `processed/fake-warehouse/events_valid.xlsx/<checksum>/events_valid.xlsx.parquet`;
+- `processed/fake-warehouse/events_valid.xlsx/<checksum>/<version>/<digest>/events_valid.xlsx.parquet`;
 - one JSON audit record per file under `audit/records/`.
 
 Stored copies are keyed `{identity}/{checksum}/{name}`, so an edited
 file lands next to its earlier version rather than clashing with it.
 Processed copies are also keyed by the warehouse's `identity`, so
-pipelines reading different sheets of one workbook don't clash.
+pipelines reading different sheets of one workbook don't clash, and
+by the upload's version and a digest of the converted bytes, so
+converting a file again after a contract change writes a new copy.
 
 ### The raw JSON route
 
@@ -299,13 +310,17 @@ The same flow is covered by the unit tests in
 ## 6. What a re-run does
 
 Run the same `pipeline.run()` again over the same folder. Expect
-`events_valid.xlsx` to come back `skipped` — its checksum was recorded
-under `audit/{warehouse identity}/{checksum}` the first time it loaded
-(`Pipeline._audit()`),
-and `Pipeline.process()` checks that marker before re-validating
-(`Pipeline._is_duplicate()`). The ten quarantined files, by contrast,
-come back `quarantined` again, every time — a checksum marker is only
-written on a `LOADED` outcome, so a file that fails validation is
+`events_valid.xlsx` to come back `skipped`. When it loaded, a marker
+for that upload (the file's identity and version) was written under
+`audit/{warehouse identity}/versions/...` (`Pipeline.process()`), and
+the next run checks that marker before downloading the file
+(`Pipeline._is_duplicate()`). The marker is only a cache: if it is
+missing, a real warehouse's `load()` finds the upload in its own
+audit table and returns `False`, and the file is still `skipped`.
+Saving the file again (a new version) loads it again. The ten
+quarantined files, by contrast, come back `quarantined` again, every
+time — a marker is only written once an upload loads, so a file that
+fails validation is
 re-read and re-validated on every run until it's fixed or removed from
 the source. This is deliberate (see `DECISIONS_en.md`, "Validation
 errors quarantine, not fail") but worth knowing before you wonder why a

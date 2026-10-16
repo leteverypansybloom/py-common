@@ -78,8 +78,9 @@ class ObjectStore(Protocol):
         """Acquire exclusive write lock on key.
 
         Used to prevent concurrent writers when staging to
-        the warehouse. Lock must not auto-expire or steal
-        from long-running processes.
+        the warehouse. Never taken from a live holder. A lock may
+        be a lease that a later run takes over once it has expired
+        (GCSObjectStore), provided the lease outlasts any run.
 
         Args:
             key: Identifier for the lock (e.g., warehouse ID).
@@ -95,9 +96,25 @@ class ObjectStore(Protocol):
 
 
 class Warehouse(Protocol):
-    """Stage, validate and transactionally append data.
+    """Transactionally load one file's rows plus an audit record.
 
     Examples: BigQuery, Snowflake, PostgreSQL.
+
+    Pipeline decides what happens to a file from the type of error
+    load() raises, so implementations must use these types:
+
+    - ServiceError: the warehouse failed and nothing was committed
+      (permission, quota, outage, a job reported as failed). The file
+      is FAILED and retried.
+    - IndeterminateCommitError: it is unknown whether the commit
+      happened (e.g. the connection dropped while waiting). The file
+      is FAILED and retried.
+    - ValidationError (including ContractError): the file's data
+      can't be loaded as it is (e.g. duplicate merge keys). The file
+      is QUARANTINED and not retried.
+
+    Any other exception is treated as FAILED too, but is a bug in
+    the adapter: map it to one of the types above.
     """
 
     @property
@@ -114,25 +131,32 @@ class Warehouse(Protocol):
         checksum: str,
         data: bytes,
         rows: int,
-    ) -> None:
-        """Atomically commit data or fail; never partial writes.
+        item: SourceItem,
+    ) -> bool:
+        """Atomically commit the data and its audit record, or neither.
 
-        Steps:
-        1. Load data into staging table (truncate before each run)
-        2. Verify row count matches expectation
-        3. Merge or append into final table on contract key columns
-        4. Record audit entry with checksum and row count
-        5. Commit transaction or roll back everything
+        Must be idempotent: if the warehouse's own audit record shows
+        this file already loaded here, write nothing and return
+        False. The check belongs inside the commit transaction, so a
+        retry after a commit whose confirmation was lost is safe
+        whatever the object store's marker says.
 
         Args:
-            key: Unique identifier for this load (filename or ID).
-            checksum: SHA-256 of data for duplicate detection.
-            data: Parquet bytes to load.
-            rows: Expected row count; verify before committing.
+            key: Unique identifier for this load. Pipeline derives it
+                from the source identity and checksum.
+            checksum: SHA-256 of the source file.
+            data: Converted bytes to load (Parquet or NDJSON).
+            rows: Expected row count; verified before committing.
+            item: Source file the data came from (for its version).
+
+        Returns:
+            True if the data was written, False if it had already
+            been loaded.
 
         Raises:
-            ValueError: Row count mismatch or schema error.
-            RuntimeError: Cannot acquire write lock.
+            ServiceError: Nothing was committed; safe to retry.
+            IndeterminateCommitError: Commit state unknown.
+            ValidationError: The data itself can't be loaded.
         """
         ...
 

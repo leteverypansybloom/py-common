@@ -138,7 +138,7 @@ time*, but the problem still has to be caught later.
 | **Is the bad month's data kept?** | Yes, in BigQuery, so it can be queried | Yes, as the original file in the GCS `raw/` and `quarantine/` folders, but not in BigQuery |
 | **Effect on the visualisation** | Out of date if the assertion stops the refresh. Silently wrong if the assertion misses something | Out of date (last good month) until the file is fixed. Never silently wrong |
 | **Who finds out, and when** | Whoever looks at Dataform's assertion failures, possibly days later | The file owner can be told immediately with exact errors, once alerting is added (see below) |
-| **Deduplication / reloads** | Each new version of a file is appended; the SQL keeps only the latest version | Exact repeat files are skipped by checksum. Rows are updated by key columns, so no duplicates |
+| **Deduplication / reloads** | Each new version of a file is appended; the SQL keeps only the latest version | Each upload loads once; a new upload always loads. Rows are updated by key columns, so no duplicates |
 | **Audit trail** | Load job logs only | Audit record written in the same transaction as the data |
 | **Effort to build** | New Cloud Run service, Eventarc, Dataform repository, SQL checks for each table | Mostly built already. Needs one contract per table |
 | **Copes with frequent or deliberate schema changes** | Very well, which is its main strength | Poorly: every change means editing the contract |
@@ -179,15 +179,16 @@ instead. Of the gaps listed at the time:
   file.
 - **Raw tables are created by the code**, partitioned by day.
 
-Two gaps remain, for the typed route only:
+Two former gaps of the typed route are closed in 0.2.0:
 
-- **An integer column with a blank cell may fail at the merge.**
-  pandas would likely turn that column into decimals, and BigQuery
-  won't insert decimals into an INT64 column. This hasn't been run
-  yet; test it with the `events_missing_value` fixture against a
-  nullable integer column.
-- **The final typed tables are not created by the code.** They have
-  to be created with their schema beforehand.
+- **Column types come from the contract.** Parquet is written with
+  the schema the contract declares (`py_common.parquet`), so an
+  integer column with blanks stays INT64, and a value that doesn't
+  fit a "warn" column loads as NULL with a warning.
+- **The final typed table is created by the code** from the staging
+  schema if it doesn't exist. A new column is added; a column whose
+  type changed or that disappeared quarantines the file with the
+  difference listed.
 
 ---
 
@@ -203,10 +204,10 @@ than the choice between JSON and typed columns.
 - **Excel can't hold that much.** A worksheet holds at most 1,048,576
   rows, so this data would arrive as CSV or similar, or as several
   files. py-common's contract check only reads Excel.
-- **It's slow and memory-hungry.** The workbook is loaded fully into
-  memory, then parsed a second time to create the Parquet file.
-  Validation checks each cell in a Python loop, and pandas then
-  builds a 6M-row table in memory. Expect very long runs and many GB
+- **It's slow and memory-hungry.** The workbook is parsed once,
+  read-only, but every row is still held in memory, validation
+  checks each cell in a Python loop, and the converter then builds a
+  6M-row table in memory. Expect very long runs and many GB
   of memory, if it fits at all.
 - **One bad row rejects the whole file.** With 50 rows a month,
   fixing a file by hand is quick. With 6M rows a day, a few bad rows
@@ -284,7 +285,7 @@ One approach doesn't have to fit every feed:
   Its row-by-row Python reading is fine at these volumes.
 - **Large feeds:** the same raw table layout and Dataform checks, but
   not py-common's Excel reading. Reuse py-common's outer parts if
-  useful (finding source files, skipping repeats by checksum, keeping
+  useful (finding source files, loading each upload once, keeping
   the original file, the audit trail and the run lock), and load with
   a BigQuery load job straight from the file (steps 1–4 above).
 

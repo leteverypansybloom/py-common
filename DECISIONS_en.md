@@ -8,6 +8,85 @@ Entries are not rewritten once made. When a decision changes, add a
 new dated entry saying which earlier entry it replaces, and mark the
 earlier entry as superseded.
 
+## 2026-10-16 — The open review items (REVIEW_.md H1–H3, M4, M6, M10, M12)
+
+Taken with the data owner's answers: production files always reach
+the pipeline through the GCS landing bucket (SharePoint files are
+copied there first); both load routes are in use; and each of the
+three cumulative workbooks keeps one file name and its own landing
+folder.
+
+### A source is tracked by its agreed file name (H1)
+
+The raw tables' "latest upload" and the typed route's deleted-row
+marking both work per file name, so a copy under another name became
+a second "latest" upload. Rather than add a "feed" above the file
+name (and columns to every raw row), `Contract.file_name` states the
+agreed name, and any other name is quarantined before parsing, with
+the expected name in the message. Renaming a workbook is a deliberate
+change with a clean-up step (`docs/RUNBOOK.md`). The raw table layout
+is unchanged.
+
+### Uploads are ordered by GCS generation (M6)
+
+Only GCS versions (generations) are numbers that grow with each
+upload. As every production file arrives through the landing bucket,
+the "latest upload" query keeps ordering by generation, and nothing
+was built for other sources (`docs/RAW_TABLE_LAYOUT.md` says so).
+
+### Converted copies are keyed by upload and content (H2)
+
+Supersedes the `processed/` part of "Stored copies are keyed by
+identity and checksum" (2026-09-30). A processed copy was keyed by the
+source file's checksum alone, so converting the same file again with
+a different result (a contract fix, a pyarrow upgrade) broke the
+store's write-once rule and failed on every retry. The key now adds
+the upload's version and a digest of the converted bytes. A digest of
+the output, rather than a list of the settings behind it, can't miss
+whatever changed. Audit records name the copy, the contract
+(`Contract.fingerprint()`) and the py-common version.
+
+### Typed column names are made BigQuery-safe (M4)
+
+Headings became column names as written, and one BigQuery refuses
+failed the file on every retry. Fixed rules now convert them
+(`py_common.parquet.column_name()`; README, "Typed column names"):
+`Date of Enquiry` becomes `date_of_enquiry`. Not chosen: quarantining
+such files (the data waits until someone renames a heading), or a
+BigQuery name for every contract column (more to write and keep in
+step). Contracts, key columns and raw JSON keys keep the headings.
+
+### A double load is detected, not prevented (H3)
+
+Two commits of one upload running at once could both pass the
+in-transaction "already loaded?" check. That needs a commit still
+running ten minutes after the pipeline stopped waiting, overlapping
+its retry: unlikely for small monthly files. So rather than resumable
+commits with predictable job IDs, the raw "latest upload" query reads
+one load per upload, a second typed commit merges the same values,
+and `runner.check_duplicate_loads()` alerts if it ever happens.
+Revisit if that alert fires.
+
+### Reprocessing is an upload, not a command (M12)
+
+Every new upload loads, and each upload of a cumulative workbook holds
+its full history. Uploading a file again therefore reloads it with the
+current contract, and restoring an earlier GCS version undoes a bad
+upload; a replay command would add nothing for these files.
+`docs/RUNBOOK.md` gives the steps, including removing an upload
+completely, by hand.
+
+### BigQuery is tested for real, nightly (M10)
+
+Nothing checked that BigQuery does what the SQL intends, and a dry run
+can't reach the statements inside the commit script's `IF` blocks.
+`tests/integration/test_bigquery_live.py` runs both warehouses in a
+test dataset, from GitHub Actions nightly and on demand, signing in
+through Workload Identity Federation (no stored key) as a service
+account limited to that dataset. It doesn't run on pull requests, so
+their code never gets the credentials. No emulator: BigQuery's
+scripts and transactions are what most need checking.
+
 ## 2026-10-15 — Runner helpers for scheduled and upload-triggered runs
 
 ### A run with a FAILED file fails
@@ -88,6 +167,11 @@ at any time.
 
 ### Loaded markers and processed copies are kept per destination
 
+*Superseded in part by 0.2.0: markers are now kept per upload,
+`audit/{warehouse identity}/versions/{sha256(identity)}/{version}`,
+and are only a cache for the warehouse's own audit check. See
+"Warehouse.load() is idempotent (0.2.0)".*
+
 The "already loaded" marker moves from `audit/{checksum}` to
 `audit/{warehouse identity}/{checksum}`, and processed copies from
 `processed/{identity}/{checksum}/...` to
@@ -136,8 +220,10 @@ but never loaded. In `listed` mode only the contract's columns are
 loaded, and an excluded column is not counted as unexpected. In
 `all_except` mode every column except the excluded ones is loaded,
 so a column added to a form is picked up without a contract change.
-`Contract.extract()` applies the selection; the Parquet conversion
-now uses it rather than reading the sheet itself.
+`Contract.read()` validates and applies the selection in one
+read-only parse (0.2.0; `validate()` and `extract()` remain as thin
+wrappers), and the conversion uses its rows rather than reading the
+sheet itself.
 
 Most HWW sources hold far more columns than the analysis needs,
 including names, email addresses and contact details. Loading every
@@ -176,6 +262,10 @@ and the names are the same on every run of the same layout.
 ## 2026-09-30 — Real GCS lock; SharePoint adapter; versioned storage keys; `_loaded_at` set by BigQuery
 
 ### GCSObjectStore.lock() is a real lock, not a no-op
+
+*Superseded in part by 0.2.0: the lock is now a lease, which a later
+run takes over once it has expired (`GCSObjectStore(lease_seconds=)`,
+docs/GCP_SETUP.md section 5), so the trade-off below no longer holds.*
 
 Replaces the earlier position, recorded in the README "Concurrency"
 section, that the lock could be a no-op because one Cloud Scheduler
@@ -222,6 +312,10 @@ maintain. Benefit: they are small, visible and fully unit-tested.
 
 ### Stored copies are keyed by identity and checksum
 
+*Superseded in part on 2026-10-16: `processed/` keys also have the
+upload's version and a digest of the converted bytes. See "Converted
+copies are keyed by upload and content".*
+
 `raw/`, `quarantine/` and `processed/` keys are now
 `{identity}/{checksum}/{name}` instead of `{identity}`. Before, a file
 edited in place (same identity, new bytes) collided with its earlier
@@ -248,8 +342,8 @@ sets `_loaded_at` inside the commit transaction, to the audit record's
 timestamp. Matched rows get it refreshed on update. A source column
 named `_loaded_at` is refused.
 
-**Trade-off**: Parquet is only byte-identical while the pandas and
-pyarrow versions stay the same; upgrading them between a failed load
+**Trade-off**: Parquet is only byte-identical while the pyarrow
+version stays the same; upgrading them between a failed load
 and its retry can still cause one conflict. `_loaded_at` now means
 "committed to BigQuery" rather than "converted". Benefit: failed loads
 retry cleanly, and each row's `_loaded_at` joins to its audit entry.
@@ -409,7 +503,55 @@ The warehouse.load() method either:
 Or: Raises exception and rolls back everything. No partial writes.
 
 **Benefit**: Guarantee: if load() succeeds, the data is committed
-and audited. If it raises, nothing was written.
+and audited. If it raises ServiceError, nothing was written; if it
+raises IndeterminateCommitError, the outcome is unknown.
+
+### Parquet types come from the contract (0.2.0)
+
+The typed route used to let pandas infer each Parquet column's type
+from the values. A "warn" worksheet with `1` and `"NA"` in one column
+then failed conversion (`ArrowInvalid`) and was retried forever, and
+a column empty this month was staged with a different type than last
+month. `py_common.parquet.to_parquet()` now writes the schema the
+contract declares (undeclared "all_except" columns as strings) and
+loads a value that doesn't fit as NULL, with a warning.
+`BigQueryWarehouse` compares the staged schema with the final table:
+it creates a missing final table, adds new nullable columns, and
+quarantines a file whose column types changed or columns disappeared.
+
+### Warehouse.load() is idempotent (0.2.0)
+
+Steps 3-4 run only if the audit table has no `LOADED` row for this
+destination and file, checked inside the same transaction; otherwise
+load() writes nothing and returns False. The object store's "loaded"
+marker is written after the commit, so a crash, timeout or store
+error between the two used to mean a second load on retry (review
+C2). Now the warehouse's own audit table, committed atomically with
+the data, is the authority and the marker is only a cache.
+
+Both routes identify a file by identity + version (the upload),
+not its bytes, so restoring an earlier upload loads it again; and
+each destination table is checked and audited on its own, so adding
+a table to a raw pipeline loads only that table. See
+docs/RAW_TABLE_LAYOUT.md.
+
+### Deleted rows are marked, not removed (0.2.0)
+
+Cumulative files (each upload has every current row) can drop rows.
+`BigQueryWarehouse(mark_deleted_rows=True)` sets `_deleted_at` on
+rows that came from a file (`_source_file`) and aren't in its newest
+upload, and clears it if they come back. Rows are kept so history
+and audit stay intact; consumers filter `_deleted_at IS NULL`.
+Scoping to the source file lets several files feed one table without
+one file "deleting" another's rows.
+
+### Empty sheets are rejected by default (0.2.0)
+
+An empty upload usually means an export went wrong, and on the raw
+route it would leave the previous upload's rows looking current; on
+a typed table with `mark_deleted_rows` it would mark everything
+deleted. So a sheet with no rows quarantines the file unless its
+contract sets `allow_empty=True`.
 
 ### RAP Principles: Reproducibility
 
@@ -425,7 +567,8 @@ and audited. If it raises, nothing was written.
   checksum, row count, and outcome
 - Audit entries include errors for failed attempts
 - Audit records cannot be modified (append-only)
-- Audit is queryable by checksum (detects re-runs)
+- Audit is queryable by destination table, load key and source
+  version (how re-runs are detected)
 
 ### RAP Principles: Transparency
 

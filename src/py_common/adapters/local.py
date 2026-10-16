@@ -8,14 +8,37 @@ docs/GETTING_STARTED.md shows a small in-memory fake.
 """
 
 import logging
+import os
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Generator, Iterable
 
-from py_common.errors import NotFound, ObjectStoreConflict, VersionMismatch
+from py_common.errors import (
+    NotFound,
+    ObjectStoreConflict,
+    ServiceError,
+    VersionMismatch,
+)
 from py_common.model import SourceItem
 
 logger = logging.getLogger("py_common.adapters.local")
+
+
+def _version(stat: os.stat_result) -> str:
+    """A file's version: modification time (ns) and size.
+
+    Whole seconds missed an edit made in the same second as
+    discovery; nanoseconds plus size catch it on any filesystem
+    that records sub-second times, and size catches most edits on
+    one that doesn't.
+
+    Args:
+        stat: The file's os.stat() result.
+
+    Returns:
+        "{st_mtime_ns}-{st_size}".
+    """
+    return f"{stat.st_mtime_ns}-{stat.st_size}"
 
 
 class LocalSource:
@@ -55,7 +78,7 @@ class LocalSource:
                 # (with its drive-letter colon) is neither a valid
                 # filename component nor a portable identifier.
                 identity=path.relative_to(self.folder).as_posix(),
-                version=str(int(stat.st_mtime)),
+                version=_version(stat),
                 size_bytes=stat.st_size,
             )
 
@@ -77,8 +100,7 @@ class LocalSource:
         if not path.exists():
             raise NotFound(f"File not found: {path}")
 
-        stat = path.stat()
-        current_version = str(int(stat.st_mtime))
+        current_version = _version(path.stat())
 
         if current_version != item.version:
             raise VersionMismatch(
@@ -136,12 +158,18 @@ class LocalObjectStore:
             File bytes if exists, None otherwise.
 
         Raises:
+            ServiceError: The file exists but can't be read. Like
+                GCSObjectStore, a failed read is never reported as
+                "missing".
             ValueError: Key escapes the object store root.
         """
         path = self._resolve_path(key)
         if not path.exists():
             return None
-        return path.read_bytes()
+        try:
+            return path.read_bytes()
+        except OSError as e:
+            raise ServiceError(f"Cannot read {path}: {e}") from e
 
     def put(self, key: str, data: bytes) -> None:
         """Write file; idempotent if identical content exists.

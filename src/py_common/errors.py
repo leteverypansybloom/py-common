@@ -10,7 +10,8 @@ Hierarchy:
   ├─ ServiceError: Cloud service unavailable or permission denied
   ├─ ObjectStoreConflict: Key exists with different content
   ├─ IndeterminateCommitError: Don't know if warehouse committed
-  └─ RunFailed: A pipeline run finished with FAILED files
+  ├─ RunFailed: A pipeline run finished with FAILED files
+  └─ ConfigError: Configuration file is missing or malformed
 
 ContractError is a ValidationError, so callers that catch
 ValidationError (e.g. Pipeline.process(), which quarantines it)
@@ -25,13 +26,9 @@ from py_common.model import Result
 class IngestionError(Exception):
     """Base exception for ingestion pipeline."""
 
-    pass
-
 
 class SourceError(IngestionError):
     """Error reading from source."""
-
-    pass
 
 
 class VersionMismatch(SourceError):
@@ -42,19 +39,13 @@ class VersionMismatch(SourceError):
     partially-written file.
     """
 
-    pass
-
 
 class NotFound(SourceError):
     """Source item no longer exists."""
 
-    pass
-
 
 class ValidationError(IngestionError):
     """Workbook failed validation against contract rules."""
-
-    pass
 
 
 class ContractError(ValidationError):
@@ -67,16 +58,12 @@ class ContractError(ValidationError):
     - Required value is null
     """
 
-    pass
-
 
 class ServiceError(IngestionError):
     """Cloud service failed (permission denied, unavailable, quota).
 
     Caller should determine if retry is safe.
     """
-
-    pass
 
 
 class ObjectStoreConflict(IngestionError):
@@ -87,8 +74,6 @@ class ObjectStoreConflict(IngestionError):
     the immutable store if allowed.
     """
 
-    pass
-
 
 class IndeterminateCommitError(IngestionError):
     """Don't know if warehouse committed data.
@@ -97,7 +82,9 @@ class IndeterminateCommitError(IngestionError):
     Caller must check warehouse state before retrying.
     """
 
-    pass
+
+class ConfigError(IngestionError):
+    """Configuration file is missing or malformed."""
 
 
 class RunFailed(IngestionError):

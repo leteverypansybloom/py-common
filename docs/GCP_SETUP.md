@@ -87,15 +87,49 @@ bq query --use_legacy_sql=false "
 CREATE TABLE IF NOT EXISTS \`$PROJECT.$RAW_DATASET.audit\` (
   filename STRING,
   checksum STRING,
+  destination STRING,
+  source_version STRING,
   row_count INT64,
   outcome STRING,
   timestamp TIMESTAMP
 )"
 ```
 
+The audit table is what makes a load happen at most once. Each
+warehouse checks it inside the same transaction that writes the
+rows, and writes nothing if it already has a `LOADED` row for this
+`destination` table and this upload (the same `filename`, which is
+the load key, and `source_version`). There is one audit row per
+destination table: a `RawJsonWarehouse` writing three raw tables
+records three. The `audit/` markers in the store bucket are only a
+cache in front of it.
+
+**An existing 0.1.x audit table** needs the two new columns (safe to
+run twice):
+
+```bash
+bq query --use_legacy_sql=false "
+ALTER TABLE \`$PROJECT.$RAW_DATASET.audit\`
+  ADD COLUMN IF NOT EXISTS destination STRING,
+  ADD COLUMN IF NOT EXISTS source_version STRING"
+```
+
+Rows written before the upgrade have `destination` NULL and count as
+"not loaded here", so files already loaded by 0.1.x would load again.
+Start 0.2.0 with a fresh dataset and store bucket where you can.
+
 The raw tables themselves are created by `RawJsonWarehouse` on first
-load, partitioned by day of `ingested_at`. Their layout is in
-[`RAW_TABLE_LAYOUT.md`](RAW_TABLE_LAYOUT.md).
+load, partitioned by day of `ingested_at` and clustered on
+`source_file, source_generation`, the columns the "latest upload"
+query filters on. Raw tables created before py-common 0.2.0 are not
+clustered; add it to each (it applies to data written from then on):
+
+```bash
+bq update --clustering_fields=source_file,source_generation \
+  "$PROJECT:$RAW_DATASET.<raw table>"
+```
+
+Their layout is in [`RAW_TABLE_LAYOUT.md`](RAW_TABLE_LAYOUT.md).
 
 **Restrict this dataset.** Even with personal columns excluded by the
 contracts, the raw tables hold employer names and free text, and the
@@ -113,8 +147,10 @@ gcloud iam service-accounts create "$SA_NAME" --project="$PROJECT" \
 | Role | On | Why |
 |---|---|---|
 | `roles/storage.objectViewer` | Landing bucket | List and download the uploaded files |
-| `roles/storage.objectAdmin` | Store bucket | Write copies and audit records; create and delete the run lock |
-| `roles/bigquery.dataEditor` | Raw dataset | Create raw and staging tables; insert rows and audit records |
+| `roles/storage.objectCreator` | Store bucket | Write copies, audit records and markers (create only: it can't overwrite or delete them) |
+| `roles/storage.objectViewer` | Store bucket | Read markers and compare an existing copy's hashes |
+| `roles/storage.objectUser`, with a condition | `locks/` in the store bucket only | Release the run lock (delete) and take over an expired one (overwrite, which GCS counts as a delete) |
+| `roles/bigquery.dataEditor` | Raw dataset | Create raw tables; create and drop each load's staging table (`{table}_stg_...`, expiring after a day if a run dies before dropping it); insert rows and audit records |
 | `roles/bigquery.jobUser` | Project | Run load jobs and the commit transaction |
 
 ```bash
@@ -122,7 +158,14 @@ gcloud storage buckets add-iam-policy-binding "gs://$LANDING_BUCKET" \
   --member="serviceAccount:$SA" --role="roles/storage.objectViewer"
 
 gcloud storage buckets add-iam-policy-binding "gs://$STORE_BUCKET" \
-  --member="serviceAccount:$SA" --role="roles/storage.objectAdmin"
+  --member="serviceAccount:$SA" --role="roles/storage.objectCreator"
+
+gcloud storage buckets add-iam-policy-binding "gs://$STORE_BUCKET" \
+  --member="serviceAccount:$SA" --role="roles/storage.objectViewer"
+
+gcloud storage buckets add-iam-policy-binding "gs://$STORE_BUCKET" \
+  --member="serviceAccount:$SA" --role="roles/storage.objectUser" \
+  --condition="title=locks-only,expression=resource.name.startsWith(\"projects/_/buckets/$STORE_BUCKET/objects/locks/\")"
 
 bq add-iam-policy-binding --member="serviceAccount:$SA" \
   --role="roles/bigquery.dataEditor" "$PROJECT:$RAW_DATASET"
@@ -130,6 +173,22 @@ bq add-iam-policy-binding --member="serviceAccount:$SA" \
 gcloud projects add-iam-policy-binding "$PROJECT" \
   --member="serviceAccount:$SA" --role="roles/bigquery.jobUser"
 ```
+
+With these roles the job can add to `raw/`, `processed/`,
+`quarantine/` and `audit/` but never change or delete what is there,
+so the store's immutability no longer rests on the code alone. IAM
+conditions need uniform bucket-level access, which section 1 turns
+on. Check the condition once after granting it: a first run should
+log `Released lock`, not `Could not release lock`.
+
+**Retention.** Consider keeping `raw/` and `audit/` for the period
+the DPIA sets even against someone with more access than the job. A
+bucket retention policy applies to every object in the bucket,
+including `locks/`, and would stop the lock being released, so it
+needs the lock in a bucket of its own (py-common keeps both in one
+store bucket today). Until then, keep soft delete on (the default, 7
+days; raise it with `gcloud storage buckets update
+--soft-delete-duration`) so a deleted copy can be restored.
 
 People who upload files need only `roles/storage.objectCreator` on the
 landing bucket: they can add files but not read, overwrite or delete
@@ -188,9 +247,17 @@ def build_pipelines() -> dict[str, Pipeline]:
     }
 ```
 
+`configure_json_logging()` writes each log line as JSON, which Cloud
+Logging turns into a structured entry: `severity`, `message`, and
+fields to filter on — `run_id` (one per `Pipeline.run()`),
+`warehouse`, `item_identity`, `version`, `checksum` and `bq_job_id`.
+Each file ends with one summary line that also has `outcome`, `rows`
+and `seconds`. For example, everything about one file in one run:
+`jsonPayload.run_id="..." AND jsonPayload.item_identity="was/x.xlsx"`.
+
 ```python
 # hww/job.py: the daily Cloud Run job (the image's default command)
-"""Load every HWW workbook, then check for missing monthly files."""
+"""Load every HWW workbook, then run the daily checks."""
 
 import logging
 import os
@@ -198,27 +265,34 @@ import sys
 
 from google.cloud import bigquery
 
-from py_common.runner import check_freshness, run_job
+from py_common.logging import configure_json_logging
+from py_common.runner import check_duplicate_loads, check_freshness, run_job
 
 from hww.pipelines import build_pipelines
 
 
 def main() -> int:
-    """Run every pipeline, then the freshness check.
+    """Run every pipeline, then the freshness and duplicate checks.
 
     Returns:
-        Exit code: 1 if a file FAILED, a run didn't finish, or the
-        freshness check couldn't run, so the execution shows failed.
+        Exit code: 1 if a file FAILED, a run didn't finish, or a
+        check couldn't run, so the execution shows failed.
     """
-    logging.basicConfig(level=logging.INFO)
+    configure_json_logging()
     code = run_job(build_pipelines().values())
+    project = os.environ["GCP_PROJECT_ID"]
+    client = bigquery.Client(project=project)
     try:
-        check_freshness(
-            bigquery.Client(project=os.environ["GCP_PROJECT_ID"]),
-            os.environ["FRESHNESS_VIEW"],
-        )
+        check_freshness(client, os.environ["FRESHNESS_VIEW"])
     except Exception:
         logging.exception("Freshness check failed")
+        code = 1
+    try:
+        check_duplicate_loads(
+            client, f"{project}.{os.environ['RAW_DATASET']}.audit"
+        )
+    except Exception:
+        logging.exception("Duplicate-load check failed")
         code = 1
     return code
 
@@ -236,11 +310,12 @@ import logging
 import functions_framework
 from cloudevents.http import CloudEvent
 
+from py_common.logging import configure_json_logging
 from py_common.runner import handle_upload
 
 from hww.pipelines import build_pipelines
 
-logging.basicConfig(level=logging.INFO)
+configure_json_logging()
 PIPELINES = build_pipelines()
 
 
@@ -267,12 +342,27 @@ What the `py_common.runner` helpers add to `Pipeline.run()`:
   it has its own alert (section 7).
 - `check_freshness()` logs each overdue source for the missing-file
   alert (section 7).
+- `check_duplicate_loads()` logs any upload the audit table shows
+  loaded twice into one table, for the duplicate-load alert (section
+  7). It can't happen in normal running; see the alert.
 
 Give each workbook its own landing folder (`prefix`), so each
-pipeline lists only the files its contract describes. The container
-installs `py-common[gcp]`, plus `functions-framework` for the
-service; see the repository's `Dockerfile`. functions-framework
+pipeline lists only the files its contract describes, and set each
+contract's `file_name` to the name the workbook is always uploaded
+under. A file under another name is then quarantined, with a message
+giving the expected name, instead of becoming a second "latest"
+upload (`docs/RAW_TABLE_LAYOUT.md`). Build the
+solution's image `FROM` the one this repository's `Dockerfile`
+builds: it has `py-common[gcp]` at the versions pinned in
+`constraints.txt` and runs as a non-root user. The solution's image
+adds its own code and, for the service, `functions-framework`, which
 loads `main.py` from the working directory.
+
+`Pipeline` checks its configuration when it is built: a
+`BigQueryWarehouse` must merge on the contract's `key_columns`, and
+a `RawJsonWarehouse` must map exactly the contract's worksheets. A
+mismatch raises `ConfigError` at start-up instead of failing every
+file.
 
 ## 5. Cloud Run job and schedule
 
@@ -289,8 +379,9 @@ gcloud run jobs execute "$JOB" --project="$PROJECT" --region="$REGION" --wait
 ```
 
 `--max-retries=0` because a rerun is safe but should be deliberate:
-files that loaded are skipped by checksum, and files that failed are
-retried on the next scheduled run.
+files that loaded are skipped (by the store marker, and failing that
+by the warehouse's audit check), and files that failed are retried on
+the next scheduled run.
 
 Run it daily. Files arrive monthly, but a daily run picks up a late or
 corrected upload the next morning, and a run with nothing new costs
@@ -314,16 +405,28 @@ gcloud scheduler jobs create http "$JOB-daily" \
 ```
 
 **If a run is killed** (for example, a timeout) it can leave its lock
-object in the store bucket, and later runs are refused with an error
-naming it. Check that no run is active, then delete the
-`gs://$STORE_BUCKET/locks/...` object named in the error.
+object in the store bucket. Later runs are refused with an error
+naming it until its lease expires (one hour by default,
+`GCSObjectStore(lease_seconds=...)`), and the first run after that
+takes it over and logs `Took over expired lock` at WARNING. Keep
+`lease_seconds` above the job's task timeout (10 minutes unless set
+with `--task-timeout`) and the service's `--timeout`,
+so a lease outlasts any normal run. This makes a stolen lock
+unlikely, not impossible: a Cloud Run *service* container can keep
+working after its request times out, and the lease isn't renewed or
+fenced. The warehouse's in-transaction audit check is the second line
+of defence; two commits racing each other is still possible (see
+`CHANGELOG.md`, Known limitations). To unblock sooner, check
+that no run is active, then delete the `gs://$STORE_BUCKET/locks/...`
+object named in the error.
 
 ## 6. Run on upload with Eventarc (optional)
 
 The daily job is enough to load monthly files. Add this when an ad
 hoc upload should load within minutes rather than the next morning,
 or to follow the team's bucket → Pub/Sub → Eventarc → Cloud Run
-pattern ([`upcoming_work.md`](upcoming_work.md)).
+pattern (from the team's earlier guide, now archived as
+[`upcoming_work.md`](upcoming_work.md)).
 
 A new object in the landing bucket publishes a notification to
 Pub/Sub. Eventarc delivers it to the Cloud Run service, where
@@ -373,12 +476,15 @@ gcloud pubsub subscriptions update "$SUBSCRIPTION" --ack-deadline=600
 ```
 
 `notifications create` also creates the topic if it doesn't exist
-and lets Cloud Storage publish to it, which needs the Pub/Sub
-permissions listed in `upcoming_work.md`.
+and lets Cloud Storage publish to it. Whoever runs it needs at least
+`pubsub.topics.create`, `pubsub.topics.get`, `pubsub.topics.publish`
+and `pubsub.topics.getIamPolicy` on the topic's project, and
+`storage.buckets.update` on the landing bucket (the list from the
+team's earlier guide). Ask the Data Engineering team to grant them.
 
 | Setting | Why |
 |---|---|
-| `--event-types=OBJECT_FINALIZE` | Only new uploads start a run, not deletes or metadata changes. `handle_upload()` ignores other event types too. |
+| `--event-types=OBJECT_FINALIZE` | Only new uploads start a run, not deletes or metadata changes. `handle_upload()` ignores other event types too, and a message with no `eventType` attribute: Cloud Storage always sets it (with `bucketId`, `objectId` and others) whatever `--payload-format` is, so such a message didn't come from this notification. |
 | Separate landing and store buckets (section 1) | The pipeline's own writes go to the store bucket, which has no notification, so they can't start another run. |
 | `--max-instances=1 --concurrency=1` | One run at a time. When several files land together, later events wait their turn instead of being refused by the lock. Cloud Run can briefly exceed the maximum, for example during a deploy; the lock then refuses the extra run, and Pub/Sub retries it. |
 | `--timeout=540`, `--ack-deadline=600` | The acknowledgement deadline starts at 10 seconds, so a longer run would be delivered again while it was still going. Keep the service timeout below the deadline. |
@@ -395,18 +501,29 @@ What happens when:
   again and quarantines it again, by design (`DECISIONS_en.md`,
   "Validation errors quarantine, not fail"). So the quarantine alert
   repeats until the uploader replaces or deletes the file.
+- **A file is uploaded under another name** (the contract sets
+  `file_name`): quarantined like any invalid file, and again on every
+  run until it is deleted from the folder. Uploading it under the
+  right name doesn't remove the wrong one.
+- **A contract was wrong, or an upload was bad:** fix and upload
+  again, or restore the last good version; see
+  [`RUNBOOK.md`](RUNBOOK.md).
 - **The service is down:** Pub/Sub keeps an undelivered event for 24
   hours by default, then drops it. The daily job loads the file
   anyway.
 - **A run is killed** (for example at the timeout): its lock stays, as
-  for the job (section 5), and every event is refused until the lock
-  is deleted. The failed-run alert fires on each refusal.
+  for the job (section 5), and events are refused until the lease
+  expires (one hour by default) or the lock is deleted. Pub/Sub keeps
+  redelivering them meanwhile, and the failed-run alert fires on each
+  refusal.
 - **An unreadable event, or an upload to a folder with no pipeline:**
   logged and acknowledged, not retried. This includes sub-folders,
-  which `GCSSource` doesn't read.
+  which `GCSSource` doesn't read, and uploads to another bucket whose
+  folder has the same name: `handle_upload()` checks the event's
+  bucket against the one the folder's `GCSSource` reads.
 
-`upcoming_work.md` puts Pub/Sub and Cloud Run in an app project and
-the bucket in a data project. The same commands work across the two:
+The team's earlier guide (`upcoming_work.md`, archived) puts Pub/Sub
+and Cloud Run in an app project and the bucket in a data project. The same commands work across the two:
 create the topic, service and trigger in the app project, and grant
 the service account its roles on the data project's buckets and
 dataset.
@@ -414,16 +531,24 @@ dataset.
 ## 7. Alerts
 
 Without alerts, a failed load or a renamed column only shows up when a
-dashboard looks wrong. Set up four, all sent to the team's
+dashboard looks wrong. Set up six, all sent to the team's
 notification channel, for example the team mailbox or a Teams
 channel's email address:
 
-| Alert | Log text matched | Fires when |
+The job and service log JSON (`configure_json_logging()`, section 5),
+so the log text is in `jsonPayload.message`, not `textPayload`, and
+each file ends with one summary line carrying `jsonPayload.outcome`
+(an ERROR for a failed file, a WARNING for a quarantined one,
+whatever path led there). Match on those fields:
+
+| Alert | Filter (after the resource part below) | Fires when |
 |---|---|---|
-| Failed run | `"Processing error for"`, `"Pipeline run failed"` or `"Freshness check failed"` | A file FAILED, a run failed or was refused by the lock, or the freshness check couldn't run |
-| Header or data warning | `"Contract warning:"` | A `"warn"` worksheet loaded with a mismatch |
-| Quarantined file | `"Validation failed for"` | A `"quarantine"` worksheet rejected a file |
-| Missing monthly file | `"Missing monthly file:"` | From the 8th of the month, a monthly source with nothing loaded since the 1st; repeats daily until it loads |
+| Failed file | `jsonPayload.outcome="failed"` | Any file FAILED, from any cause (service error, unknown commit, audit write, ...) |
+| Failed run | `severity>=ERROR AND (jsonPayload.message:"Pipeline run failed" OR jsonPayload.message:"Freshness check failed" OR jsonPayload.message:"Duplicate-load check failed" OR jsonPayload.message:"Could not release lock")` | A run failed or was refused by the lock, a daily check couldn't run, or a run couldn't release its lock (the next runs would be refused until its lease expires) |
+| Header or data warning | `jsonPayload.message:"Contract warning:"` | A `"warn"` worksheet loaded with a mismatch, or a value loaded as NULL |
+| Quarantined file | `jsonPayload.outcome="quarantined"` | A file was rejected, by the contract or the warehouse |
+| Missing monthly file | `jsonPayload.message:"Missing monthly file:"` | From the 8th of the month, a monthly source with nothing loaded since the 1st; repeats daily until it loads |
+| Duplicate load | `jsonPayload.message:"Duplicate load:"` | An upload was loaded into a table twice. Very unlikely: it takes two commits of the same upload at once (one still running after the pipeline stopped waiting, ten minutes, plus its retry). The raw "latest upload" query reads one load per upload, so Dataform isn't affected; to tidy up, delete the rows of the later load (its `ingested_at`). On a typed table the second commit merged the same values again. Repeats daily |
 
 Each is a log-based alert. This one is saved as
 `contract-warning.json` and created with
@@ -436,7 +561,7 @@ Each is a log-based alert. This one is saved as
   "conditions": [{
     "displayName": "Contract warning logged",
     "conditionMatchedLog": {
-      "filter": "((resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"<CLOUD_RUN_JOB_NAME>\") OR (resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"<CLOUD_RUN_SERVICE_NAME>\")) AND textPayload:\"Contract warning:\""
+      "filter": "((resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"<CLOUD_RUN_JOB_NAME>\") OR (resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"<CLOUD_RUN_SERVICE_NAME>\")) AND jsonPayload.message:\"Contract warning:\""
     }
   }],
   "alertStrategy": {"notificationRateLimit": {"period": "3600s"}},
@@ -446,7 +571,27 @@ Each is a log-based alert. This one is saved as
 
 The filter matches the job's logs and the service's: a job logs as
 `cloud_run_job`, a service as `cloud_run_revision`. Without section 6,
-drop the service half. Repeat with the other log texts. The same
+drop the service half. Repeat with the other filters. If a job
+logs plain text instead (no `configure_json_logging()`), use
+`textPayload:"..."` with the message texts; the outcome filters need
+JSON logging.
+
+**Test each alert once** before relying on it. The smoke test
+(`docs/SMOKE_TEST.md`, `scripts/demo.py`) logs JSON like the
+production job; run it as a Cloud Run job so its lines carry the
+`cloud_run_job` resource, then check each filter in the Logs Explorer
+and that its notification arrives:
+
+| Alert | How to trigger it |
+|---|---|
+| Quarantined file | The smoke test's invalid workbook (step 4) |
+| Header or data warning | Upload a workbook with an extra column to a `"warn"` source |
+| Failed file | Run once with the job's BigQuery access removed, or point it at a dataset with no `audit` table |
+| Failed run | Start a second run while one holds the lock |
+| Missing monthly file | Temporarily set the freshness view's due day so a source is overdue |
+| Duplicate load | In a development dataset, copy one `LOADED` audit row with a new time (`INSERT INTO audit SELECT * REPLACE (CURRENT_TIMESTAMP() AS timestamp) FROM audit WHERE outcome = 'LOADED' LIMIT 1`), run the job, then delete that copy by its `timestamp` |
+
+The quarantine check alone doesn't prove the others. The same
 alerts can be created in the console under *Logging → Logs Explorer →
 Create alert*.
 
@@ -456,8 +601,8 @@ A log-based alert can't fire on something that didn't happen, so the
 daily job checks. `check_freshness()` reads a view with one row per
 monthly source and logs `Missing monthly file: <source> (last loaded
 <date>)` for each overdue one. The view reads each source's own raw
-table: the audit table records only a file name, so it can't tell one
-source from another.
+table, which is the simplest thing to name per source (the audit
+table would also do, by its `destination` column).
 
 ```bash
 bq query --use_legacy_sql=false "
@@ -489,8 +634,8 @@ FROM loads CROSS JOIN month"
 - **Add a source after its first file has loaded.** The view can't
   name a raw table that doesn't exist yet.
 - **What counts as arrived:** a file that loaded. A quarantined upload
-  doesn't count (its own alert has fired). Nor does an upload
-  identical to last month's, which is skipped.
+  doesn't count (its own alert has fired). A new upload always
+  loads, even with the same bytes as last month's, so it counts.
 
 The view also gives each source's "last updated" date, which the
 dashboard can show. Dataform can publish it with the cleaned tables,
