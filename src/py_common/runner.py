@@ -13,6 +13,8 @@ platform acts on:
   and raises if a file FAILED, so Pub/Sub delivers the event again.
 - check_freshness(): logs each source that a freshness view says is
   overdue, for a log-based alert to pick up.
+- check_duplicate_loads(): logs each upload the audit table shows
+  loaded more than once into a table, for a log-based alert.
 
 QUARANTINED is not a failure here: the file itself is wrong, and
 retrying won't fix it. Pipeline.process() logs the quarantine, which
@@ -26,7 +28,7 @@ again on every delivery.
 
 No cloud SDK is imported here (see DECISIONS_en.md, "No cloud SDK
 imports in core pipeline"): the event arrives as a plain mapping, and
-check_freshness() takes any client with a BigQuery-style query().
+the checks take any client with a BigQuery-style query().
 """
 
 import base64
@@ -49,8 +51,8 @@ logger = logging.getLogger("py_common.runner")
 #: is not an upload notification and is ignored.
 _NEW_OBJECT_EVENTS = ("OBJECT_FINALIZE",)
 
-#: A fully qualified view name: project.dataset.view.
-_VIEW_NAME = re.compile(r"^[\w-]+\.[\w-]+\.[\w-]+$")
+#: A fully qualified view or table name: project.dataset.name.
+_QUALIFIED_NAME = re.compile(r"^[\w-]+\.[\w-]+\.[\w-]+$")
 
 
 class QueryClient(Protocol):
@@ -286,7 +288,7 @@ def check_freshness(client: QueryClient, view: str) -> list[str]:
     """
     # The name is interpolated into SQL, so allow only the shape of
     # a real view name, not just "no backtick".
-    if not _VIEW_NAME.match(view):
+    if not _QUALIFIED_NAME.match(view):
         raise ValueError(
             f"View name must be project.dataset.view, got {view!r}"
         )
@@ -304,6 +306,67 @@ def check_freshness(client: QueryClient, view: str) -> list[str]:
         )
         overdue.append(row["source"])
     return overdue
+
+
+def check_duplicate_loads(client: QueryClient, audit_table: str) -> list[str]:
+    """Log every upload the audit table shows loaded more than once.
+
+    An upload loads at most once per table: the commit transaction
+    checks the audit table first. The one way past that check is two
+    commits of the same upload running at once: a commit still
+    running after the pipeline stopped waiting for it (ten minutes),
+    and a retry's commit starting before it ends. That is unlikely,
+    so it is detected rather than prevented. Each such upload is
+    logged at ERROR as "Duplicate load: <load key> version <version>
+    loaded <n> times into <table>", for a log-based alert. Run it
+    from the daily job.
+
+    No harm is done meanwhile. The documented "latest upload" query
+    for raw tables reads one load per upload (docs/RAW_TABLE_LAYOUT.md);
+    to tidy up, delete the rows of the later load (its ingested_at).
+    On a typed table the second commit merged the same values again.
+
+    Args:
+        client: BigQuery client.
+        audit_table: Fully qualified audit table,
+            "project.dataset.table".
+
+    Returns:
+        "<table> <load key> <version>" for each such upload, sorted.
+
+    Raises:
+        ValueError: audit_table isn't project.dataset.table (letters,
+            digits, underscores and hyphens only).
+        Exception: Whatever the client raises; a check that couldn't
+            run is not reported as "no duplicates".
+    """
+    if not _QUALIFIED_NAME.match(audit_table):
+        raise ValueError(
+            "Audit table name must be project.dataset.table, got "
+            f"{audit_table!r}"
+        )
+    # Grouped by the columns the commit script's "already loaded?"
+    # check compares (_bq_jobs.DEDUP_COLUMNS, plus the table).
+    rows = client.query(
+        "SELECT destination, filename, source_version, COUNT(*) AS loads "
+        f"FROM `{audit_table}` WHERE outcome = 'LOADED' "
+        "GROUP BY destination, filename, source_version "
+        "HAVING COUNT(*) > 1 "
+        "ORDER BY destination, filename, source_version"
+    ).result()
+    found: list[str] = []
+    for row in rows:
+        logger.error(
+            "Duplicate load: %s version %s loaded %d times into %s",
+            row["filename"],
+            row["source_version"],
+            row["loads"],
+            row["destination"],
+        )
+        found.append(
+            f"{row['destination']} {row['filename']} {row['source_version']}"
+        )
+    return found
 
 
 def _folder(prefix: str) -> str:

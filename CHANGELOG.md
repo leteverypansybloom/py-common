@@ -111,6 +111,10 @@ loaded into BigQuery twice, whatever fails and wherever it fails.
 - `Contract(file_name=...)`: the name every upload of a workbook must
   have. A file under any other name is quarantined before it is
   parsed, so it can't become a second "latest" upload.
+- `runner.check_duplicate_loads()`: for the daily job. Logs
+  `Duplicate load:` for any upload the audit table shows loaded twice
+  into one table, for a log-based alert (`docs/GCP_SETUP.md`,
+  section 7).
 - Audit records (`audit/records/*.json`) name the converted copy
   that was loaded (`processed_key`, also on `Result`), the contract it
   was converted with (`contract_fingerprint`, from the new
@@ -155,10 +159,14 @@ loaded into BigQuery twice, whatever fails and wherever it fails.
 ### Known limitations
 
 - **Not strictly exactly-once under every failure.** A commit job
-  still running when its client gives up isn't resumed; a retry
-  starts a new one, and the lock lease isn't renewed or fenced. The
-  in-transaction audit check stops ordinary retries loading twice,
-  but two commits racing each other could both pass it.
+  still running when its client gives up (after ten minutes) isn't
+  resumed; a retry starts a new one, and the lock lease isn't renewed
+  or fenced. The in-transaction audit check stops ordinary retries
+  loading twice, but two commits racing each other could both pass
+  it. That is unlikely, so it is detected, not prevented:
+  `check_duplicate_loads()` alerts on it, the documented raw "latest
+  upload" query reads one load per upload, and a second typed commit
+  merges the same values again.
 - **Uploads are applied in the order they're processed.** If an
   older version of a file is processed after a newer one, its values
   win on the typed route.

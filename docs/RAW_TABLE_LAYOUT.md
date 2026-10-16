@@ -40,7 +40,13 @@ not by its content:
 
 - The same generation is never inserted twice, whatever fails and
   however often the load is retried. The check is made against the
-  `audit` table inside the transaction that inserts the rows.
+  `audit` table inside the transaction that inserts the rows. The one
+  way past it is very unlikely: two commits of the same upload
+  running at the same moment (a commit still running after the
+  pipeline stopped waiting for it, and a retry's commit starting
+  before it ends). The daily job's duplicate-load check alerts if it
+  ever happens (`docs/GCP_SETUP.md`, section 7), and the query below
+  reads one load per upload, so it never shows the extra rows.
 - A new generation always loads, even if its bytes are identical to
   an earlier one. This keeps "latest generation" right when an upload
   is reverted:
@@ -141,10 +147,17 @@ generation to compare it as a number:
 ```sql
 SELECT *
 FROM `project.raw_hww.hww_was_database`
-QUALIFY CAST(source_generation AS INT64) = MAX(
-  CAST(source_generation AS INT64)
-) OVER (PARTITION BY source_file)
+QUALIFY
+  CAST(source_generation AS INT64) = MAX(CAST(source_generation AS INT64))
+    OVER (PARTITION BY source_file)
+  AND ingested_at = MAX(ingested_at)
+    OVER (PARTITION BY source_file, source_generation)
 ```
+
+The second condition keeps a single load of that upload. Every row
+of one load has the same `ingested_at`, so if an upload were ever
+loaded twice (see "Each generation loads exactly once" above), only
+the later load's rows are read.
 
 **One file name per workbook.** "Latest" is per `source_file`, the
 file's name. If a cumulative file were uploaded under a new name each
@@ -197,9 +210,11 @@ config {
 WITH latest AS (
   SELECT *
   FROM ${ref("hww_was_database")}
-  QUALIFY CAST(source_generation AS INT64) = MAX(
-    CAST(source_generation AS INT64)
-  ) OVER (PARTITION BY source_file)
+  QUALIFY
+    CAST(source_generation AS INT64) = MAX(CAST(source_generation AS INT64))
+      OVER (PARTITION BY source_file)
+    AND ingested_at = MAX(ingested_at)
+      OVER (PARTITION BY source_file, source_generation)
 )
 SELECT
   JSON_VALUE(payload, '$."Participant ID"') AS participant_id,

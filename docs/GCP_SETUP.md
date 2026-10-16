@@ -257,7 +257,7 @@ and `seconds`. For example, everything about one file in one run:
 
 ```python
 # hww/job.py: the daily Cloud Run job (the image's default command)
-"""Load every HWW workbook, then check for missing monthly files."""
+"""Load every HWW workbook, then run the daily checks."""
 
 import logging
 import os
@@ -266,27 +266,33 @@ import sys
 from google.cloud import bigquery
 
 from py_common.logging import configure_json_logging
-from py_common.runner import check_freshness, run_job
+from py_common.runner import check_duplicate_loads, check_freshness, run_job
 
 from hww.pipelines import build_pipelines
 
 
 def main() -> int:
-    """Run every pipeline, then the freshness check.
+    """Run every pipeline, then the freshness and duplicate checks.
 
     Returns:
-        Exit code: 1 if a file FAILED, a run didn't finish, or the
-        freshness check couldn't run, so the execution shows failed.
+        Exit code: 1 if a file FAILED, a run didn't finish, or a
+        check couldn't run, so the execution shows failed.
     """
     configure_json_logging()
     code = run_job(build_pipelines().values())
+    project = os.environ["GCP_PROJECT_ID"]
+    client = bigquery.Client(project=project)
     try:
-        check_freshness(
-            bigquery.Client(project=os.environ["GCP_PROJECT_ID"]),
-            os.environ["FRESHNESS_VIEW"],
-        )
+        check_freshness(client, os.environ["FRESHNESS_VIEW"])
     except Exception:
         logging.exception("Freshness check failed")
+        code = 1
+    try:
+        check_duplicate_loads(
+            client, f"{project}.{os.environ['RAW_DATASET']}.audit"
+        )
+    except Exception:
+        logging.exception("Duplicate-load check failed")
         code = 1
     return code
 
@@ -336,6 +342,9 @@ What the `py_common.runner` helpers add to `Pipeline.run()`:
   it has its own alert (section 7).
 - `check_freshness()` logs each overdue source for the missing-file
   alert (section 7).
+- `check_duplicate_loads()` logs any upload the audit table shows
+  loaded twice into one table, for the duplicate-load alert (section
+  7). It can't happen in normal running; see the alert.
 
 Give each workbook its own landing folder (`prefix`), so each
 pipeline lists only the files its contract describes, and set each
@@ -519,7 +528,7 @@ dataset.
 ## 7. Alerts
 
 Without alerts, a failed load or a renamed column only shows up when a
-dashboard looks wrong. Set up five, all sent to the team's
+dashboard looks wrong. Set up six, all sent to the team's
 notification channel, for example the team mailbox or a Teams
 channel's email address:
 
@@ -532,10 +541,11 @@ whatever path led there). Match on those fields:
 | Alert | Filter (after the resource part below) | Fires when |
 |---|---|---|
 | Failed file | `jsonPayload.outcome="failed"` | Any file FAILED, from any cause (service error, unknown commit, audit write, ...) |
-| Failed run | `severity>=ERROR AND (jsonPayload.message:"Pipeline run failed" OR jsonPayload.message:"Freshness check failed" OR jsonPayload.message:"Could not release lock")` | A run failed or was refused by the lock, the freshness check couldn't run, or a run couldn't release its lock (the next runs would be refused until its lease expires) |
+| Failed run | `severity>=ERROR AND (jsonPayload.message:"Pipeline run failed" OR jsonPayload.message:"Freshness check failed" OR jsonPayload.message:"Duplicate-load check failed" OR jsonPayload.message:"Could not release lock")` | A run failed or was refused by the lock, a daily check couldn't run, or a run couldn't release its lock (the next runs would be refused until its lease expires) |
 | Header or data warning | `jsonPayload.message:"Contract warning:"` | A `"warn"` worksheet loaded with a mismatch, or a value loaded as NULL |
 | Quarantined file | `jsonPayload.outcome="quarantined"` | A file was rejected, by the contract or the warehouse |
 | Missing monthly file | `jsonPayload.message:"Missing monthly file:"` | From the 8th of the month, a monthly source with nothing loaded since the 1st; repeats daily until it loads |
+| Duplicate load | `jsonPayload.message:"Duplicate load:"` | An upload was loaded into a table twice. Very unlikely: it takes two commits of the same upload at once (one still running after the pipeline stopped waiting, ten minutes, plus its retry). The raw "latest upload" query reads one load per upload, so Dataform isn't affected; to tidy up, delete the rows of the later load (its `ingested_at`). On a typed table the second commit merged the same values again. Repeats daily |
 
 Each is a log-based alert. This one is saved as
 `contract-warning.json` and created with
@@ -576,6 +586,7 @@ and that its notification arrives:
 | Failed file | Run once with the job's BigQuery access removed, or point it at a dataset with no `audit` table |
 | Failed run | Start a second run while one holds the lock |
 | Missing monthly file | Temporarily set the freshness view's due day so a source is overdue |
+| Duplicate load | In a development dataset, copy one `LOADED` audit row with a new time (`INSERT INTO audit SELECT * REPLACE (CURRENT_TIMESTAMP() AS timestamp) FROM audit WHERE outcome = 'LOADED' LIMIT 1`), run the job, then delete that copy by its `timestamp` |
 
 The quarantine check alone doesn't prove the others. The same
 alerts can be created in the console under *Logging → Logs Explorer →
