@@ -338,7 +338,11 @@ What the `py_common.runner` helpers add to `Pipeline.run()`:
   alert (section 7).
 
 Give each workbook its own landing folder (`prefix`), so each
-pipeline lists only the files its contract describes. Build the
+pipeline lists only the files its contract describes, and set each
+contract's `file_name` to the name the workbook is always uploaded
+under. A file under another name is then quarantined, with a message
+giving the expected name, instead of becoming a second "latest"
+upload (`docs/RAW_TABLE_LAYOUT.md`). Build the
 solution's image `FROM` the one this repository's `Dockerfile`
 builds: it has `py-common[gcp]` at the versions pinned in
 `constraints.txt` and runs as a non-root user. The solution's image
@@ -488,6 +492,10 @@ What happens when:
   again and quarantines it again, by design (`DECISIONS_en.md`,
   "Validation errors quarantine, not fail"). So the quarantine alert
   repeats until the uploader replaces or deletes the file.
+- **A file is uploaded under another name** (the contract sets
+  `file_name`): quarantined like any invalid file, and again on every
+  run until it is deleted from the folder. Uploading it under the
+  right name doesn't remove the wrong one.
 - **The service is down:** Pub/Sub keeps an undelivered event for 24
   hours by default, then drops it. The daily job loads the file
   anyway.

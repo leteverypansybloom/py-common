@@ -145,13 +145,22 @@ QUALIFY CAST(source_generation AS INT64) = MAX(
 ) OVER (PARTITION BY source_file)
 ```
 
-**Keep one file name per feed.** "Latest" is per `source_file`, the
-file's name. If a cumulative file is uploaded under a new name each
-time (a date in the name, say), every name has its own latest upload
-and the query returns all of them: duplicate current rows. Upload
-each feed under one unchanging object name and let GCS versioning
-keep the history. A `uniqueKey` assertion on the cleaned table (as
-in the example below) catches it if it happens.
+**One file name per workbook.** "Latest" is per `source_file`, the
+file's name. If a cumulative file were uploaded under a new name each
+time (a date in the name, say), every name would have its own latest
+upload and the query would return all of them: duplicate current
+rows. So upload each workbook under one unchanging name, and let GCS
+versioning keep the history. Set the contract's `file_name` to that
+name: an upload under any other name (`WAS export (1).xlsx`, say) is
+then quarantined, with a message giving the expected name, and loads
+nothing. A `uniqueKey` assertion on the cleaned table (as in the
+example below) is a second line of defence.
+
+**Renaming a workbook on purpose.** Change the contract's
+`file_name`, then upload under the new name. The old name's last
+upload still counts as "latest" for the old name, so filter it out in
+Dataform (`WHERE source_file != 'old name.xlsx'`), or delete its rows
+from the raw tables once the new name has loaded.
 
 **Payload fields.** Use `JSON_VALUE` for text and `LAX_` or
 `SAFE_CAST` for types. Quote keys that contain spaces or punctuation:

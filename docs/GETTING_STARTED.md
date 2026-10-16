@@ -166,6 +166,12 @@ always names the exact rule that failed, which is what makes a
 quarantined file something a data owner can act on without reading
 Python.
 
+In production, also set `file_name` to the name the workbook is
+always uploaded under, e.g. `Contract(..., file_name="events.xlsx")`.
+py-common tracks a source by its file name, so a file under any
+other name is rejected before it is parsed (see
+[`RAW_TABLE_LAYOUT.md`](RAW_TABLE_LAYOUT.md)).
+
 ## 5. Wire your first pipeline
 
 There's no `Warehouse` you can plug in without cloud credentials (see

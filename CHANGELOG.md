@@ -93,6 +93,9 @@ loaded into BigQuery twice, whatever fails and wherever it fails.
   (and cleared if they come back); only rows from the same file
   (`_source_file`) are affected. Rows are never physically deleted.
 - `Worksheet(allow_empty=True)` for sheets where no rows is valid.
+- `Contract(file_name=...)`: the name every upload of a workbook must
+  have. A file under any other name is quarantined before it is
+  parsed, so it can't become a second "latest" upload.
 - `GCSObjectStore(lease_seconds=3600)`: the run lock is a lease that
   a later run takes over, atomically, once it has expired.
 - `BigQueryWarehouse` creates a missing final table and adds new
@@ -146,11 +149,13 @@ loaded into BigQuery twice, whatever fails and wherever it fails.
   mapping) doesn't reload files that table already had.
 - Only each landing file's current version is loaded; there is no
   replay command.
-- **A feed is identified by its file name.** On the raw route,
-  "latest upload" is per `source_file`, so a cumulative feed uploaded
+- **A source is tracked by its file name.** On the raw route,
+  "latest upload" is per `source_file`, so a cumulative file uploaded
   under a new name each time returns duplicate current rows; on the
   typed route, `mark_deleted_rows` never marks the old name's rows.
-  Keep one object name per feed (see `docs/RAW_TABLE_LAYOUT.md`).
+  Set `Contract.file_name` so any other name is quarantined, and
+  treat renaming a workbook as a one-off change with a clean-up step
+  (`docs/RAW_TABLE_LAYOUT.md`).
 - **Restoring an earlier upload on the typed route can fail** with
   `ObjectStoreConflict` if the contract or pyarrow changed since it
   first loaded: its processed copy's key has no version or contract

@@ -85,6 +85,7 @@ that invalid input is caught and isolated before it reaches BigQuery.
 | 8. Staging clean-up | No `_stg_` table left for this file | Per-load staging tables are dropped after the load. |
 | 9. Same file, one row changed, one removed (typed) | `loaded 1`; the changed row has the new value; the removed row has `_deleted_at` set | Cumulative files update rows, and rows that disappear are marked deleted rather than left looking current. |
 | 10. Original file again (typed) | `loaded 2`; the original value is back; the removed row's `_deleted_at` is cleared | Restoring an earlier upload applies it again instead of being skipped. |
+| 11. A copy under another name (typed, `file_name` set) | The copy `quarantined 0`; the original `skipped 0` | With `Contract.file_name`, an upload under any other name is quarantined, so it can't become a second "latest" upload. |
 
 ## The journey through the system
 

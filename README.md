@@ -73,6 +73,9 @@ described in
   `Other_2`
 - Refuses oversized files before parsing them (`max_file_bytes`,
   `max_uncompressed_bytes`, which also stops "zip bombs")
+- Can require the agreed file name (`file_name`): an upload under any
+  other name is quarantined, so it can't become a second "latest"
+  upload of the same data
 - Deterministic; same file always produces same result
 
 **ObjectStore** (protocol)

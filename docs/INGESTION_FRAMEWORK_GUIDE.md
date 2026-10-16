@@ -229,12 +229,19 @@ exact; where nothing exists, that's stated plainly rather than implied.
   that identify a record for merge/upsert. `Pipeline` does **not**
   pass it on automatically: the caller hands it to the warehouse when
   constructing it — `BigQueryWarehouse(..., key_columns=contract.key_columns)`.
-  Forget that, and the warehouse appends instead of merging (see
+  `Pipeline` refuses (`ConfigError`) a warehouse whose keys differ
+  from the contract's (see
   [2.4](#24-publish--writing-to-the-destination-safely)). Each key
   column must be a listed, `nullable=False` column of the first
   worksheet (`Contract` refuses anything else when it is built), and
   `Contract.validate()` checks the key columns together are unique
   per row, as well as each column's own `unique` flag.
+- **The agreed file name.** A source is tracked by its file name
+  (the raw tables' "latest upload" and the typed route's
+  deleted-row marking both work per name), so `Contract.file_name`
+  can require the name a workbook is always uploaded under. A file
+  under any other name is quarantined before it is parsed, instead
+  of becoming a second "latest" upload.
 - **Empty sheets are rejected; there is no other row-count check.**
   A sheet with headings but no data rows quarantines the file unless
   its `Worksheet` sets `allow_empty=True`. Nothing checks for "far

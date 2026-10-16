@@ -27,6 +27,9 @@ What it checks (see docs/SMOKE_TEST.md):
      the removed row is marked deleted (_deleted_at), not dropped.
   10. The original file uploaded again (a restore): it loads, its
       values win, and the removed row is current again.
+  11. With Contract.file_name set, a copy under another name is
+      quarantined; the file under the agreed name is skipped as
+      already loaded.
 
 In PowerShell, first confirm these are set:
     $env:GCP_PROJECT_ID
@@ -42,6 +45,7 @@ import argparse
 import os
 import shutil
 import sys
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -339,6 +343,23 @@ def main() -> None:
     print(f"  {rows_now}")
     check(rows_now[first_id] == (10, False), "original value back")
     check(rows_now[second_id] == (20, False), "removed row current again")
+
+    print("\n11. Typed route: a copy under another name (file_name)")
+    named = replace(contract, file_name=valid_file.name)
+    misnamed = input_dir / f"copy of {valid_file.name}"
+    shutil.copy2(valid_file, misnamed)
+    results = run(
+        Pipeline(LocalSource(input_dir), store, typed, named), "run 11"
+    )
+    check(
+        outcome_of(results, misnamed.name) == Outcome.QUARANTINED,
+        "other name QUARANTINED",
+    )
+    check(
+        outcome_of(results, valid_file.name) == Outcome.SKIPPED,
+        "agreed name SKIPPED (already loaded)",
+    )
+    misnamed.unlink()
 
     print("\nSmoke test passed.")
 

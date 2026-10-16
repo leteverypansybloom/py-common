@@ -180,15 +180,24 @@ class Contract:
             anything is extracted. Guards against "zip bombs": a
             small file that would expand to fill memory. Lower both
             to fit the job's memory if needed.
+        file_name: The name every upload of this workbook must have,
+            e.g. "WAS export.xlsx". A file under any other name is
+            rejected (quarantined) before it is parsed. A source is
+            tracked by its file name: the raw tables' "latest upload"
+            and the typed route's deleted-row marking both work per
+            name, so a copy under another name would become a second
+            "latest" upload. None (the default) accepts any name.
+            The match is exact, capitals included.
     """
 
     key_columns: list[str] = field(default_factory=list)
     worksheets: list[Worksheet] = field(default_factory=list)
     max_file_bytes: int = DEFAULT_MAX_FILE_BYTES
     max_uncompressed_bytes: int = DEFAULT_MAX_UNCOMPRESSED_BYTES
+    file_name: str | None = None
 
     def __post_init__(self) -> None:
-        """Check key_columns can actually key a MERGE.
+        """Check settings that would otherwise fail confusingly later.
 
         A key the data doesn't have used to be dropped silently, and
         a NULL key never matches in a MERGE, so both turned upserts
@@ -198,9 +207,18 @@ class Contract:
         Raises:
             ValueError: A key column isn't a listed column of the
                 primary worksheet, is nullable, or there are key
-                columns but no worksheets; or a size limit isn't
-                positive.
+                columns but no worksheets; a size limit isn't
+                positive; or file_name is blank or a path.
         """
+        if self.file_name is not None and (
+            not self.file_name.strip()
+            or "/" in self.file_name
+            or "\\" in self.file_name
+        ):
+            raise ValueError(
+                "Contract file_name must be a file's name, without a "
+                f"folder, e.g. 'WAS export.xlsx'; got {self.file_name!r}"
+            )
         for name in ("max_file_bytes", "max_uncompressed_bytes"):
             if getattr(self, name) <= 0:
                 raise ValueError(
@@ -248,7 +266,8 @@ class Contract:
 
         Args:
             excel_bytes: Raw Excel file bytes.
-            source_name: Filename for error messages.
+            source_name: The file's name: checked against file_name
+                if the contract sets one, and used in error messages.
             warnings: List to append problems to for worksheets whose
                 on_mismatch is "warn" (mutated). If None, those
                 problems are still tolerated but not reported.
@@ -258,8 +277,9 @@ class Contract:
             in contract order.
 
         Raises:
-            ContractError: Contract is misconfigured, or worksheet
-                structure doesn't match it.
+            ContractError: Contract is misconfigured, the file has
+                the wrong name, or worksheet structure doesn't match
+                the contract.
             ValidationError: Data violates contract rules.
         """
         return self._read(excel_bytes, source_name, warnings, check=True)
@@ -277,15 +297,14 @@ class Contract:
 
         Args:
             excel_bytes: Raw Excel file bytes.
-            source_name: Filename for error messages.
+            source_name: As read().
             warnings: As read().
 
         Returns:
             Row count of the first configured worksheet if valid.
 
         Raises:
-            ContractError: Contract is misconfigured, or worksheet
-                structure doesn't match it.
+            ContractError: As read().
             ValidationError: Data violates contract rules.
         """
         sheets = self.read(excel_bytes, source_name, warnings)
@@ -333,6 +352,8 @@ class Contract:
         Returns:
             SheetRows per configured worksheet.
         """
+        if check:
+            self._check_file_name(source_name)
         wb = self._open(excel_bytes, source_name)
         if warnings is None:
             warnings = []
@@ -429,6 +450,26 @@ class Contract:
         if ws_def.on_mismatch == "quarantine":
             raise ValidationError(message)
         warnings.append(message)
+
+    def _check_file_name(self, source_name: str) -> None:
+        """Refuse a file that doesn't have the agreed name.
+
+        Checked first, before the file is opened: the name alone
+        decides it, and a stray file needn't be parsed to be refused.
+
+        Args:
+            source_name: The file's name at the source.
+
+        Raises:
+            ContractError: file_name is set and source_name differs.
+        """
+        if self.file_name is None or source_name == self.file_name:
+            return
+        raise ContractError(
+            f"{source_name}: wrong file name, expected '{self.file_name}' "
+            "(Contract.file_name). Upload the file under that name and "
+            "delete this one; until then it is quarantined on every run."
+        )
 
     def _open(self, excel_bytes: bytes, source_name: str) -> Workbook:
         """Parse the workbook and check every worksheet is present.

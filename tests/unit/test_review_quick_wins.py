@@ -5,8 +5,6 @@ import logging
 import subprocess
 import sys
 import zipfile
-from collections.abc import Iterator
-from contextlib import contextmanager
 from importlib.metadata import requires
 from pathlib import Path
 from typing import Any
@@ -14,6 +12,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 from _fake_gcs import FakeBucket
+from _memory_store import MemoryStore
 from google.api_core.exceptions import BadRequest, Forbidden
 from openpyxl import Workbook
 from packaging.requirements import Requirement
@@ -27,7 +26,6 @@ from py_common.adapters.bigquery import BigQueryWarehouse
 from py_common.adapters.bigquery_raw import RawJsonWarehouse
 from py_common.adapters.gcs import GCSObjectStore, GCSSource
 from py_common.adapters.local import LocalSource
-from py_common.errors import ObjectStoreConflict
 from py_common.contract import Column, Contract, Worksheet
 from py_common.errors import ConfigError, ContractError, ServiceError
 from py_common.logging import JsonFormatter, configure_json_logging
@@ -57,29 +55,6 @@ def _warehouse() -> Mock:
     warehouse = Mock(identity="p.d.t")
     warehouse.load.return_value = True
     return warehouse
-
-
-class MemoryStore:
-    """Dict-backed ObjectStore with the real put() conflict rule.
-
-    Used instead of LocalObjectStore, whose deep keys can pass
-    Windows' 260-character path limit under a long temp directory.
-    """
-
-    def __init__(self) -> None:
-        self.objects: dict[str, bytes] = {}
-
-    def get(self, key: str) -> bytes | None:
-        return self.objects.get(key)
-
-    def put(self, key: str, data: bytes) -> None:
-        if key in self.objects and self.objects[key] != data:
-            raise ObjectStoreConflict(key)
-        self.objects[key] = data
-
-    @contextmanager
-    def lock(self, key: str) -> Iterator[None]:
-        yield
 
 
 # ------------------------------------------------------------------ M1
