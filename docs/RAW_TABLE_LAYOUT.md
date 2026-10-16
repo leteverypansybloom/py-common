@@ -174,7 +174,8 @@ example below) is a second line of defence.
 `file_name`, then upload under the new name. The old name's last
 upload still counts as "latest" for the old name, so filter it out in
 Dataform (`WHERE source_file != 'old name.xlsx'`), or delete its rows
-from the raw tables once the new name has loaded.
+from the raw tables once the new name has loaded. Reloading,
+undoing and removing uploads are in [`RUNBOOK.md`](RUNBOOK.md).
 
 **Payload fields.** Use `JSON_VALUE` for text and `LAX_` or
 `SAFE_CAST` for types. Quote keys that contain spaces or punctuation:

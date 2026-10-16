@@ -178,9 +178,11 @@ exact; where nothing exists, that's stated plainly rather than implied.
   `audit/...` markers no longer forces a reload: since 0.2.0 the
   warehouse's own audit table decides, inside the commit transaction.
   Only the current version of each landing file is listed; earlier
-  GCS generations are kept but not loaded. (For the raw JSON route a
-  replay is rarely needed: every loaded version is in the raw table,
-  and the cleaning layer can be rerun from it.)
+  GCS generations are kept but not loaded. A reload is an upload:
+  uploading a file again (after a contract fix, say) loads it as a
+  new upload, and restoring an earlier version undoes a bad one
+  ([`RUNBOOK.md`](RUNBOOK.md)). For cumulative files, where each
+  upload holds the full history, that is all a replay would do.
 
 ### 2.3 Make trustworthy — contracts, schema and quality
 
@@ -500,7 +502,7 @@ behaviour doesn't match the promise), **Missing** (nothing exists).
 | Delivery ledger / receipts | Partial | The audit record *is* a delivery ledger for BigQuery; no equivalent receipt concept for external destination APIs (none exist yet). |
 | Quarantine / dead-letter storage | **Have** (file-level) | `pipeline.py`, `quarantine/{identity}/{checksum}/{name}` key, with the original file also kept in `raw/`. Row-level quarantine belongs in the Dataform layer for the raw JSON route. |
 | Reconciliation | Missing | No source-count vs. destination-count check after a load completes. |
-| Backfill and replay | Missing | No rebuild/replay command; manual procedure only (clear the checksum audit key). |
+| Backfill and replay | Partial | No command, by design: uploading a file again reloads it with the current contract, and restoring an earlier GCS version undoes a bad upload (`docs/RUNBOOK.md`). Earlier versions aren't loaded in bulk. |
 | Lineage and audit trail | **Have** (file-level) | `model.py`, written by `pipeline.py`. Each record names the converted copy loaded, the contract (`contract_fingerprint`) and the py-common version used. No run-level record. |
 | Logging, metrics, alerts | Partial | Plain-text logging exists, with contract warnings at WARNING. `runner.run_job()`/`handle_upload()` turn FAILED files into a failed job or a retried event, and `runner.check_freshness()` logs overdue sources. Alerts are documented as manual steps (`GCP_SETUP.md`), not built as code. |
 | Run-status API/dashboard | Missing | Nothing queries the audit trail for a status view. |
@@ -619,7 +621,7 @@ transaction with its audit record (2026-09-21; see `DECISIONS_en.md`).
 2. **Add a minimum-row-count check** to `Contract` (e.g. an optional
    `min_rows` field, default 1) so an empty export is caught rather than
    silently marked `LOADED` with zero rows.
-3. ~~Implement a real `ObjectStore.lock()` for GCP~~ — done: `GCSObjectStore.lock()` (`adapters/gcs.py`) uses atomic create-if-absent. Still to do: an operator runbook for clearing a stale lock.
+3. ~~Implement a real `ObjectStore.lock()` for GCP~~ — done: `GCSObjectStore.lock()` (`adapters/gcs.py`) uses atomic create-if-absent, as a lease. Clearing a stale lock is in `docs/RUNBOOK.md`, with reloading and undoing uploads.
 4. **Add a `SecretStore` adapter for Secret Manager**, implementing the
    existing protocol (`ports.py`), before any credential (a
    SharePoint client secret, in particular) is wired into configuration.

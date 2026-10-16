@@ -505,6 +505,9 @@ What happens when:
   `file_name`): quarantined like any invalid file, and again on every
   run until it is deleted from the folder. Uploading it under the
   right name doesn't remove the wrong one.
+- **A contract was wrong, or an upload was bad:** fix and upload
+  again, or restore the last good version; see
+  [`RUNBOOK.md`](RUNBOOK.md).
 - **The service is down:** Pub/Sub keeps an undelivered event for 24
   hours by default, then drops it. The daily job loads the file
   anyway.

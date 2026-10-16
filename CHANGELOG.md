@@ -175,8 +175,10 @@ loaded into BigQuery twice, whatever fails and wherever it fails.
   The warning is logged and kept in the audit JSON, not in BigQuery.
 - **Re-pointing a raw table at a different sheet** (swapping the
   mapping) doesn't reload files that table already had.
-- Only each landing file's current version is loaded; there is no
-  replay command.
+- Only each landing file's current version is loaded, and there is
+  no replay command: to reload a file (after a contract fix, say),
+  upload it again. `docs/RUNBOOK.md` covers reloading, undoing and
+  removing uploads, and renaming a workbook.
 - **A source is tracked by its file name.** On the raw route,
   "latest upload" is per `source_file`, so a cumulative file uploaded
   under a new name each time returns duplicate current rows; on the
