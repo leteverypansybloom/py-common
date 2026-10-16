@@ -45,6 +45,24 @@ Two load routes share the steps above:
   [`docs/RAW_TABLE_LAYOUT.md`](docs/RAW_TABLE_LAYOUT.md) and
   [`docs/GCP_SETUP.md`](docs/GCP_SETUP.md).
 
+**Typed column names.** BigQuery column names may only use letters,
+digits and underscores, can't start with a digit, ignore case, and
+are at most 300 characters. So the typed route names each column
+after its heading by these rules (`py_common.parquet.column_name()`):
+
+- accents are dropped, and `%`, `&`, `#` and `+` are spelled out
+  (`percent`, `and`, `number`, `plus`);
+- any other run of characters that aren't letters or digits becomes
+  one `_`, and letters are lower case;
+- a name starting with a digit gets `col_` in front; a heading with
+  no letters or digits is named by its position (`col_3`);
+- names that still clash get `_2`, `_3`, ... (merge keys keep theirs).
+
+For example, `Date of Enquiry` → `date_of_enquiry`, `% complete` →
+`percent_complete` and `2024 total` → `col_2024_total`. Contracts and
+`key_columns` still use the headings as written, and the raw route's
+JSON keys are not changed.
+
 ## Quick Start
 
 See [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) — the single

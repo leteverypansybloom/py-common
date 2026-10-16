@@ -75,7 +75,8 @@ Keys are column names as py-common reads them from the heading row
 
 - **Headings are used exactly as written.** Nothing is trimmed, so
   `'Organisation Industry '` keeps its trailing space. Numeric or date
-  headings become text.
+  headings become text. (Typed tables are different: their column
+  names are made BigQuery-safe, e.g. `organisation_industry`.)
 - **Blank heading over data:** named after the column letter, e.g.
   `col_B`. A blank heading over an empty column is ignored.
 - **Repeated heading:** the first keeps its name, later ones get `_2`,

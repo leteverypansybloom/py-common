@@ -689,10 +689,10 @@ class TestPipelineToParquetHeaderRow:
 
 
 class TestPipelineToParquetHeadingNames:
-    """_to_parquet() keeps every column under its read_sheet() name."""
+    """_to_parquet() keeps every column, under a BigQuery-safe name."""
 
     def test_repeated_headings_are_all_kept(self) -> None:
-        """Both "Other" columns reach the Parquet file."""
+        """Both "Other" columns reach the Parquet file (M4 names)."""
         contract = Contract(
             worksheets=[
                 Worksheet(
@@ -717,7 +717,7 @@ class TestPipelineToParquetHeadingNames:
             BytesIO(pipeline._to_parquet(buffer.getvalue()))
         )
 
-        assert frame.to_dict("records") == [{"Other": "a", "Other_2": "b"}]
+        assert frame.to_dict("records") == [{"other": "a", "other_2": "b"}]
 
 
 class TestPipelineToParquetColumnSelection:

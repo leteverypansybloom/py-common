@@ -284,7 +284,9 @@ exact; where nothing exists, that's stated plainly rather than implied.
   plain append when no key columns are given. A key column missing
   from the data is a `ContractError`, and duplicate or NULL keys in
   staging are a `ValidationError` naming up to five of them, found
-  before the `MERGE`; both quarantine the file.
+  before the `MERGE`; both quarantine the file. Column names are made
+  BigQuery-safe from the headings (`Date of Enquiry` →
+  `date_of_enquiry`; rules in the README, "Typed column names").
 - **The one thing to get right as a caller:** pass
   `key_columns=contract.key_columns` when you construct
   `BigQueryWarehouse`. If you don't, every new upload of a file

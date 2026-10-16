@@ -13,12 +13,17 @@ pyarrow infer it from the values, matters twice over:
   and staged with a different type than last month. Here it keeps its
   declared type.
 
+Columns are named for BigQuery, not as headed in the sheet: see
+column_name().
+
 Pure functions only: no cloud SDK imports, and the output is a
 function of the inputs alone (no timestamps), so a retry writes
 identical bytes.
 """
 
-from collections.abc import Callable
+import re
+import unicodedata
+from collections.abc import Callable, Iterable, Sequence
 from datetime import date, datetime, time, timezone
 from io import BytesIO
 from typing import Any
@@ -28,6 +33,16 @@ import pyarrow.parquet as pq
 
 from py_common.contract import SheetRows, Worksheet, _is_blank
 from py_common.errors import ValidationError
+
+#: Longest column name BigQuery accepts.
+MAX_COLUMN_NAME = 300
+
+#: Symbols spelled out in column names, so that "Score %" and "Score"
+#: stay apart (score_percent, score).
+_SPELLED_OUT = {"%": " percent ", "&": " and ", "#": " number ", "+": " plus "}
+
+#: A run of characters that can't be in a column name.
+_NOT_NAME = re.compile(r"[^a-z0-9]+")
 
 #: Arrow type for each Column.data_type. Columns not declared in the
 #: contract ("all_except" picks them up) are written as strings.
@@ -48,11 +63,103 @@ class _Unconvertible(Exception):
     """A value can't be represented in its column's type."""
 
 
+def column_name(heading: str) -> str:
+    """The BigQuery column name for a heading, before numbering.
+
+    BigQuery column names allow only letters, digits and underscores,
+    must not start with a digit, ignore case (so "Score" and "score"
+    clash) and are at most 300 characters. So:
+
+    - accents are dropped ("Café" -> "cafe");
+    - %, &, # and + are spelled out (percent, and, number, plus);
+    - every other run of characters that aren't letters or digits
+      becomes one "_", with none at either end;
+    - letters are lower case;
+    - a name starting with a digit gets "col_" in front;
+    - it is cut to 300 characters.
+
+    "Date of Enquiry" becomes date_of_enquiry. A name this function
+    gives comes back unchanged, so key_columns may be given as the
+    headings or as their column names. No name starts with "_", so
+    none can take one of BigQuery's reserved prefixes (_TABLE_,
+    _PARTITION, ...) or a column the warehouse sets (_loaded_at).
+
+    Args:
+        heading: The column's heading, as Contract.read() names it.
+
+    Returns:
+        The name, or "" if the heading has no letters or digits.
+    """
+    spelled = "".join(_SPELLED_OUT.get(char, char) for char in heading)
+    plain = "".join(
+        char
+        for char in unicodedata.normalize("NFKD", spelled)
+        if not unicodedata.combining(char)
+    )
+    name = _NOT_NAME.sub("_", plain.lower()).strip("_")
+    if name[:1].isdigit():
+        name = f"col_{name}"
+    return name[:MAX_COLUMN_NAME].rstrip("_")
+
+
+def column_names(
+    headings: Sequence[str], keys: Iterable[str] = ()
+) -> list[str]:
+    """BigQuery column names for a worksheet's loaded columns.
+
+    Each heading gets column_name(), or "col_<position>" (1 for the
+    first loaded column) if it has no letters or digits. Names that
+    still clash are numbered as repeated headings are: the first
+    keeps the name, later ones get "_2", "_3", ... left to right,
+    skipping names other columns have as their own. Merge keys are
+    named first and never numbered, so a key column is always
+    column_name(key) and the warehouse can name it without seeing
+    the sheet.
+
+    Args:
+        headings: The loaded columns' headings, in order.
+        keys: Headings of the merge key columns.
+
+    Returns:
+        One unique name per heading, in order.
+
+    Raises:
+        ValueError: Two key columns get the same name.
+    """
+    bases = [
+        column_name(heading) or f"col_{position}"
+        for position, heading in enumerate(headings, start=1)
+    ]
+    key_set = set(keys)
+    used: set[str] = set()
+    for heading, base in zip(headings, bases):
+        if heading in key_set:
+            if base in used:
+                raise ValueError(
+                    f"Two key columns become the BigQuery column '{base}'"
+                )
+            used.add(base)
+    natural = set(bases)
+    names: list[str] = []
+    for heading, base in zip(headings, bases):
+        name = base
+        if heading not in key_set:
+            number = 2
+            while name in used or (name != base and name in natural):
+                suffix = f"_{number}"
+                name = base[: MAX_COLUMN_NAME - len(suffix)] + suffix
+                number += 1
+            used.add(name)
+        names.append(name)
+    return names
+
+
 def to_parquet(
     sheet: SheetRows,
     worksheet: Worksheet,
     source_name: str = "workbook",
     warnings: list[str] | None = None,
+    key_columns: Sequence[str] = (),
 ) -> bytes:
     """Write one worksheet's rows as Parquet, typed by its contract.
 
@@ -64,9 +171,12 @@ def to_parquet(
         warnings: Where to append one warning per column with values
             that couldn't be converted (mutated). They are loaded as
             NULL. In "quarantine" mode they raise instead.
+        key_columns: The contract's merge keys, whose names
+            column_names() settles first.
 
     Returns:
-        Parquet bytes, columns in sheet.columns order.
+        Parquet bytes, columns in sheet.columns order, named by
+        column_names(). Warnings use the headings.
     """
     declared = {column.name: column.data_type for column in worksheet.columns}
     types = [declared.get(name, "string") for name in sheet.columns]
@@ -109,7 +219,9 @@ def to_parquet(
     schema = pa.schema(
         [
             pa.field(name, ARROW_TYPES[data_type])
-            for name, data_type in zip(sheet.columns, types)
+            for name, data_type in zip(
+                column_names(sheet.columns, key_columns), types
+            )
         ]
     )
     table = pa.Table.from_arrays(

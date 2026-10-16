@@ -568,7 +568,13 @@ class Pipeline:
             Parquet-encoded bytes of the primary worksheet.
         """
         primary = self.contract.worksheets[0]
-        return to_parquet(sheets[primary.name], primary, source_name, warnings)
+        return to_parquet(
+            sheets[primary.name],
+            primary,
+            source_name,
+            warnings,
+            key_columns=self.contract.key_columns,
+        )
 
     def _store_processed(
         self, item: SourceItem, checksum: str, processed: bytes

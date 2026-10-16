@@ -46,6 +46,15 @@ loaded into BigQuery twice, whatever fails and wherever it fails.
   `Worksheet` sets `allow_empty=True`, whatever `on_mismatch` says.
 - **`_deleted_at` and `_source_file` are reserved** typed-table
   column names, like `_loaded_at`.
+- **Typed tables have BigQuery-safe column names.** Headings used to
+  become column names as written, and one BigQuery refuses (a space
+  in it, a clash that differs only in case, over 300 characters)
+  failed the file on every retry. Now `Date of Enquiry` becomes
+  `date_of_enquiry`, by the rules in the README ("Typed column
+  names"; `py_common.parquet.column_name()`). Contracts and
+  `key_columns` still use the headings; `BigQueryWarehouse` refuses
+  key columns that would share a name. Raw JSON payload keys are
+  unchanged.
 - **Warehouse `ServiceError` is `FAILED` (retried), not
   `QUARANTINED`.** A `ValidationError` from the warehouse is
   quarantined.

@@ -30,6 +30,7 @@ from py_common.adapters._bq_jobs import (
 )
 from py_common.errors import ContractError, ServiceError, ValidationError
 from py_common.model import SourceItem
+from py_common.parquet import column_name
 
 logger = logging.getLogger("py_common.adapters.bigquery")
 
@@ -64,8 +65,10 @@ class BigQueryWarehouse:
         table_id (str): Final table name.
         audit_table_id (str): Audit table name (default: "audit").
         key_columns (list[str]): Columns identifying a unique logical
-            row, used to upsert into the final table. Empty means
-            append-only (no deduplication on reprocess).
+            row, used to upsert into the final table, as the contract
+            names them. Empty means append-only (no deduplication on
+            reprocess). The table's columns, keys included, have
+            BigQuery-safe names (py_common.parquet.column_name()).
         mark_deleted_rows (bool): Mark rows that a file's newest
             upload no longer contains (see __init__).
         client (bigquery.Client): BigQuery client.
@@ -104,7 +107,8 @@ class BigQueryWarehouse:
 
         Raises:
             ValueError: mark_deleted_rows without key_columns (rows
-                can't be matched without a key).
+                can't be matched without a key), or key columns that
+                can't each have a BigQuery name of their own.
         """
         if mark_deleted_rows and not key_columns:
             raise ValueError(
@@ -116,6 +120,16 @@ class BigQueryWarehouse:
         self.table_id = table_id
         self.audit_table_id = audit_table_id
         self.key_columns = key_columns or []
+        # The names the Parquet file and the table use for the keys.
+        self._key_names = [column_name(key) for key in self.key_columns]
+        if "" in self._key_names or len(set(self._key_names)) != len(
+            self._key_names
+        ):
+            raise ValueError(
+                f"key_columns {self.key_columns!r} become BigQuery columns "
+                f"{self._key_names!r}: each needs a letter or digit, and "
+                "no two may become the same name"
+            )
         self.mark_deleted_rows = mark_deleted_rows
         self.client = bigquery.Client(project=project_id)
 
@@ -278,13 +292,13 @@ class BigQueryWarehouse:
             )
         # Every configured key must be there: merging on fewer keys
         # overwrites unrelated rows, and on none appends duplicates.
-        missing = [c for c in self.key_columns if c not in columns]
+        missing = [c for c in self._key_names if c not in columns]
         if missing:
             raise ContractError(
                 f"{key}: key column(s) {', '.join(missing)} not in the "
                 f"data; staging has {', '.join(columns)}"
             )
-        key_columns = self.key_columns
+        key_columns = self._key_names
 
         self._reconcile_final_table(staging_table.schema, final_full_id, key)
 
