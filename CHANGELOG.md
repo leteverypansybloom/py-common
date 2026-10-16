@@ -11,6 +11,12 @@ is 0, a minor release (0.x.0) may break that API, and says how below.
 Implements the code review in `REVIEW.md`. The aim: a file is never
 loaded into BigQuery twice, whatever fails and wherever it fails.
 
+The review documents (`REVIEW.md`, `REVIEW_.md` and an external
+review) were removed from the repository once their findings were
+dealt with. The finding IDs in comments and commit messages (H1, M4,
+L7, ...) refer to them, and git still has them, e.g. `git show
+6378a43:REVIEW_.md`.
+
 ### Breaking
 
 - **`Warehouse.load()` takes the source item and returns `bool`.**
