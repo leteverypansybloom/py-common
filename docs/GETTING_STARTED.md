@@ -45,7 +45,7 @@ python -m pre_commit install
 **After editing `pyproject.toml`** (a version bump or a dependency
 change), run the `pip install -e` line again. The editable install's
 recorded metadata is not refreshed otherwise, and the dependency tests
-in `tests/unit/test_review_quick_wins.py` read that metadata.
+in `tests/unit/test_packaging.py` read that metadata.
 
 **Why `gcp` is included:** the unit tests for `GCSObjectStore` and
 `BigQueryWarehouse` import `google.cloud` directly (mocking the calls, not the

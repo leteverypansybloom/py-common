@@ -160,3 +160,29 @@ def test_unreadable_lock_is_never_taken(
 def test_lease_must_be_positive() -> None:
     with pytest.raises(ValueError, match="lease_seconds"):
         _store(FakeBucket(), lease_seconds=0)
+
+
+class TestNaiveLeaseTimes:
+    """A lock with a time-zone-less time is never taken over."""
+
+    @pytest.mark.parametrize(
+        "holder",
+        [
+            '{"run_id": "x", "expires_at": "2026-01-01T00:00:00"}',
+            '{"run_id": "x", "acquired_at": "2026-01-01T00:00:00"}',
+        ],
+    )
+    def test_refused_not_type_error(self, holder: str) -> None:
+        bucket = FakeBucket()
+        with patch("py_common.adapters.gcs.storage.Client"):
+            store = GCSObjectStore("p", "store")
+        store.bucket = bucket
+        bucket.blob("locks/k").upload_from_string(
+            holder, if_generation_match=0
+        )
+
+        with pytest.raises(RuntimeError, match="held by another run"):
+            with store.lock("locks/k"):
+                pass
+
+        assert bucket.objects["locks/k"][0].decode() == holder

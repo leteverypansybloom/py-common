@@ -17,6 +17,8 @@ from unittest.mock import Mock, MagicMock, patch
 from py_common.adapters.bigquery import BigQueryWarehouse
 from py_common.errors import ContractError, ServiceError
 from py_common.model import SourceItem
+from py_common.adapters._bq_jobs import JOB_TIMEOUT_SECONDS
+from py_common.adapters._bq_jobs import wait_for_load
 
 #: Source file passed to every load().
 ITEM = SourceItem("test.xlsx", "landing/test.xlsx", "1", 10)
@@ -753,3 +755,14 @@ class TestBigQueryWarehouseLoadedAt:
 
         sql_calls = [c[0][0] for c in warehouse.client.query.call_args_list]
         assert not any("BEGIN TRANSACTION" in s for s in sql_calls)
+
+
+def test_load_wait_is_bounded_and_cancelled_on_timeout() -> None:
+    job = Mock(job_id="load-1")
+    job.result.side_effect = TimeoutError("still running")
+
+    with pytest.raises(ServiceError, match="load-1"):
+        wait_for_load(job, "k")
+
+    assert job.result.call_args.kwargs["timeout"] == JOB_TIMEOUT_SECONDS
+    job.cancel.assert_called_once()

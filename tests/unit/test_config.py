@@ -5,6 +5,7 @@ import os
 import pytest
 
 from py_common.config import ConfigError, interpolate, load_config
+from pathlib import Path
 
 
 def test_interpolate_valid_variable():
@@ -103,3 +104,18 @@ def test_require_keys_missing():
         from py_common.config import require_keys
 
         require_keys(config, ["a", "b", "c"])
+
+
+class TestConfigFile:
+    """M21: UTF-8, and the top level must be a mapping."""
+
+    def test_list_root_is_rejected(self, tmp_path: Path) -> None:
+        path = tmp_path / "c.yaml"
+        path.write_text("- a\n- b\n", encoding="utf-8")
+        with pytest.raises(ConfigError, match="mapping"):
+            load_config(path)
+
+    def test_utf8_is_read_on_any_platform(self, tmp_path: Path) -> None:
+        path = tmp_path / "c.yaml"
+        path.write_bytes("name: Iechyd Cyhoeddus – Cymru\n".encode("utf-8"))
+        assert load_config(path) == {"name": "Iechyd Cyhoeddus – Cymru"}

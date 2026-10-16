@@ -1100,3 +1100,22 @@ class TestSharePointSourceInPipeline:
         store.put.assert_any_call(
             f"raw/ID1/{digest(workbook)}/events.xlsx", workbook
         )
+
+
+class TestGraphNextLink:
+    """M12: the bearer token never goes to a host other than Graph."""
+
+    def test_foreign_next_link_is_refused(self) -> None:
+        from py_common.adapters.sharepoint import SharePointSource
+
+        source = SharePointSource.__new__(SharePointSource)
+        source._graph_url = "https://graph.microsoft.com/v1.0"
+        pages = [
+            {"value": [{"a": 1}], "@odata.nextLink": "https://evil.example/x"}
+        ]
+        source._get_json = Mock(side_effect=pages)  # type: ignore
+        source._path = lambda url: url  # type: ignore
+
+        with pytest.raises(ServiceError, match="outside"):
+            source._get_all("https://graph.microsoft.com/v1.0/a")
+        assert source._get_json.call_count == 1

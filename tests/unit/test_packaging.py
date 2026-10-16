@@ -1,0 +1,61 @@
+"""Tests of packaging and test-suite hygiene."""
+
+import subprocess
+import sys
+from importlib.metadata import requires
+import pytest
+from packaging.requirements import Requirement
+
+
+def _requirement(name: str, extra: str | None = None) -> Requirement:
+    for raw in requires("py-common") or []:
+        req = Requirement(raw)
+        in_extra = req.marker is not None and "extra" in str(req.marker)
+        wanted = extra is not None and f'extra == "{extra}"' in str(req.marker)
+        if req.name.lower() == name and (
+            wanted or (extra is None and not in_extra)
+        ):
+            return req
+    raise AssertionError(f"py-common doesn't require {name} ({extra})")
+
+
+class TestDependencyFloors:
+    """The package can't install XML-unsafe or known-vulnerable deps."""
+
+    def test_defusedxml_is_a_runtime_dependency(self) -> None:
+        """openpyxl only guards against XML entity attacks with it."""
+        assert _requirement("defusedxml")
+
+    def test_pyarrow_floor_excludes_advisories(self) -> None:
+        spec = _requirement("pyarrow").specifier
+        assert not spec.contains("23.0.0")
+        assert spec.contains("23.0.1")
+
+    @pytest.mark.parametrize("extra", ["sharepoint", "dev"])
+    def test_requests_floor_excludes_advisories(self, extra: str) -> None:
+        spec = _requirement("requests", extra).specifier
+        assert not spec.contains("2.32.4")
+        assert spec.contains("2.33.0")
+
+
+def test_live_tests_are_all_marked_integration() -> None:
+    """The unit selection never collects a test that calls GCP."""
+    done = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "--collect-only",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            "-m",
+            "not integration",
+            "tests/integration",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert done.returncode == 5, done.stdout + done.stderr  # none collected

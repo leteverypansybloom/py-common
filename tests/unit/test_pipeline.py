@@ -26,6 +26,19 @@ from py_common.errors import (
 )
 from py_common.model import Outcome, Result, SourceItem, digest
 from py_common.pipeline import Pipeline
+import io
+import logging
+from pathlib import Path
+from typing import Any
+from unittest.mock import patch
+from _fake_gcs import FakeBucket
+from google.api_core.exceptions import Forbidden
+from py_common.adapters.bigquery import BigQueryWarehouse
+from py_common.adapters.bigquery_raw import RawJsonWarehouse
+from py_common.adapters.gcs import GCSObjectStore
+from py_common.adapters.local import LocalSource
+from py_common.errors import ConfigError
+from unittest.mock import MagicMock
 
 
 @pytest.fixture
@@ -1038,3 +1051,294 @@ class TestPipelineOutputFormat:
 
         assert first.outcome == Outcome.FAILED
         assert second.outcome == Outcome.LOADED, second.errors
+
+
+CONTRACT = Contract(
+    worksheets=[Worksheet("Events", [Column("name", "string")])]
+)
+
+
+def _book(rows: list[list[Any]], title: str = "Events") -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    assert ws is not None
+    ws.title = title
+    for row in rows:
+        ws.append(row)
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
+def _warehouse() -> Mock:
+    warehouse = Mock(identity="p.d.t")
+    warehouse.load.return_value = True
+    return warehouse
+
+
+def _typed(keys: list[str]) -> BigQueryWarehouse:
+    with patch("py_common.adapters.bigquery.bigquery.Client"):
+        return BigQueryWarehouse("p", "d", "t", key_columns=keys)
+
+
+def _raw(tables: dict[str, str]) -> RawJsonWarehouse:
+    with patch("py_common.adapters.bigquery_raw.bigquery.Client"):
+        return RawJsonWarehouse("p", "d", tables)
+
+
+KEYED = Contract(
+    key_columns=["id"],
+    worksheets=[Worksheet("Events", [Column("id", "integer")])],
+)
+
+
+TWO_SHEETS = Contract(
+    worksheets=[
+        Worksheet("Events", [Column("id", "integer")]),
+        Worksheet("Other", [Column("x", "integer")]),
+    ]
+)
+
+
+class TestLockReleaseNeverRaises:
+    """A failed lock release is logged; it never hides the run's result."""
+
+    @pytest.fixture
+    def store(self) -> tuple[GCSObjectStore, FakeBucket]:
+        bucket = FakeBucket()
+        with patch("py_common.adapters.gcs.storage.Client"):
+            store = GCSObjectStore("p", "store")
+        store.bucket = bucket
+        real_blob = bucket.blob
+
+        def blob(key: str) -> Any:
+            found = real_blob(key)
+            if key.startswith("locks/"):
+
+                def refuse(if_generation_match: Any = None) -> None:
+                    raise Forbidden("no storage.objects.delete on locks/")
+
+                found.delete = refuse  # type: ignore[method-assign]
+            return found
+
+        bucket.blob = blob  # type: ignore[method-assign]
+        return store, bucket
+
+    def test_release_failure_is_logged_not_raised(
+        self,
+        store: tuple[GCSObjectStore, FakeBucket],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        gcs, bucket = store
+
+        with caplog.at_level(logging.ERROR, logger="py_common.adapters.gcs"):
+            with gcs.lock("locks/k"):
+                pass
+
+        assert "locks/k" in bucket.objects  # left to expire
+        assert any(
+            "Could not release lock locks/k" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_run_still_returns_its_results(
+        self, store: tuple[GCSObjectStore, FakeBucket], tmp_path: Path
+    ) -> None:
+        gcs, _ = store
+        (tmp_path / "a.xlsx").write_bytes(_book([["name"], ["x"]]))
+
+        results = Pipeline(
+            LocalSource(tmp_path), gcs, _warehouse(), CONTRACT
+        ).run()
+
+        assert [r.outcome for r in results] == [Outcome.LOADED]
+
+
+class TestMarkerBeforeDownload:
+    """An upload already loaded here isn't downloaded again."""
+
+    @pytest.fixture
+    def setup(self, tmp_path: Path) -> tuple[Pipeline, list[str]]:
+        folder = tmp_path / "in"
+        folder.mkdir()
+        (folder / "a.xlsx").write_bytes(_book([["name"], ["x"]]))
+        source = LocalSource(folder)
+        downloads: list[str] = []
+        real = source.download
+
+        def download(item: Any) -> bytes:
+            downloads.append(item.name)
+            return real(item)
+
+        source.download = download  # type: ignore[method-assign]
+        pipeline = Pipeline(source, MemoryStore(), _warehouse(), CONTRACT)
+        return pipeline, downloads
+
+    def test_second_run_skips_without_downloading(
+        self, setup: tuple[Pipeline, list[str]]
+    ) -> None:
+        pipeline, downloads = setup
+
+        first = pipeline.run()
+        second = pipeline.run()
+
+        assert [r.outcome for r in first] == [Outcome.LOADED]
+        assert [r.outcome for r in second] == [Outcome.SKIPPED]
+        assert downloads == ["a.xlsx"]
+
+    def test_unreachable_but_loaded_file_is_not_failed(
+        self, setup: tuple[Pipeline, list[str]]
+    ) -> None:
+        """A loaded file that can't be downloaded now isn't an alert."""
+        pipeline, _ = setup
+        pipeline.run()
+
+        def refuse(item: Any) -> bytes:
+            raise ServiceError("503 from the source")
+
+        pipeline.source.download = refuse  # type: ignore[method-assign]
+
+        assert [r.outcome for r in pipeline.run()] == [Outcome.SKIPPED]
+
+
+class TestPipelineConfigChecks:
+    """Mismatched keys or sheet mappings are refused when built."""
+
+    def test_warehouse_without_the_contract_keys_is_refused(self) -> None:
+        with pytest.raises(ConfigError, match="key_columns"):
+            Pipeline(Mock(), Mock(), _typed([]), KEYED)
+
+    def test_warehouse_with_other_keys_is_refused(self) -> None:
+        contract = Contract(
+            key_columns=["id"],
+            worksheets=[
+                Worksheet(
+                    "Events", [Column("id", "integer"), Column("n", "integer")]
+                )
+            ],
+        )
+        with pytest.raises(ConfigError, match="'n'"):
+            Pipeline(Mock(), Mock(), _typed(["n"]), contract)
+
+    def test_matching_keys_are_accepted(self) -> None:
+        assert Pipeline(Mock(), Mock(), _typed(["id"]), KEYED)
+
+    def test_raw_sheet_without_a_table_is_refused(self) -> None:
+        with pytest.raises(ConfigError, match="Other"):
+            Pipeline(
+                Mock(), Mock(), _raw({"Events": "t1"}), TWO_SHEETS, "raw_json"
+            )
+
+    def test_raw_table_without_a_sheet_is_refused(self) -> None:
+        with pytest.raises(ConfigError, match="Extra"):
+            Pipeline(
+                Mock(),
+                Mock(),
+                _raw({"Events": "t1", "Other": "t2", "Extra": "t3"}),
+                TWO_SHEETS,
+                "raw_json",
+            )
+
+    def test_matching_mapping_is_accepted(self) -> None:
+        assert Pipeline(
+            Mock(),
+            Mock(),
+            _raw({"Events": "t1", "Other": "t2"}),
+            TWO_SHEETS,
+            "raw_json",
+        )
+
+
+class TestOnlyParserErrorsQuarantine:
+    """A sheet the parser rejects is the file's fault; nothing else is."""
+
+    def test_memory_error_is_not_blamed_on_the_file(self) -> None:
+        with patch("py_common.contract.read_sheet", side_effect=MemoryError):
+            with pytest.raises(MemoryError):
+                CONTRACT.read(_book([["name"], ["x"]]), "f.xlsx")
+
+    def test_parser_error_quarantines(self) -> None:
+        with patch(
+            "py_common.contract.read_sheet", side_effect=ValueError("bad")
+        ):
+            with pytest.raises(ContractError, match="Cannot read worksheet"):
+                CONTRACT.read(_book([["name"], ["x"]]), "f.xlsx")
+
+
+ITEM = SourceItem("f.xlsx", "f.xlsx", "1", 1)
+
+
+def _book_r2(rows: list[list[Any]]) -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Events"
+    for row in rows:
+        ws.append(row)
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
+def _with_cell_value(data: bytes, old: bytes, new: bytes) -> bytes:
+    """Rewrite one stored cell value inside the sheet XML.
+
+    Excel stores numbers as doubles, so openpyxl can't write an
+    integer above 2**53 exactly; the XML is edited instead, as a file
+    from another tool could hold it.
+    """
+    import zipfile
+
+    out = io.BytesIO()
+    with (
+        zipfile.ZipFile(io.BytesIO(data)) as src,
+        zipfile.ZipFile(out, "w") as dst,
+    ):
+        for info in src.infolist():
+            body = src.read(info)
+            if info.filename == "xl/worksheets/sheet1.xml":
+                body = body.replace(old, new)
+            dst.writestr(info, body)
+    return out.getvalue()
+
+
+def _contract(mode: str = "quarantine") -> Contract:
+    return Contract(
+        worksheets=[
+            Worksheet(
+                "Events",
+                columns=[Column("name", "string"), Column("n", "integer")],
+                on_mismatch=mode,  # type: ignore[arg-type]
+            )
+        ]
+    )
+
+
+def _pipeline(data: bytes, contract: Contract) -> tuple[Pipeline, dict]:
+    objects: dict[str, bytes] = {}
+    store = MagicMock()
+    store.get.side_effect = objects.get
+    store.put.side_effect = objects.__setitem__
+    source = Mock()
+    source.items.return_value = [ITEM]
+    source.download.return_value = data
+    warehouse = Mock(identity="p.d.t")
+    warehouse.load.return_value = True
+    return Pipeline(source, store, warehouse, contract), objects
+
+
+class TestMalformedWorkbook:
+    """M05: a workbook that fails mid-read is quarantined, raw kept."""
+
+    def test_lazy_parse_error_is_quarantined_with_raw_copy(self) -> None:
+        bad = _with_cell_value(
+            _book_r2([["name", "n"], ["a", 1]]),
+            b"<v>1</v>",
+            b"<v>not-a-number</v>",
+        )
+        pipeline, objects = _pipeline(bad, _contract())
+
+        result = pipeline.process(ITEM)
+
+        assert result.outcome == Outcome.QUARANTINED, result.errors
+        assert any(k.startswith("raw/") for k in objects)
+        assert "Cannot read" in result.errors[0]

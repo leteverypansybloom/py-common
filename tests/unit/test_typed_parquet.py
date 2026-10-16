@@ -20,6 +20,9 @@ from py_common.contract import Column, Contract, SheetRows, Worksheet
 from py_common.model import Outcome, SourceItem
 from py_common.parquet import ARROW_TYPES, to_parquet
 from py_common.pipeline import Pipeline
+import io
+from unittest.mock import MagicMock
+from py_common.errors import ValidationError
 
 
 def _read(data: bytes) -> pa.Table:
@@ -93,7 +96,7 @@ class TestSchema:
 class TestCoercion:
     """In "warn" mode, values that don't fit become NULL with a warning.
 
-    In "quarantine" mode they raise (test_second_review_fixes.py).
+    In "quarantine" mode they raise (TestInt64Range, below).
     """
 
     def test_int_and_na_in_one_column_does_not_raise(self) -> None:
@@ -197,3 +200,108 @@ def test_pipeline_loads_warn_sheet_with_mixed_column() -> None:
     loaded = _read(warehouse.load.call_args.kwargs["data"])
     assert loaded.column("count").to_pylist() == [1, None]
     assert any("loaded as NULL" in w for w in result.warnings)
+
+
+ITEM = SourceItem("f.xlsx", "f.xlsx", "1", 1)
+
+
+def _book(rows: list[list[Any]]) -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Events"
+    for row in rows:
+        ws.append(row)
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
+def _with_cell_value(data: bytes, old: bytes, new: bytes) -> bytes:
+    """Rewrite one stored cell value inside the sheet XML.
+
+    Excel stores numbers as doubles, so openpyxl can't write an
+    integer above 2**53 exactly; the XML is edited instead, as a file
+    from another tool could hold it.
+    """
+    import zipfile
+
+    out = io.BytesIO()
+    with (
+        zipfile.ZipFile(io.BytesIO(data)) as src,
+        zipfile.ZipFile(out, "w") as dst,
+    ):
+        for info in src.infolist():
+            body = src.read(info)
+            if info.filename == "xl/worksheets/sheet1.xml":
+                body = body.replace(old, new)
+            dst.writestr(info, body)
+    return out.getvalue()
+
+
+def _contract(mode: str = "quarantine") -> Contract:
+    return Contract(
+        worksheets=[
+            Worksheet(
+                "Events",
+                columns=[Column("name", "string"), Column("n", "integer")],
+                on_mismatch=mode,  # type: ignore[arg-type]
+            )
+        ]
+    )
+
+
+def _pipeline(data: bytes, contract: Contract) -> tuple[Pipeline, dict]:
+    objects: dict[str, bytes] = {}
+    store = MagicMock()
+    store.get.side_effect = objects.get
+    store.put.side_effect = objects.__setitem__
+    source = Mock()
+    source.items.return_value = [ITEM]
+    source.download.return_value = data
+    warehouse = Mock(identity="p.d.t")
+    warehouse.load.return_value = True
+    return Pipeline(source, store, warehouse, contract), objects
+
+
+class TestInt64Range:
+    """H07: an integer BigQuery can't hold is never loaded as NULL."""
+
+    def test_quarantine_mode_rejects_out_of_range_integer(self) -> None:
+        data = _with_cell_value(
+            _book([["name", "n"], ["a", 1]]),
+            b"<v>1</v>",
+            f"<v>{2**63}</v>".encode(),
+        )
+
+        with pytest.raises(ValidationError, match="INT64"):
+            _contract().read(data, "f.xlsx")
+
+    def test_warn_mode_warns(self) -> None:
+        warnings: list[str] = []
+        data = _with_cell_value(
+            _book([["name", "n"], ["a", 1]]),
+            b"<v>1</v>",
+            f"<v>{-(2**63) - 1}</v>".encode(),
+        )
+        _contract("warn").read(data, "f.xlsx", warnings)
+        assert any("INT64" in w for w in warnings)
+
+    def test_conversion_in_quarantine_mode_raises_not_nulls(self) -> None:
+        sheet = SheetRows(["name", "n"], [(2, ("a", "NA"))])
+
+        with pytest.raises(ValidationError, match="'n' row 2"):
+            to_parquet(sheet, _contract().worksheets[0], "f.xlsx", [])
+
+    def test_pipeline_quarantines_conversion_failure(self) -> None:
+        contract = _contract()
+        pipeline, objects = _pipeline(
+            _book([["name", "n"], ["a", 1]]), contract
+        )
+        pipeline._sheets_to_parquet = Mock(  # type: ignore[method-assign]
+            side_effect=ValidationError("bad value")
+        )
+
+        result = pipeline.process(ITEM)
+
+        assert result.outcome == Outcome.QUARANTINED
+        assert any(k.startswith("quarantine/") for k in objects)

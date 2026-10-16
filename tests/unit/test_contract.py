@@ -10,6 +10,16 @@ from openpyxl import Workbook, load_workbook
 from py_common.contract import Column, Contract, Worksheet, read_sheet
 from py_common.errors import ContractError, ValidationError
 from py_common.fixtures import make_fixtures
+import io
+from unittest.mock import MagicMock
+from unittest.mock import Mock
+from unittest.mock import patch
+from py_common.adapters.bigquery import BigQueryWarehouse
+from py_common.contract import SheetRows
+from py_common.model import Outcome
+from py_common.model import SourceItem
+from py_common.parquet import to_parquet
+from py_common.pipeline import Pipeline
 
 
 def _build_workbook(
@@ -884,3 +894,92 @@ class TestContractValidateWarnMode:
         )
 
         assert warnings == []
+
+
+ITEM = SourceItem("f.xlsx", "f.xlsx", "1", 1)
+
+
+SECRET = "jo.bloggs@example.org"
+
+
+def _book(rows: list[list[Any]]) -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    assert ws is not None
+    ws.title = "Events"
+    for row in rows:
+        ws.append(row)
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
+class TestReservedColumn:
+    """N02: a source `_loaded_at` column quarantines, not retries."""
+
+    def _warehouse(self) -> BigQueryWarehouse:
+        client = MagicMock()
+        with patch("py_common.adapters.bigquery.bigquery.Client") as cls:
+            cls.return_value = client
+            warehouse = BigQueryWarehouse("p", "d", "t")
+        from types import SimpleNamespace
+
+        client.get_table.return_value = SimpleNamespace(
+            schema=[
+                SimpleNamespace(name="_loaded_at", field_type="STRING"),
+            ]
+        )
+        client.load_table_from_file.return_value = Mock(
+            job_id="l", output_rows=1
+        )
+        return warehouse
+
+    def test_raises_contract_error(self) -> None:
+        with pytest.raises(ContractError, match="_loaded_at"):
+            self._warehouse().load("k", "c" * 64, b"pq", 1, ITEM)
+
+    def test_pipeline_quarantines_the_file(self) -> None:
+        objects: dict[str, bytes] = {}
+        store = MagicMock()
+        store.get.side_effect = objects.get
+        store.put.side_effect = objects.__setitem__
+        source = Mock()
+        source.download.return_value = _book([["_loaded_at"], ["x"]])
+        contract = Contract(
+            worksheets=[Worksheet("Events", [Column("_loaded_at", "string")])]
+        )
+        pipeline = Pipeline(source, store, self._warehouse(), contract)
+
+        result = pipeline.process(ITEM)
+
+        assert result.outcome == Outcome.QUARANTINED
+        assert any(k.startswith("quarantine/") for k in objects)
+
+
+class TestNoValuesInMessages:
+    """M13: errors and warnings name rows and columns, not values."""
+
+    def test_type_error_has_no_value(self) -> None:
+        contract = Contract(
+            worksheets=[Worksheet("Events", [Column("n", "integer")])]
+        )
+        with pytest.raises(ValidationError) as info:
+            contract.read(_book([["n"], [SECRET]]), "f.xlsx")
+        assert SECRET not in str(info.value)
+
+    def test_duplicate_key_message_has_no_value(self) -> None:
+        contract = Contract(
+            key_columns=["id"],
+            worksheets=[Worksheet("Events", [Column("id", "string")])],
+        )
+        with pytest.raises(ValidationError, match="Row 3") as info:
+            contract.read(_book([["id"], [SECRET], [SECRET]]), "f.xlsx")
+        assert SECRET not in str(info.value)
+
+    def test_conversion_warning_has_no_value(self) -> None:
+        warnings: list[str] = []
+        sheet = Worksheet(
+            "Events", [Column("n", "integer")], on_mismatch="warn"
+        )
+        to_parquet(SheetRows(["n"], [(2, (SECRET,))]), sheet, "f", warnings)
+        assert warnings and SECRET not in warnings[0]
