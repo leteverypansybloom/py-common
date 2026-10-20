@@ -39,7 +39,7 @@ Run these once, as someone who can manage IAM in the project
 PROJECT="<GCP_PROJECT_ID>"
 REGION="<REGION>"                 # e.g. europe-west2
 TEST_DATASET="py_common_ci"
-REPO="leteverypansybloom/py-common"
+REPO="<GITHUB_ORG>/py-common"     # the repository's owner/name
 SA_NAME="py-common-ci"
 SA="$SA_NAME@$PROJECT.iam.gserviceaccount.com"
 PROJECT_NUMBER="$(gcloud projects describe "$PROJECT" \

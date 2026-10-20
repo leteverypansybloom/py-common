@@ -6,6 +6,9 @@ files from a landing bucket and loads them into raw BigQuery tables
 `RawJsonWarehouse`). Written for the Healthy Working Wales (HWW)
 project, but nothing here is specific to it.
 
+For the typed route (`BigQueryWarehouse`), follow the same steps
+with the changes in [Using the typed route instead](#using-the-typed-route-instead).
+
 A daily Cloud Run job runs the pipelines (section 5). Optionally, an
 upload can also start a run within a minute or so (section 6). Both
 call the same code, in `py_common.runner`.
@@ -676,6 +679,87 @@ not to the team.
    FROM \`$FRESHNESS_VIEW\`"`. After the 7th, a source with no load
    this month shows `overdue = true`, and the next job run logs
    `Missing monthly file:` for it.
+
+## Using the typed route instead
+
+Everything above is for the raw JSON route. The typed route
+(`Pipeline(output_format="parquet")` with `BigQueryWarehouse`) loads
+each workbook's primary worksheet into a BigQuery table with real,
+typed columns instead of a JSON payload. Most of the setup is the
+same; these are the differences.
+
+**What's the same**
+
+- The buckets (section 1), the service account and its roles
+  (section 3), the Cloud Run job and schedule (section 5), the upload
+  trigger (section 6) and the alerts (section 7).
+- The `audit` table (section 2). Both routes use the same table and the
+  same "load each upload once" check. Create it the same way, in the
+  dataset that holds the typed tables.
+
+**What's different**
+
+| | Raw JSON route | Typed route |
+|---|---|---|
+| Tables | One raw table per worksheet | One typed table per pipeline, from the contract's first worksheet |
+| Columns | `source_file`, `source_generation`, `row_number`, `payload`, ... | The contract's columns, named for BigQuery (`Date of Enquiry` becomes `date_of_enquiry`), plus `_loaded_at` |
+| Types | Values kept as JSON | Each column has the type the contract declares (`string`, `integer`, `float`, `date`). Undeclared columns (`column_selection="all_except"`) load as text. |
+| Repeated uploads | Every upload is inserted again under its own generation | With `key_columns`, rows are merged on the key. Without, every upload is appended, and readers take the newest by `_loaded_at`. |
+| Contract checks | Usually `on_mismatch="warn"`: a mismatch loads with a warning | Usually `on_mismatch="quarantine"`: a new or missing column, or a value of the wrong type, rejects the file |
+| Row number | Kept (`row_number`) | Not kept |
+
+**Pipeline code.** In section 4, build each pipeline with
+`BigQueryWarehouse` instead:
+
+```python
+from py_common.adapters.bigquery import BigQueryWarehouse
+
+Pipeline(
+    source=GCSSource(project, os.environ["LANDING_BUCKET"], prefix),
+    store=store,
+    warehouse=BigQueryWarehouse(
+        project,
+        os.environ["TYPED_DATASET"],
+        table,
+        key_columns=contract.key_columns,
+    ),
+    contract=contract,
+    output_format="parquet",
+)
+```
+
+`Pipeline` refuses to start if the warehouse's `key_columns` differ
+from the contract's. Set `mark_deleted_rows=True` as well for files
+that hold the complete list each time and have a reliable key: rows
+missing from the newest upload then get `_deleted_at` set, and current
+rows are `WHERE _deleted_at IS NULL`.
+
+**Tables.** `BigQueryWarehouse` creates each typed table on its first
+load, from the Parquet's schema. A later upload whose column types
+don't match the table is refused, so change a column's type
+deliberately: update the contract, then recreate or migrate the table.
+The staging tables (`{table}_stg_...`) are the same as for the raw
+route.
+
+**Freshness view.** In the view in section 7, read `MAX(_loaded_at)`
+from each typed table instead of `MAX(ingested_at)`.
+
+**Check it works.** In section 8, query the typed table instead of
+the raw one, and check the excluded columns aren't there:
+
+```bash
+bq query --use_legacy_sql=false "
+SELECT * FROM \`$PROJECT.$TYPED_DATASET.<TABLE>\`
+ORDER BY _loaded_at DESC LIMIT 10"
+```
+
+**A worked example.** The HWW dashboard project uses this route for its
+four workbooks: `ingest.py` and `src/hww_dashboard/landing.py` hold the
+contracts and pipelines, and its `docs/gcp_ingestion.md` goes through
+every step from an empty project to the dashboard. It works round two
+gaps in the typed route: it adds the Excel row number as an extra
+column, and on Windows it gives `LocalObjectStore` an extended-length
+path, because the kept copies' paths can pass 260 characters.
 
 ## See also
 
