@@ -1,7 +1,7 @@
-"""Dry-run every SQL statement the BigQuery adapters generate.
+r"""Dry-run every SQL statement the BigQuery adapters generate.
 
 The unit tests check SQL text against mocks; this checks BigQuery
-accepts it (review M13). Each adapter's load() runs against a
+accepts it. Each adapter's load() runs against a
 recording client, which answers like BigQuery would and keeps every
 statement with its parameters. A scratch dataset then gets every
 table those statements name, and each statement is sent with
@@ -14,7 +14,7 @@ when GCP_PROJECT_ID is unset. The dataset is deleted afterwards and
 expires after a day regardless.
 
 ```bash
-GCP_PROJECT_ID=my-sandbox pytest -m integration \\
+GCP_PROJECT_ID=my-sandbox pytest -m integration \
   tests/integration/test_bq_dry_run.py
 ```
 """
@@ -79,28 +79,75 @@ class Recorder:
     """
 
     def __init__(self, dataset: str) -> None:
+        """Start recording.
+
+        Args:
+            dataset: The dataset the statements name.
+        """
         self.dataset = dataset
         self.statements: list[tuple[str, Any]] = []
 
     def get_table(self, table_id: str) -> Any:
+        """Return the typed tables' schemas; nothing else exists.
+
+        Args:
+            table_id: The full table ID.
+
+        Returns:
+            An object with a schema list, like a bigquery.Table.
+
+        Raises:
+            NotFound: Any other table.
+        """
         schema = TYPED_STAGING if "_stg_" in table_id else TYPED_FINAL
         if table_id.endswith(".events") or "_stg_" in table_id:
             return SimpleNamespace(schema=schema)
         raise NotFound(table_id)
 
     def create_table(self, table: Any, exists_ok: bool = False) -> None:
+        """Do nothing: tables are created for real later.
+
+        Args:
+            table: The table to create.
+            exists_ok: Ignored.
+        """
         pass
 
     def delete_table(self, table_id: str, not_found_ok: bool = False) -> None:
+        """Do nothing: the scratch dataset is deleted whole.
+
+        Args:
+            table_id: The table to delete.
+            not_found_ok: Ignored.
+        """
         pass
 
     def load_table_from_file(self, file: Any, table_id: str, **_: Any) -> Any:
+        """Pretend to stage one row.
+
+        Args:
+            file: The data, ignored.
+            table_id: The staging table.
+            **_: Load options, ignored.
+
+        Returns:
+            A finished load job reporting one row.
+        """
         # Every load stages the one row the callers below expect.
         return SimpleNamespace(
             job_id="load", output_rows=1, result=lambda **_: None
         )
 
     def query(self, sql: str, job_config: Any = None) -> Any:
+        """Record the statement and answer as BigQuery would.
+
+        Args:
+            sql: The statement.
+            job_config: Carries its parameters.
+
+        Returns:
+            A finished job.
+        """
         self.statements.append((sql, job_config))
         if "BEGIN TRANSACTION" in sql:
             rows = [("LOADED",)]
@@ -141,11 +188,24 @@ def _statements(dataset: str) -> list[tuple[str, Any]]:
 
 @pytest.fixture(scope="module")
 def client() -> Any:
+    """Return a real BigQuery client for the test project.
+
+    Returns:
+        The client.
+    """
     return bigquery.Client(project=PROJECT)
 
 
 @pytest.fixture(scope="module")
 def dataset(client: Any) -> Iterator[str]:
+    """Create a scratch dataset, deleted afterwards.
+
+    Args:
+        client: The BigQuery client.
+
+    Yields:
+        The dataset's name.
+    """
     name = f"py_common_dry_run_{uuid.uuid4().hex[:8]}"
     ds = bigquery.Dataset(f"{PROJECT}.{name}")
     ds.default_table_expiration_ms = 24 * 3600 * 1000
@@ -190,6 +250,12 @@ def _create_tables(client: Any, dataset: str, sql: list[str]) -> None:
 def test_every_generated_statement_passes_a_dry_run(
     client: Any, dataset: str
 ) -> None:
+    """BigQuery accepts every statement the adapters generate.
+
+    Args:
+        client: The BigQuery client.
+        dataset: The scratch dataset.
+    """
     statements = _statements(dataset)
     kinds = {
         "commit script": any("BEGIN TRANSACTION" in s for s, _ in statements),

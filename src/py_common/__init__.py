@@ -1,4 +1,4 @@
-"""Shared ingestion library for Excel → Cloud workflows.
+"""Shared ingestion library for Excel to cloud workflows.
 
 Core concepts:
 - Sources discover files (e.g., SharePoint, local folders)

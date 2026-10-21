@@ -1,4 +1,4 @@
-"""Run both BigQuery warehouses against real BigQuery (review M10).
+r"""Run both BigQuery warehouses against real BigQuery.
 
 The unit tests run the adapters against a fake client that reads the
 SQL text, and test_bq_dry_run.py checks that BigQuery accepts it.
@@ -16,7 +16,7 @@ both variables are set. GitHub Actions runs it nightly; the set-up
 is in docs/CI_SETUP.md. To run it yourself:
 
 ```bash
-GCP_PROJECT_ID=my-project BQ_TEST_DATASET=py_common_ci \\
+GCP_PROJECT_ID=my-project BQ_TEST_DATASET=py_common_ci \
   pytest -m integration tests/integration/test_bigquery_live.py
 ```
 """
@@ -76,16 +76,36 @@ class Uploads:
     """A landing folder holding one file; the test sets its upload."""
 
     def __init__(self) -> None:
+        """Start with no upload."""
         self.data = b""
         self.version = ""
 
     def upload(self, data: bytes, version: str) -> None:
+        """Replace the file with a new upload.
+
+        Args:
+            data: The workbook's bytes.
+            version: The upload's version.
+        """
         self.data, self.version = data, version
 
     def items(self) -> list[SourceItem]:
+        """List the one file.
+
+        Returns:
+            Its SourceItem.
+        """
         return [SourceItem(FILE, f"was/{FILE}", self.version, len(self.data))]
 
     def download(self, item: SourceItem) -> bytes:
+        """Return the current upload's bytes.
+
+        Args:
+            item: The file asked for.
+
+        Returns:
+            The bytes.
+        """
         return self.data
 
 
@@ -93,22 +113,56 @@ class Store:
     """In-memory ObjectStore with the write-once rule."""
 
     def __init__(self) -> None:
+        """Start empty."""
         self.objects: dict[str, bytes] = {}
 
     def get(self, key: str) -> bytes | None:
+        """Return an object's bytes.
+
+        Args:
+            key: The object's key.
+
+        Returns:
+            The bytes, or None if there is no such object.
+        """
         return self.objects.get(key)
 
     def put(self, key: str, data: bytes) -> None:
+        """Write an object once.
+
+        Args:
+            key: The object's key.
+            data: The bytes to store.
+
+        Raises:
+            ObjectStoreConflict: The key holds different bytes.
+        """
         if key in self.objects and self.objects[key] != data:
             raise ObjectStoreConflict(key)
         self.objects[key] = data
 
     @contextmanager
     def lock(self, key: str) -> Iterator[None]:
+        """Hold no lock: one test runs at a time.
+
+        Args:
+            key: The lock's key, ignored.
+
+        Yields:
+            Nothing.
+        """
         yield
 
 
 def _book(sheets: dict[str, list[list[Any]]]) -> bytes:
+    """Build a workbook with the given sheets.
+
+    Args:
+        sheets: Sheet name to rows, headings first.
+
+    Returns:
+        The .xlsx bytes.
+    """
     wb = Workbook()
     wb.remove(wb.active)
     for title, rows in sheets.items():
@@ -121,14 +175,41 @@ def _book(sheets: dict[str, list[list[Any]]]) -> bytes:
 
 
 def _full(table: str) -> str:
+    """Qualify a table name with the test project and dataset.
+
+    Args:
+        table: The table name.
+
+    Returns:
+        project.dataset.table.
+    """
     return f"{PROJECT}.{DATASET}.{table}"
 
 
 def _rows(client: Any, sql: str) -> list[dict[str, Any]]:
+    """Run a query.
+
+    Args:
+        client: The BigQuery client.
+        sql: The query.
+
+    Returns:
+        Each row as a dict.
+    """
     return [dict(row.items()) for row in client.query(sql).result()]
 
 
 def _count(client: Any, table: str, where: str = "TRUE") -> int:
+    """Count a table's rows.
+
+    Args:
+        client: The BigQuery client.
+        table: The table name.
+        where: A filter on the rows counted.
+
+    Returns:
+        The count.
+    """
     sql = f"SELECT COUNT(*) AS n FROM `{_full(table)}` WHERE {where}"
     return int(_rows(client, sql)[0]["n"])
 
@@ -156,6 +237,11 @@ def _documented_latest_query(table: str) -> str:
 
 @pytest.fixture(scope="module")
 def client() -> Iterator[Any]:
+    """Yield a BigQuery client, then delete this run's tables.
+
+    Yields:
+        The client.
+    """
     bq = bigquery.Client(project=PROJECT)
     try:
         yield bq
@@ -209,6 +295,14 @@ HEADINGS = ["Participant ID", "Number of sites", "Score %"]
 
 
 def _signups(*rows: list[Any]) -> bytes:
+    """Build a Signups workbook.
+
+    Args:
+        *rows: The data rows, below the standard headings.
+
+    Returns:
+        The .xlsx bytes.
+    """
     return _book({"Signups": [HEADINGS, *rows]})
 
 
@@ -227,6 +321,13 @@ def _typed_state(client: Any, table: str) -> dict[str, tuple[Any, bool]]:
 def test_typed_route_merges_marks_deleted_rows_and_restores(
     client: Any, name: str, audit: str
 ) -> None:
+    """The typed route merges, marks removed rows, and restores them.
+
+    Args:
+        client: The BigQuery client.
+        name: This test's table-name stem.
+        audit: The audit table.
+    """
     table = f"{name}_signups"
     warehouse = BigQueryWarehouse(
         PROJECT,
@@ -286,6 +387,13 @@ def test_typed_route_merges_marks_deleted_rows_and_restores(
 def test_typed_route_adds_a_column_and_refuses_a_type_change(
     client: Any, name: str, audit: str
 ) -> None:
+    """A new column is added; a changed column type is refused.
+
+    Args:
+        client: The BigQuery client.
+        name: This test's table-name stem.
+        audit: The audit table.
+    """
     table = f"{name}_signups"
     keys = ["Participant ID"]
     warehouse = BigQueryWarehouse(
@@ -295,6 +403,14 @@ def test_typed_route_adds_a_column_and_refuses_a_type_change(
     store = Store()
 
     def contract(*columns: Column) -> Contract:
+        """Build a keyed Signups contract.
+
+        Args:
+            *columns: Columns after Participant ID.
+
+        Returns:
+            The contract.
+        """
         return Contract(
             key_columns=keys,
             worksheets=[
@@ -349,6 +465,13 @@ def test_typed_route_adds_a_column_and_refuses_a_type_change(
 def test_typed_route_refuses_repeated_keys_before_merging(
     client: Any, name: str, audit: str
 ) -> None:
+    """Repeated keys are quarantined before anything is merged.
+
+    Args:
+        client: The BigQuery client.
+        name: This test's table-name stem.
+        audit: The audit table.
+    """
     table = f"{name}_signups"
     warehouse = BigQueryWarehouse(
         PROJECT,
@@ -400,12 +523,27 @@ WORKBOOK = _book(
 
 
 def _raw_tables(name: str) -> dict[str, str]:
+    """Name this test's raw tables.
+
+    Args:
+        name: This test's table-name stem.
+
+    Returns:
+        Sheet name to table name.
+    """
     return {"Signups": f"{name}_signups_raw", "Survey": f"{name}_survey_raw"}
 
 
 def test_raw_route_loads_each_upload_once_and_a_revert_again(
     client: Any, name: str, audit: str
 ) -> None:
+    """Each upload loads once, and a reverted file loads again.
+
+    Args:
+        client: The BigQuery client.
+        name: This test's table-name stem.
+        audit: The audit table.
+    """
     tables = _raw_tables(name)
     warehouse = RawJsonWarehouse(
         PROJECT, DATASET, tables, audit_table_id=audit
@@ -453,6 +591,13 @@ def test_raw_route_loads_each_upload_once_and_a_revert_again(
 def test_raw_route_loads_a_table_added_later_on_its_own(
     client: Any, name: str, audit: str
 ) -> None:
+    """A table added to the pipeline later loads without the others.
+
+    Args:
+        client: The BigQuery client.
+        name: This test's table-name stem.
+        audit: The audit table.
+    """
     tables = _raw_tables(name)
     uploads = Uploads()
     uploads.upload(WORKBOOK, "1")
@@ -480,6 +625,14 @@ def test_raw_route_loads_a_table_added_later_on_its_own(
 def test_a_failure_inside_the_commit_rolls_everything_back(
     client: Any, name: str, audit: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """An error just before COMMIT leaves no rows and no audit record.
+
+    Args:
+        client: The BigQuery client.
+        name: This test's table-name stem.
+        audit: The audit table.
+        monkeypatch: Injects the failure into the commit script.
+    """
     tables = _raw_tables(name)
     warehouse = RawJsonWarehouse(
         PROJECT, DATASET, tables, audit_table_id=audit
@@ -487,6 +640,15 @@ def test_a_failure_inside_the_commit_rolls_everything_back(
     real = bigquery_raw.commit_script
 
     def failing(parts: Any, audit_full_id: str) -> str:
+        """Build the real commit script with an error before COMMIT.
+
+        Args:
+            parts: The tables' parts of the script.
+            audit_full_id: The audit table.
+
+        Returns:
+            The script.
+        """
         # Fail after every table's insert and audit row, just before
         # COMMIT.
         return real(parts, audit_full_id).replace(
@@ -509,6 +671,13 @@ def test_a_failure_inside_the_commit_rolls_everything_back(
 def test_a_double_load_is_reported_and_hidden_from_the_latest_query(
     client: Any, name: str, audit: str
 ) -> None:
+    """A double load is reported, and the latest query shows it once.
+
+    Args:
+        client: The BigQuery client.
+        name: This test's table-name stem.
+        audit: The audit table.
+    """
     table = f"{name}_signups_raw"
     warehouse = RawJsonWarehouse(
         PROJECT, DATASET, {"Signups": table}, audit_table_id=audit

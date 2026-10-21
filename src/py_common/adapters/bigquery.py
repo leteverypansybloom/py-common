@@ -2,15 +2,10 @@
 
 Implements Warehouse protocol. Loads Parquet data with staging,
 verification, merge, and audit trail (immutable append-only).
-
-RAP Compliance:
-- Reproducible: Same data always produces same result
-- Auditable: Every load recorded with checksum, row count, outcome
-- Transparent: SQL and audit logic visible; no hidden behavior
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from io import BytesIO
 from typing import Any
 
@@ -102,9 +97,6 @@ class BigQueryWarehouse:
                 source file (_source_file) are affected, so several
                 files can feed one table. Needs key_columns.
 
-        Returns:
-            None
-
         Raises:
             ValueError: mark_deleted_rows without key_columns (rows
                 can't be matched without a key), or key columns that
@@ -139,9 +131,6 @@ class BigQueryWarehouse:
 
         Used as scope for exclusive write lock in distributed systems.
         Format: project.dataset.table (fully qualified name).
-
-        Args:
-            None
 
         Returns:
             str: Fully-qualified table identifier.
@@ -182,7 +171,7 @@ class BigQueryWarehouse:
         table is dropped afterwards, whatever happened (best effort;
         it expires anyway). Steps 4-5 run as one
         BigQuery job so the final-table write and the audit record
-        can never diverge — if the audit INSERT fails, the MERGE is
+        can never diverge: if the audit INSERT fails, the MERGE is
         rolled back too, instead of leaving committed data with no
         audit trail.
 
@@ -322,7 +311,7 @@ class BigQueryWarehouse:
         # (file + version), so a restore of earlier content loads.
         parts = [CommitPart(final_full_id, [merge_sql], rows)]
         params = commit_parameters(
-            key, checksum, parts, item, datetime.now(timezone.utc)
+            key, checksum, parts, item, datetime.now(UTC)
         )
         if self.mark_deleted_rows:
             params.append(

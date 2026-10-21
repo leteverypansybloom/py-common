@@ -99,7 +99,7 @@ class TestObjectStoreContract:
 
 
 class TestGCSObjectStoreFailClosed:
-    """GCS-specific mapping of API errors (review C1, M10, M6)."""
+    """GCS-specific mapping of API errors."""
 
     @pytest.mark.parametrize(
         "error", [ServiceUnavailable("503"), Forbidden("403")]

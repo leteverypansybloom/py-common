@@ -1,4 +1,4 @@
-"""GCSObjectStore.lock is a lease (review H6).
+"""GCSObjectStore.lock is a lease.
 
 A killed run no longer blocks every later run forever: its lock
 records when it expires, and a later run may take over an expired
@@ -8,7 +8,7 @@ never taken.
 
 import json
 from collections.abc import Iterator
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import pytest
@@ -17,15 +17,29 @@ from _fake_gcs import FakeBucket
 from py_common.adapters.gcs import GCSObjectStore
 
 KEY = "locks/abc"
-T0 = datetime(2026, 10, 15, 6, 0, tzinfo=timezone.utc)
+T0 = datetime(2026, 10, 15, 6, 0, tzinfo=UTC)
 
 
 @pytest.fixture
 def bucket() -> FakeBucket:
+    """Return an empty fake bucket.
+
+    Returns:
+        The bucket.
+    """
     return FakeBucket()
 
 
 def _store(bucket: FakeBucket, lease_seconds: int = 3600) -> GCSObjectStore:
+    """Build a GCS store on the fake bucket.
+
+    Args:
+        bucket: The fake bucket.
+        lease_seconds: How long a lock lasts.
+
+    Returns:
+        The store.
+    """
     with patch("py_common.adapters.gcs.storage.Client"):
         store = GCSObjectStore("p", "store", lease_seconds=lease_seconds)
     store.bucket = bucket
@@ -41,6 +55,14 @@ def clock() -> Iterator[list[datetime]]:
 
 
 def _holder(bucket: FakeBucket) -> dict[str, str]:
+    """Read the lock's contents.
+
+    Args:
+        bucket: The fake bucket.
+
+    Returns:
+        The lock's fields.
+    """
     return dict(json.loads(bucket.objects[KEY][0]))
 
 
@@ -67,6 +89,12 @@ def _leave_lock(bucket: FakeBucket, store: GCSObjectStore) -> None:
 def test_lock_records_its_expiry(
     bucket: FakeBucket, clock: list[datetime]
 ) -> None:
+    """The lock records when it was taken and when it expires.
+
+    Args:
+        bucket: The fake bucket.
+        clock: The store's clock.
+    """
     with _store(bucket, lease_seconds=900).lock(KEY):
         holder = _holder(bucket)
 
@@ -77,6 +105,12 @@ def test_lock_records_its_expiry(
 def test_unexpired_lock_is_never_taken(
     bucket: FakeBucket, clock: list[datetime]
 ) -> None:
+    """A lock a second short of expiry is still refused.
+
+    Args:
+        bucket: The fake bucket.
+        clock: The store's clock.
+    """
     _leave_lock(bucket, _store(bucket))
     clock[0] = T0 + timedelta(seconds=3599)
 
@@ -89,6 +123,12 @@ def test_unexpired_lock_is_never_taken(
 def test_expired_lock_is_taken_over_and_logged(
     bucket: FakeBucket, clock: list[datetime]
 ) -> None:
+    """An expired lock is taken over, with a warning naming its run.
+
+    Args:
+        bucket: The fake bucket.
+        clock: The store's clock.
+    """
     _leave_lock(bucket, _store(bucket))
     dead = _holder(bucket)
     clock[0] = T0 + timedelta(seconds=3601)
@@ -149,6 +189,12 @@ def test_lock_without_expiry_uses_acquired_at_plus_lease(
 def test_unreadable_lock_is_never_taken(
     bucket: FakeBucket, clock: list[datetime]
 ) -> None:
+    """A lock that isn't valid JSON is never taken over.
+
+    Args:
+        bucket: The fake bucket.
+        clock: The store's clock.
+    """
     bucket.blob(KEY).upload_from_string(b"not json", if_generation_match=0)
     clock[0] = T0 + timedelta(days=30)
 
@@ -158,6 +204,7 @@ def test_unreadable_lock_is_never_taken(
 
 
 def test_lease_must_be_positive() -> None:
+    """A zero lease is refused."""
     with pytest.raises(ValueError, match="lease_seconds"):
         _store(FakeBucket(), lease_seconds=0)
 
@@ -173,6 +220,11 @@ class TestNaiveLeaseTimes:
         ],
     )
     def test_refused_not_type_error(self, holder: str) -> None:
+        """A naive time is refused cleanly, not with a TypeError.
+
+        Args:
+            holder: The lock's contents.
+        """
         bucket = FakeBucket()
         with patch("py_common.adapters.gcs.storage.Client"):
             store = GCSObjectStore("p", "store")

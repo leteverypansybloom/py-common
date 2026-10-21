@@ -1,4 +1,4 @@
-"""Integration test for a live SharePoint folder.
+r"""Integration test for a live SharePoint folder.
 
 Requires read access to a SharePoint test folder (Graph
 Sites.Selected) and a Graph token in the environment. The live GCP
@@ -8,11 +8,11 @@ Marked @pytest.mark.integration and skipped by default.
 Run after cloud infrastructure is ready.
 
 ```bash
-SHAREPOINT_HOSTNAME=contoso.sharepoint.com \\
-SHAREPOINT_SITE_PATH=/sites/DataSite \\
-SHAREPOINT_LIBRARY=Documents \\
-SHAREPOINT_FOLDER=Test \\
-SHAREPOINT_TEST_ACCESS_TOKEN=... \\
+SHAREPOINT_HOSTNAME=contoso.sharepoint.com \
+SHAREPOINT_SITE_PATH=/sites/DataSite \
+SHAREPOINT_LIBRARY=Documents \
+SHAREPOINT_FOLDER=Test \
+SHAREPOINT_TEST_ACCESS_TOKEN=... \
 pytest tests/integration/test_live_services.py -m integration
 ```
 
@@ -33,9 +33,6 @@ def test_sharepoint_connectivity() -> None:
 
     Read-only. Skips unless the SHAREPOINT_* variables in the module
     docstring are set.
-
-    Raises:
-        AssertionError: Folder empty or download incomplete.
     """
     names = [
         "SHAREPOINT_HOSTNAME",

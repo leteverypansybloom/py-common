@@ -1,6 +1,6 @@
 # py-common: Shared Ingestion Library
 
-Reusable Python library for Excel → Cloud workflows. Handles file discovery, validation, storage, and warehouse loading.
+Reusable Python library for Excel-to-cloud workflows. Handles file discovery, validation, storage, and warehouse loading.
 
 **Status**: Early development. The core pipeline, local adapters, and
 the GCS, BigQuery and SharePoint adapters are built and unit-tested
@@ -18,19 +18,19 @@ feature-by-feature status reference.
 
 ```
 Source (discover files)
-    ↓
+    |
 Download (SharePoint, GCS landing bucket, local folder)
-    ↓
+    |
 Validate (against contract; quarantine or warn)
-    ↓
+    |
 Store Raw (immutable copy)
-    ↓
+    |
 Convert (Parquet, or JSON rows for raw tables)
-    ↓
+    |
 Store Processed (immutable copy)
-    ↓
+    |
 Load Warehouse (staging, then merge or insert)
-    ↓
+    |
 Audit (record every attempt)
 ```
 
@@ -65,7 +65,7 @@ JSON keys are not changed.
 
 ## Quick Start
 
-See [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) — the single
+See [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) - the single
 place for environment setup, generating test fixtures, defining your
 first contract and wiring a pipeline. The fixtures themselves are
 described in
@@ -98,11 +98,11 @@ described in
 
 **ObjectStore** (protocol)
 - Immutable storage for raw files, processed data, audit records
-- `get(key)` — retrieve object by path
-- `put(key, data)` — write object; repeating an identical write
+- `get(key)`: retrieve object by path
+- `put(key, data)`: write object; repeating an identical write
   succeeds, but writing different bytes to an existing key raises
   `ObjectStoreConflict`
-- `lock(key)` — acquire exclusive write lock (real in
+- `lock(key)`: acquire exclusive write lock (real in
   `GCSObjectStore`, a no-op in `LocalObjectStore`; see
   [Concurrency](#concurrency))
 
@@ -152,7 +152,7 @@ proceeds. The other gets a `RuntimeError` naming the holder.
 files in one SharePoint folder through Microsoft Graph. It needs two
 things:
 
-- **Where the files are** — a `SharePointConfig`, usually from a
+- **Where the files are**: a `SharePointConfig`, usually from a
   config section:
 
   ```yaml
@@ -163,7 +163,7 @@ things:
     folder: Incoming                     # optional; library root if omitted
   ```
 
-- **How to authenticate** — a `token_provider`: any function that
+- **How to authenticate**: a `token_provider`: any function that
   returns a Graph access token. This is deliberately not built yet.
   Once IT approves a credential flow, write that function and pass
   it in; nothing else changes.
@@ -191,7 +191,7 @@ can be swapped without changing core code. For why, see
 
 ## Configuration
 
-Configuration is YAML with environment variable interpolation — see
+Configuration is YAML with environment variable interpolation - see
 [`docs/GETTING_STARTED.md`, Configuration](docs/GETTING_STARTED.md#7-configuration).
 
 ## Error Handling
@@ -236,33 +236,33 @@ result and the audit record.
 
 ## Testing
 
-See [`CONTRIBUTING.md`, Run Tests Locally](CONTRIBUTING.md#run-tests-locally).
+See [`CONTRIBUTING.md`, Checks](CONTRIBUTING.md#checks).
 
 ## Adapter status
 
 | Adapter | Implements | Status |
 |---|---|---|
-| `LocalSource` | Source | ✅ Built, unit-tested |
-| `LocalObjectStore` | ObjectStore | ✅ Built, unit-tested |
-| `GCSSource` | Source | ✅ Built, unit-tested against mocks; reads a landing folder, versions by object generation |
-| `GCSObjectStore` | ObjectStore | ✅ Built, unit-tested against mocks; real `lock()` |
-| `BigQueryWarehouse` | Warehouse | ✅ Built, unit-tested against mocks; `MERGE` on `key_columns` |
-| `RawJsonWarehouse` | Warehouse | ✅ Built, unit-tested against mocks; one raw JSON table per sheet, not yet run live |
-| `SharePointSource` | Source | ✅ Built, unit-tested against mocked Graph; not yet run live (auth pending IT) |
-| Secret Manager | SecretStore | ⏳ Not started |
+| `LocalSource` | Source | Built, unit-tested |
+| `LocalObjectStore` | ObjectStore | Built, unit-tested |
+| `GCSSource` | Source | Built, unit-tested against mocks; reads a landing folder, versions by object generation |
+| `GCSObjectStore` | ObjectStore | Built, unit-tested against mocks; real `lock()` |
+| `BigQueryWarehouse` | Warehouse | Built, unit-tested against mocks; `MERGE` on `key_columns` |
+| `RawJsonWarehouse` | Warehouse | Built, unit-tested against mocks; one raw JSON table per sheet, not yet run live |
+| `SharePointSource` | Source | Built, unit-tested against mocked Graph; not yet run live (auth pending IT) |
+| Secret Manager | SecretStore | Not started |
 
 Also built: contract validation, the raw JSON conversion (`raw.py`),
-configuration with interpolation, fixture generation, the error
-and the error hierarchy.
+configuration with interpolation, fixture generation, structured
+JSON logging (`py_common.logging.configure_json_logging()`) and the
+error hierarchy.
 
 ## What's Next
 
-- ⏳ First live run of the raw JSON route ([`docs/GCP_SETUP.md`](docs/GCP_SETUP.md))
-- ⏳ SharePoint authentication (token provider), once IT approves a flow
-- ⏳ Live SharePoint test: one file, then the full Cloud Run job
-- ⏳ Secret Manager adapter
-- ✅ Structured JSON logging (`py_common.logging.configure_json_logging()`)
-- ⏳ Alert policies as code (manual steps in `docs/GCP_SETUP.md`)
+- First live run of the raw JSON route ([`docs/GCP_SETUP.md`](docs/GCP_SETUP.md))
+- SharePoint authentication (token provider), once IT approves a flow
+- Live SharePoint test: one file, then the full Cloud Run job
+- Secret Manager adapter
+- Alert policies as code (manual steps in `docs/GCP_SETUP.md`)
 
 The agreed order, with reasoning, is in
 [`docs/INGESTION_FRAMEWORK_GUIDE.md`, Section 9](docs/INGESTION_FRAMEWORK_GUIDE.md#9-priority-order-for-closing-the-gaps).
@@ -271,11 +271,11 @@ The agreed order, with reasoning, is in
 
 Core:
 
-- openpyxl >= 3.1, < 4 — Read Excel
-- defusedxml >= 0.7.1, < 1 — Lets openpyxl refuse XML entity attacks
+- openpyxl >= 3.1, < 4: Read Excel
+- defusedxml >= 0.7.1, < 1: Lets openpyxl refuse XML entity attacks
   in uploaded workbooks
-- pyyaml >= 6.0, < 7 — YAML configuration
-- pyarrow >= 23.0.1, < 27 — Parquet output, typed from the contract
+- pyyaml >= 6.0, < 7: YAML configuration
+- pyarrow >= 23.0.1, < 27: Parquet output, typed from the contract
 
 Every runtime dependency has an upper bound, so a fresh install
 never picks up a major version the code hasn't been tested against,
@@ -296,12 +296,12 @@ Optional extras (`pip install -e ".[gcp]"` etc.):
 `scripts/` holds manual, one-off scripts that aren't part of the
 library or the test suite:
 
-- `scripts/demo.py` — runs the fixtures through `GCSObjectStore` and
+- `scripts/demo.py`: runs the fixtures through `GCSObjectStore` and
   `BigQueryWarehouse` against a real development project. Writes to
   real cloud resources.
-- `scripts/check_gcp_auth.py` — checks your local GCP credentials can
+- `scripts/check_gcp_auth.py`: checks your local GCP credentials can
   reach BigQuery and Cloud Storage.
-- `scripts/gcp_auth.py` — a Python port of the R `gcp_auth.R` helper.
+- `scripts/gcp_auth.py`: a Python port of the R `gcp_auth.R` helper.
   Not part of the library: the adapters authenticate through Google's
   client libraries (Application Default Credentials). Kept for code
   ported from R; likely to be removed.
@@ -311,12 +311,11 @@ header of each file.
 
 ## Standards
 
-- **PEP 8**: 79-character lines, strict formatting
-- **Type hints**: All functions annotated
-- **Google docstrings**: Clear, concise documentation
-- **TDD**: Tests written before or alongside code
-- **RAP**: Reproducible Analytical Pipelines — reproducible,
-  auditable, peer-reviewed
+PEP 8 with 79-character lines (Black and Ruff), type hints checked
+by mypy in strict mode, Google-style docstrings, and tests written
+before the code. The project follows the Reproducible Analytical
+Pipelines (RAP) approach: reproducible, auditable and peer-reviewed.
+Details are in [`CONTRIBUTING.md`](CONTRIBUTING.md#code-standards).
 
 ## License
 

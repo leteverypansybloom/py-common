@@ -1,4 +1,4 @@
-"""Every load stages into its own short-lived table (review H7).
+"""Every load stages into its own short-lived table.
 
 Two warehouses that share a raw table hold different run locks, so a
 shared `{table}_staging` could be truncated and refilled by another
@@ -6,7 +6,7 @@ file's load mid-flight. A per-load name removes the sharing.
 """
 
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import patch
 
@@ -29,9 +29,15 @@ _NDJSON = (
 
 
 def _parquet() -> bytes:
+    """Build a one-row Parquet file.
+
+    Returns:
+        The Parquet bytes.
+    """
+    from io import BytesIO
+
     import pyarrow as pa
     import pyarrow.parquet as pq
-    from io import BytesIO
 
     buffer = BytesIO()
     pq.write_table(pa.table({"id": [1]}), buffer)
@@ -39,6 +45,14 @@ def _parquet() -> bytes:
 
 
 def _typed(client: FakeBigQueryClient) -> tuple[Any, bytes, str]:
+    """Build a typed warehouse on the fake client.
+
+    Args:
+        client: The fake client.
+
+    Returns:
+        The warehouse, data to load, and its final table's name.
+    """
     with patch("py_common.adapters.bigquery.bigquery.Client") as cls:
         cls.return_value = client
         warehouse = BigQueryWarehouse("p", "d", "events")
@@ -46,6 +60,14 @@ def _typed(client: FakeBigQueryClient) -> tuple[Any, bytes, str]:
 
 
 def _raw(client: FakeBigQueryClient) -> tuple[Any, bytes, str]:
+    """Build a raw JSON warehouse on the fake client.
+
+    Args:
+        client: The fake client.
+
+    Returns:
+        The warehouse, data to load, and its raw table's name.
+    """
     with patch("py_common.adapters.bigquery_raw.bigquery.Client") as cls:
         cls.return_value = client
         warehouse = RawJsonWarehouse("p", "d", {"S": "raw_s"})
@@ -56,20 +78,41 @@ def _raw(client: FakeBigQueryClient) -> tuple[Any, bytes, str]:
 def setup(
     request: pytest.FixtureRequest,
 ) -> tuple[FakeBigQueryClient, Any, bytes, str]:
+    """Return each route's client, warehouse, data and table.
+
+    Args:
+        request: Carries the route's builder.
+
+    Returns:
+        The client, warehouse, data and table name.
+    """
     client = FakeBigQueryClient()
     warehouse, data, table = request.param(client)
     return client, warehouse, data, table
 
 
 def _staging_name(table: str) -> re.Pattern[str]:
+    """Match the staging-table name for one table and CHECKSUM.
+
+    Args:
+        table: The destination table's name.
+
+    Returns:
+        The pattern.
+    """
     return re.compile(rf"^p\.d\.{table}_stg_{CHECKSUM[:12]}_[0-9a-f]{{8}}$")
 
 
 def test_staging_table_is_per_load_and_expires(
     setup: tuple[FakeBigQueryClient, Any, bytes, str],
 ) -> None:
+    """Each load stages into its own table, which expires.
+
+    Args:
+        setup: The route's client, warehouse, data and table.
+    """
     client, warehouse, data, table = setup
-    before = datetime.now(timezone.utc)
+    before = datetime.now(UTC)
 
     warehouse.load("k", CHECKSUM, data, 1, ITEM)
 
@@ -86,6 +129,11 @@ def test_staging_table_is_per_load_and_expires(
 def test_staging_table_is_dropped_after_commit(
     setup: tuple[FakeBigQueryClient, Any, bytes, str],
 ) -> None:
+    """The staging table is dropped once the commit is done.
+
+    Args:
+        setup: The route's client, warehouse, data and table.
+    """
     client, warehouse, data, _ = setup
 
     warehouse.load("k", CHECKSUM, data, 1, ITEM)
@@ -96,6 +144,11 @@ def test_staging_table_is_dropped_after_commit(
 def test_two_loads_never_share_a_staging_table(
     setup: tuple[FakeBigQueryClient, Any, bytes, str],
 ) -> None:
+    """Two loads of the same content stage separately.
+
+    Args:
+        setup: The route's client, warehouse, data and table.
+    """
     client, warehouse, data, _ = setup
 
     warehouse.load("k", CHECKSUM, data, 1, ITEM)
@@ -108,6 +161,11 @@ def test_two_loads_never_share_a_staging_table(
 def test_failed_drop_only_warns(
     setup: tuple[FakeBigQueryClient, Any, bytes, str],
 ) -> None:
+    """A staging table that can't be dropped is a warning only.
+
+    Args:
+        setup: The route's client, warehouse, data and table.
+    """
     client, warehouse, data, _ = setup
     client.delete_error = Forbidden("no delete permission")
 
@@ -123,6 +181,11 @@ def test_failed_drop_only_warns(
 def test_staging_table_is_dropped_when_load_fails(
     setup: tuple[FakeBigQueryClient, Any, bytes, str],
 ) -> None:
+    """The staging table is dropped when the load fails too.
+
+    Args:
+        setup: The route's client, warehouse, data and table.
+    """
     client, warehouse, data, _ = setup
 
     with pytest.raises(ValueError, match="Row count mismatch"):

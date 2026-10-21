@@ -1,4 +1,4 @@
-"""H1: a contract can require the agreed file name (REVIEW_.md).
+"""A contract can require the agreed file name.
 
 A feed is identified by its file name: the raw route's "latest
 upload" and the typed route's deleted-row marking both work per
@@ -28,6 +28,14 @@ AGREED = "WAS export.xlsx"
 
 
 def _book(rows: list[list[Any]]) -> bytes:
+    """Build an Events workbook.
+
+    Args:
+        rows: The rows, headings first.
+
+    Returns:
+        The .xlsx bytes.
+    """
     wb = Workbook()
     ws = wb.active
     assert ws is not None
@@ -43,24 +51,30 @@ GOOD = _book([["name"], ["x"]])
 
 
 class TestContractFileName:
+    """Contract(file_name=...) accepts only the agreed name."""
+
     def test_the_agreed_name_is_accepted(self) -> None:
+        """The agreed name passes."""
         contract = Contract(worksheets=SHEETS, file_name=AGREED)
 
         assert contract.validate(GOOD, AGREED) == 1
 
     def test_another_name_is_rejected_naming_the_agreed_one(self) -> None:
+        """Another name fails, and the error says which name is expected."""
         contract = Contract(worksheets=SHEETS, file_name=AGREED)
 
         with pytest.raises(ContractError, match="expected 'WAS export.xlsx'"):
             contract.validate(GOOD, "WAS export (1).xlsx")
 
     def test_the_match_is_exact_including_capitals(self) -> None:
+        """A name differing only in case fails."""
         contract = Contract(worksheets=SHEETS, file_name=AGREED)
 
         with pytest.raises(ContractError, match="wrong file name"):
             contract.read(GOOD, "WAS Export.xlsx")
 
     def test_the_name_is_checked_before_the_file_is_parsed(self) -> None:
+        """The name is checked first, so a bad file reports the name."""
         contract = Contract(worksheets=SHEETS, file_name=AGREED)
 
         # Not a workbook at all: the name is what gets reported.
@@ -68,11 +82,13 @@ class TestContractFileName:
             contract.validate(b"not a workbook", "other.xlsx")
 
     def test_without_file_name_any_name_is_accepted(self) -> None:
+        """With no file_name set, any name passes."""
         contract = Contract(worksheets=SHEETS)
 
         assert contract.validate(GOOD, "anything at all.xlsx") == 1
 
     def test_extract_does_not_check_the_name(self) -> None:
+        """extract() doesn't check the name."""
         # extract() reads without validating, as for every other rule.
         contract = Contract(worksheets=SHEETS, file_name=AGREED)
 
@@ -84,24 +100,54 @@ class TestContractFileName:
         "bad", ["", "   ", "was/WAS export.xlsx", "was\\WAS export.xlsx"]
     )
     def test_file_name_must_be_a_bare_file_name(self, bad: str) -> None:
+        """file_name can't be blank or include a folder.
+
+        Args:
+            bad: The rejected file_name.
+        """
         with pytest.raises(ValueError, match="file_name"):
             Contract(worksheets=SHEETS, file_name=bad)
 
 
 class TestPipelineQuarantinesOtherNames:
+    """The pipeline quarantines uploads under another name."""
+
     @pytest.fixture
     def folder(self, tmp_path: Path) -> Path:
+        """Return a landing folder with the agreed file and a copy.
+
+        Args:
+            tmp_path: Folder to use.
+
+        Returns:
+            The folder.
+        """
         (tmp_path / AGREED).write_bytes(GOOD)
         (tmp_path / "WAS export (1).xlsx").write_bytes(GOOD)
         return tmp_path
 
     @staticmethod
     def _pipeline(folder: Path, store: MemoryStore, warehouse: Mock) -> Any:
+        """Build a pipeline whose contract names the agreed file.
+
+        Args:
+            folder: The landing folder.
+            store: The object store.
+            warehouse: The warehouse.
+
+        Returns:
+            The pipeline.
+        """
         contract = Contract(worksheets=SHEETS, file_name=AGREED)
         return Pipeline(LocalSource(folder), store, warehouse, contract)
 
     @staticmethod
     def _warehouse() -> Mock:
+        """Build a warehouse that accepts every load.
+
+        Returns:
+            The mock warehouse.
+        """
         warehouse = Mock(identity="p.d.t")
         warehouse.load.return_value = True
         return warehouse
@@ -109,6 +155,11 @@ class TestPipelineQuarantinesOtherNames:
     def test_a_misnamed_upload_is_quarantined_and_not_loaded(
         self, folder: Path
     ) -> None:
+        """The copy is quarantined; only the agreed file loads.
+
+        Args:
+            folder: The landing folder.
+        """
         store = MemoryStore()
         warehouse = self._warehouse()
 
@@ -130,6 +181,11 @@ class TestPipelineQuarantinesOtherNames:
     def test_it_is_flagged_again_on_every_run_until_deleted(
         self, folder: Path
     ) -> None:
+        """The copy is quarantined again on each run until removed.
+
+        Args:
+            folder: The landing folder.
+        """
         store = MemoryStore()
         pipeline = self._pipeline(folder, store, self._warehouse())
         pipeline.run()

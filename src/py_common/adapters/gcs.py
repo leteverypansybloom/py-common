@@ -9,11 +9,6 @@ GCSSource implements the Source protocol: it lists workbooks in a
 landing folder of a bucket and downloads the exact object generation
 it listed.
 
-RAP Compliance:
-- Reproducible: Same key and data always produces same result
-- Auditable: All operations logged at debug level
-- Transparent: No hardcoded credentials; uses Application Default
-
 lock() gives real mutual exclusion via atomic create-if-absent.
 """
 
@@ -24,17 +19,18 @@ import logging
 import os
 import socket
 import uuid
+from collections.abc import Generator
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
-from typing import Any, Generator, Optional
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
+import google.cloud.storage as storage
+import google_crc32c
 from google.api_core.exceptions import (
     GoogleAPICallError,
     NotFound,
     PreconditionFailed,
 )
-import google_crc32c
-import google.cloud.storage as storage
 
 from py_common.errors import NotFound as ItemNotFound
 from py_common.errors import (
@@ -84,9 +80,6 @@ class GCSObjectStore:
                 keep running after its request times out, and the
                 lease isn't renewed. Defaults to one hour.
 
-        Returns:
-            None
-
         Raises:
             ValueError: lease_seconds is not positive.
         """
@@ -102,7 +95,7 @@ class GCSObjectStore:
         self.client = storage.Client(project=project_id)
         self.bucket = self.client.bucket(self.bucket_name)
 
-    def get(self, key: str) -> Optional[bytes]:
+    def get(self, key: str) -> bytes | None:
         """Read object by key.
 
         Fail-closed: only a missing object reads as None. Any other
@@ -151,9 +144,6 @@ class GCSObjectStore:
                 "raw/<identity>/<checksum>/events.xlsx".
             data (bytes): Bytes to store.
 
-        Returns:
-            None
-
         Raises:
             ObjectStoreConflict: Object exists with different content.
             ServiceError: GCS failed (permission, outage).
@@ -163,7 +153,7 @@ class GCSObjectStore:
 
         try:
             # if_generation_match=0 tells GCS "only write if no
-            # generation of this object exists yet" — an atomic
+            # generation of this object exists yet": an atomic
             # create-if-absent. This closes the previous race where
             # two processes both called exists() before either
             # uploaded, and both then thought they held a fresh key.
@@ -363,9 +353,6 @@ class GCSObjectStore:
             blob (Any): Lock blob created by this run.
             key (str): Lock identifier, for logging.
             generation (int): Generation of the lock we created.
-
-        Returns:
-            None
         """
         try:
             blob.delete(if_generation_match=generation)
@@ -436,9 +423,6 @@ class GCSSource:
                 and trailing slashes are optional.
             extensions (tuple[str, ...]): File extensions to pick up.
                 Defaults to .xlsx only: openpyxl can't read .xls.
-
-        Returns:
-            None
 
         Raises:
             ValueError: An extension doesn't start with a dot.
@@ -553,7 +537,7 @@ def _utcnow() -> datetime:
     Returns:
         datetime: Timezone-aware now.
     """
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _same_content(blob: Any, data: bytes) -> bool:

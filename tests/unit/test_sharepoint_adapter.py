@@ -8,11 +8,6 @@ synthetic, built with openpyxl at test time.
 Authentication is not tested here beyond "the adapter asks the
 injected token provider and sends a bearer token": which credential
 flow supplies the token is an IT decision still to be made.
-
-RAP Principles:
-- Reproducible: Fixed fake responses; no network, clock or sleep
-- Auditable: Each test name states the behaviour it locks in
-- Transparent: No real tenants, sites or secrets anywhere
 """
 
 from __future__ import annotations
@@ -846,8 +841,9 @@ class TestSharePointSourceErrors:
     def test_token_is_requested_per_request(
         self, config: SharePointConfig, graph: FakeGraph
     ) -> None:
-        """The provider is asked every time, so it controls caching
-        and refresh.
+        """The provider is asked for a token on every request.
+
+        So the provider, not the adapter, controls caching and refresh.
 
         Args:
             config: SharePointConfig fixture.
@@ -1103,9 +1099,10 @@ class TestSharePointSourceInPipeline:
 
 
 class TestGraphNextLink:
-    """M12: the bearer token never goes to a host other than Graph."""
+    """The bearer token never goes to a host other than Graph."""
 
     def test_foreign_next_link_is_refused(self) -> None:
+        """A next-page link to another host stops paging."""
         from py_common.adapters.sharepoint import SharePointSource
 
         source = SharePointSource.__new__(SharePointSource)

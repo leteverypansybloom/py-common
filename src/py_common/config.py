@@ -39,6 +39,15 @@ def interpolate(text: str) -> str:
     missing = []
 
     def replace_var(match: re.Match[str]) -> str:
+        """Swap one ${VAR} for its value, noting it if it isn't set.
+
+        Args:
+            match: The ${VAR} found in the text.
+
+        Returns:
+            The variable's value, or the ${VAR} unchanged if it isn't
+            set.
+        """
         var_name = match.group(1)
         value = os.environ.get(var_name)
         if value is None:
@@ -81,7 +90,7 @@ def load_config(path: Path | str) -> dict[str, Any]:
             config = yaml.safe_load(f)
     except yaml.YAMLError as e:
         raise ConfigError(f"YAML parse error in {path}: {e}") from e
-    except (IOError, UnicodeDecodeError) as e:
+    except (OSError, UnicodeDecodeError) as e:
         raise ConfigError(f"Cannot read {path}: {e}") from e
     if config is None:
         return {}

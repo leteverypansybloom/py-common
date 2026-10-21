@@ -26,13 +26,6 @@ Graph calls used (all read-only GETs):
 
 The minimum Graph application permission is ``Sites.Selected`` with
 read access granted on the one site.
-
-RAP Compliance:
-- Reproducible: Items are returned sorted; download refuses any
-  version other than the one discovered
-- Auditable: Discovery, retries and downloads are logged; the access
-  token never is
-- Transparent: No credentials in code or configuration
 """
 
 from __future__ import annotations
@@ -97,7 +90,16 @@ class HttpSession(Protocol):
     def get(
         self, url: str, *, headers: Mapping[str, str], timeout: float
     ) -> HttpResponse:
-        """Send a GET request (following redirects)."""
+        """Send a GET request (following redirects).
+
+        Args:
+            url: The address to fetch.
+            headers: Request headers, including Authorization.
+            timeout: Seconds to wait before giving up.
+
+        Returns:
+            The response.
+        """
         ...
 
 
@@ -196,6 +198,14 @@ class SharePointConfig:
         require_keys(dict(settings), list(cls._REQUIRED))
 
         def text(key: str) -> str:
+            """Read a setting as text, with ${VAR} filled in.
+
+            Args:
+                key: The setting's name.
+
+            Returns:
+                The setting's value.
+            """
             return str(interpolate(str(settings[key])))
 
         extensions = settings.get("extensions", cls.extensions)

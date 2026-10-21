@@ -8,16 +8,26 @@ what's being tested here).
 """
 
 import json
+import logging
 from io import BytesIO
-from unittest.mock import Mock
+from pathlib import Path
+from typing import Any
+from unittest.mock import MagicMock, Mock, patch
 
 import pandas as pd
 import pytest
+from _fake_gcs import FakeBucket
 from _memory_store import MemoryStore
+from google.api_core.exceptions import Forbidden
 from openpyxl import Workbook
 
+from py_common.adapters.bigquery import BigQueryWarehouse
+from py_common.adapters.bigquery_raw import RawJsonWarehouse
+from py_common.adapters.gcs import GCSObjectStore
+from py_common.adapters.local import LocalSource
 from py_common.contract import Column, Contract, SheetRows, Worksheet
 from py_common.errors import (
+    ConfigError,
     ContractError,
     IndeterminateCommitError,
     ServiceError,
@@ -26,19 +36,6 @@ from py_common.errors import (
 )
 from py_common.model import Outcome, Result, SourceItem, digest
 from py_common.pipeline import Pipeline
-import io
-import logging
-from pathlib import Path
-from typing import Any
-from unittest.mock import patch
-from _fake_gcs import FakeBucket
-from google.api_core.exceptions import Forbidden
-from py_common.adapters.bigquery import BigQueryWarehouse
-from py_common.adapters.bigquery_raw import RawJsonWarehouse
-from py_common.adapters.gcs import GCSObjectStore
-from py_common.adapters.local import LocalSource
-from py_common.errors import ConfigError
-from unittest.mock import MagicMock
 
 
 @pytest.fixture
@@ -64,12 +61,11 @@ def pipeline(item):
 
 
 class TestPipelineProcessQuarantineOutcomes:
-    """Fix for issue #7: ContractError must quarantine, not FAIL.
+    """ContractError must quarantine, not FAIL.
 
     ContractError is a subclass of ValidationError (see errors.py),
-    so Pipeline.process()'s `except ValidationError` already catches
-    it. These are regression tests locking that behaviour in - no
-    test previously exercised Pipeline.process() at all.
+    so Pipeline.process()'s `except ValidationError` catches it.
+    These tests lock that behaviour in.
     """
 
     def test_contract_error_is_quarantined(self, pipeline, item):
@@ -98,8 +94,10 @@ class TestPipelineProcessQuarantineOutcomes:
     def test_contract_error_stores_raw_and_quarantine_copies(
         self, pipeline, item
     ):
-        """ContractError still stores raw + quarantine copies for
-        triage, same as any other quarantine outcome."""
+        """ContractError stores raw and quarantine copies for triage.
+
+        The same as any other quarantine outcome.
+        """
         pipeline.contract.read.side_effect = ContractError(
             "Missing column 'attendees'"
         )
@@ -125,12 +123,6 @@ class TestPipelineProcessSkipOutcomes:
         Args:
             pipeline: Pipeline fixture wired to mocks.
             item: SourceItem fixture.
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If outcome is not SKIPPED.
         """
         pipeline.source.download.side_effect = VersionMismatch(
             "changed during download"
@@ -152,12 +144,6 @@ class TestPipelineProcessSkipOutcomes:
         Args:
             pipeline: Pipeline fixture wired to mocks.
             item: SourceItem fixture.
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If outcome is not SKIPPED.
         """
         pipeline.store.get.return_value = b"processed"
 
@@ -170,8 +156,7 @@ class TestPipelineProcessSkipOutcomes:
 
 
 class TestPipelineProcessWarehouseOutcomes:
-    """Exercises process() past validation: Parquet conversion and
-    warehouse load.
+    """Exercise process() past validation: conversion and load.
 
     Unlike `pipeline`/`item` above, these fixtures use a real
     Contract and a real minimal workbook so `_to_parquet`'s
@@ -234,12 +219,6 @@ class TestPipelineProcessWarehouseOutcomes:
         Args:
             pipeline: Pipeline fixture with real Contract + workbook.
             item: SourceItem fixture.
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If outcome is not LOADED.
         """
         result = pipeline.process(item)
 
@@ -253,17 +232,11 @@ class TestPipelineProcessWarehouseOutcomes:
         """A warehouse ServiceError is FAILED (retryable), not quarantined.
 
         The file is fine; the service isn't. QUARANTINED would ack
-        the upload event and fire the bad-file alert (review M3).
+        the upload event and fire the bad-file alert.
 
         Args:
             pipeline: Pipeline fixture with real Contract + workbook.
             item: SourceItem fixture.
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If outcome is not FAILED.
         """
         pipeline.warehouse.load.side_effect = ServiceError(
             "warehouse unavailable"
@@ -285,13 +258,6 @@ class TestPipelineProcessWarehouseOutcomes:
             contract: Real Contract fixture.
             workbook_bytes: Workbook fixture.
             item: SourceItem fixture.
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If outcome isn't QUARANTINED or no
-                quarantine copy is kept.
         """
         source = Mock()
         source.download.return_value = workbook_bytes
@@ -313,12 +279,6 @@ class TestPipelineProcessWarehouseOutcomes:
         Args:
             pipeline: Pipeline fixture with real Contract + workbook.
             item: SourceItem fixture.
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If outcome is not FAILED.
         """
         pipeline.warehouse.load.side_effect = IndeterminateCommitError(
             "commit timed out"
@@ -345,12 +305,6 @@ class TestPipelineAuditKey:
         Args:
             pipeline: Pipeline fixture wired to mocks.
             item: SourceItem fixture.
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If the audit key contains a colon.
         """
         result = Result(
             item=item,
@@ -658,7 +612,7 @@ class TestPipelineToParquetHeadingNames:
     """_to_parquet() keeps every column, under a BigQuery-safe name."""
 
     def test_repeated_headings_are_all_kept(self) -> None:
-        """Both "Other" columns reach the Parquet file (M4 names)."""
+        """Both "Other" columns reach the Parquet file, renamed."""
         contract = Contract(
             worksheets=[
                 Worksheet(
@@ -1059,29 +1013,59 @@ CONTRACT = Contract(
 
 
 def _book(rows: list[list[Any]], title: str = "Events") -> bytes:
+    """Build a one-sheet workbook.
+
+    Args:
+        rows: The rows, headings first.
+        title: The sheet's name.
+
+    Returns:
+        The .xlsx bytes.
+    """
     wb = Workbook()
     ws = wb.active
     assert ws is not None
     ws.title = title
     for row in rows:
         ws.append(row)
-    buffer = io.BytesIO()
+    buffer = BytesIO()
     wb.save(buffer)
     return buffer.getvalue()
 
 
 def _warehouse() -> Mock:
+    """Build a warehouse that accepts every load.
+
+    Returns:
+        The mock warehouse.
+    """
     warehouse = Mock(identity="p.d.t")
     warehouse.load.return_value = True
     return warehouse
 
 
 def _typed(keys: list[str]) -> BigQueryWarehouse:
+    """Build a typed warehouse without a real client.
+
+    Args:
+        keys: The warehouse's merge keys.
+
+    Returns:
+        The warehouse.
+    """
     with patch("py_common.adapters.bigquery.bigquery.Client"):
         return BigQueryWarehouse("p", "d", "t", key_columns=keys)
 
 
 def _raw(tables: dict[str, str]) -> RawJsonWarehouse:
+    """Build a raw JSON warehouse without a real client.
+
+    Args:
+        tables: Sheet name to table name.
+
+    Returns:
+        The warehouse.
+    """
     with patch("py_common.adapters.bigquery_raw.bigquery.Client"):
         return RawJsonWarehouse("p", "d", tables)
 
@@ -1105,6 +1089,11 @@ class TestLockReleaseNeverRaises:
 
     @pytest.fixture
     def store(self) -> tuple[GCSObjectStore, FakeBucket]:
+        """Return a GCS store whose bucket refuses to delete locks.
+
+        Returns:
+            The store and its fake bucket.
+        """
         bucket = FakeBucket()
         with patch("py_common.adapters.gcs.storage.Client"):
             store = GCSObjectStore("p", "store")
@@ -1112,10 +1101,26 @@ class TestLockReleaseNeverRaises:
         real_blob = bucket.blob
 
         def blob(key: str) -> Any:
+            """Return the bucket's blob, unable to delete if it's a lock.
+
+            Args:
+                key: The object's name.
+
+            Returns:
+                The blob.
+            """
             found = real_blob(key)
             if key.startswith("locks/"):
 
                 def refuse(if_generation_match: Any = None) -> None:
+                    """Fail the delete as a missing permission would.
+
+                    Args:
+                        if_generation_match: Ignored.
+
+                    Raises:
+                        Forbidden: Always.
+                    """
                     raise Forbidden("no storage.objects.delete on locks/")
 
                 found.delete = refuse  # type: ignore[method-assign]
@@ -1129,6 +1134,12 @@ class TestLockReleaseNeverRaises:
         store: tuple[GCSObjectStore, FakeBucket],
         caplog: pytest.LogCaptureFixture,
     ) -> None:
+        """A lock that can't be deleted is logged and left to expire.
+
+        Args:
+            store: The store and its bucket.
+            caplog: Captures the error log.
+        """
         gcs, bucket = store
 
         with caplog.at_level(logging.ERROR, logger="py_common.adapters.gcs"):
@@ -1144,6 +1155,12 @@ class TestLockReleaseNeverRaises:
     def test_run_still_returns_its_results(
         self, store: tuple[GCSObjectStore, FakeBucket], tmp_path: Path
     ) -> None:
+        """The run's results come back despite the failed release.
+
+        Args:
+            store: The store and its bucket.
+            tmp_path: The landing folder.
+        """
         gcs, _ = store
         (tmp_path / "a.xlsx").write_bytes(_book([["name"], ["x"]]))
 
@@ -1159,6 +1176,14 @@ class TestMarkerBeforeDownload:
 
     @pytest.fixture
     def setup(self, tmp_path: Path) -> tuple[Pipeline, list[str]]:
+        """Build a pipeline that records each download.
+
+        Args:
+            tmp_path: Folder for the landing folder.
+
+        Returns:
+            The pipeline and the list of names downloaded.
+        """
         folder = tmp_path / "in"
         folder.mkdir()
         (folder / "a.xlsx").write_bytes(_book([["name"], ["x"]]))
@@ -1167,6 +1192,14 @@ class TestMarkerBeforeDownload:
         real = source.download
 
         def download(item: Any) -> bytes:
+            """Record the download, then do it.
+
+            Args:
+                item: The file to download.
+
+            Returns:
+                Its bytes.
+            """
             downloads.append(item.name)
             return real(item)
 
@@ -1177,6 +1210,11 @@ class TestMarkerBeforeDownload:
     def test_second_run_skips_without_downloading(
         self, setup: tuple[Pipeline, list[str]]
     ) -> None:
+        """The second run skips the file without downloading it.
+
+        Args:
+            setup: The pipeline and its download list.
+        """
         pipeline, downloads = setup
 
         first = pipeline.run()
@@ -1194,6 +1232,14 @@ class TestMarkerBeforeDownload:
         pipeline.run()
 
         def refuse(item: Any) -> bytes:
+            """Fail the download as an unavailable source would.
+
+            Args:
+                item: The file asked for.
+
+            Raises:
+                ServiceError: Always.
+            """
             raise ServiceError("503 from the source")
 
         pipeline.source.download = refuse  # type: ignore[method-assign]
@@ -1205,10 +1251,12 @@ class TestPipelineConfigChecks:
     """Mismatched keys or sheet mappings are refused when built."""
 
     def test_warehouse_without_the_contract_keys_is_refused(self) -> None:
+        """A keyed contract needs a warehouse with the same keys."""
         with pytest.raises(ConfigError, match="key_columns"):
             Pipeline(Mock(), Mock(), _typed([]), KEYED)
 
     def test_warehouse_with_other_keys_is_refused(self) -> None:
+        """A warehouse keyed on other columns is refused."""
         contract = Contract(
             key_columns=["id"],
             worksheets=[
@@ -1221,15 +1269,18 @@ class TestPipelineConfigChecks:
             Pipeline(Mock(), Mock(), _typed(["n"]), contract)
 
     def test_matching_keys_are_accepted(self) -> None:
+        """Matching keys build a pipeline."""
         assert Pipeline(Mock(), Mock(), _typed(["id"]), KEYED)
 
     def test_raw_sheet_without_a_table_is_refused(self) -> None:
+        """Every sheet in the contract needs a raw table."""
         with pytest.raises(ConfigError, match="Other"):
             Pipeline(
                 Mock(), Mock(), _raw({"Events": "t1"}), TWO_SHEETS, "raw_json"
             )
 
     def test_raw_table_without_a_sheet_is_refused(self) -> None:
+        """Every raw table needs a sheet in the contract."""
         with pytest.raises(ConfigError, match="Extra"):
             Pipeline(
                 Mock(),
@@ -1240,6 +1291,7 @@ class TestPipelineConfigChecks:
             )
 
     def test_matching_mapping_is_accepted(self) -> None:
+        """A one-to-one sheet mapping builds a pipeline."""
         assert Pipeline(
             Mock(),
             Mock(),
@@ -1253,11 +1305,13 @@ class TestOnlyParserErrorsQuarantine:
     """A sheet the parser rejects is the file's fault; nothing else is."""
 
     def test_memory_error_is_not_blamed_on_the_file(self) -> None:
+        """Running out of memory is raised, not quarantined."""
         with patch("py_common.contract.read_sheet", side_effect=MemoryError):
             with pytest.raises(MemoryError):
                 CONTRACT.read(_book([["name"], ["x"]]), "f.xlsx")
 
     def test_parser_error_quarantines(self) -> None:
+        """A parser error is the file's fault, so it's a ContractError."""
         with patch(
             "py_common.contract.read_sheet", side_effect=ValueError("bad")
         ):
@@ -1266,17 +1320,6 @@ class TestOnlyParserErrorsQuarantine:
 
 
 ITEM = SourceItem("f.xlsx", "f.xlsx", "1", 1)
-
-
-def _book_r2(rows: list[list[Any]]) -> bytes:
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Events"
-    for row in rows:
-        ws.append(row)
-    buffer = io.BytesIO()
-    wb.save(buffer)
-    return buffer.getvalue()
 
 
 def _with_cell_value(data: bytes, old: bytes, new: bytes) -> bytes:
@@ -1288,9 +1331,9 @@ def _with_cell_value(data: bytes, old: bytes, new: bytes) -> bytes:
     """
     import zipfile
 
-    out = io.BytesIO()
+    out = BytesIO()
     with (
-        zipfile.ZipFile(io.BytesIO(data)) as src,
+        zipfile.ZipFile(BytesIO(data)) as src,
         zipfile.ZipFile(out, "w") as dst,
     ):
         for info in src.infolist():
@@ -1302,6 +1345,14 @@ def _with_cell_value(data: bytes, old: bytes, new: bytes) -> bytes:
 
 
 def _contract(mode: str = "quarantine") -> Contract:
+    """Build a contract for an Events sheet of name and n.
+
+    Args:
+        mode: The sheet's on_mismatch setting.
+
+    Returns:
+        The contract.
+    """
     return Contract(
         worksheets=[
             Worksheet(
@@ -1314,6 +1365,15 @@ def _contract(mode: str = "quarantine") -> Contract:
 
 
 def _pipeline(data: bytes, contract: Contract) -> tuple[Pipeline, dict]:
+    """Build a pipeline over one upload, with an in-memory store.
+
+    Args:
+        data: The upload's bytes.
+        contract: The contract to check it against.
+
+    Returns:
+        The pipeline, and the dict the store writes into.
+    """
     objects: dict[str, bytes] = {}
     store = MagicMock()
     store.get.side_effect = objects.get
@@ -1327,11 +1387,12 @@ def _pipeline(data: bytes, contract: Contract) -> tuple[Pipeline, dict]:
 
 
 class TestMalformedWorkbook:
-    """M05: a workbook that fails mid-read is quarantined, raw kept."""
+    """A workbook that fails mid-read is quarantined, raw kept."""
 
     def test_lazy_parse_error_is_quarantined_with_raw_copy(self) -> None:
+        """A cell openpyxl can't read mid-sheet quarantines the file."""
         bad = _with_cell_value(
-            _book_r2([["name", "n"], ["a", 1]]),
+            _book([["name", "n"], ["a", 1]]),
             b"<v>1</v>",
             b"<v>not-a-number</v>",
         )

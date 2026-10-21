@@ -23,7 +23,7 @@ with the full text left in BigQuery's job history (`bq show -j`).
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from google.api_core.exceptions import GoogleAPICallError
@@ -453,7 +453,7 @@ def create_staging_table(
         ServiceError: The table could not be created.
     """
     table = bigquery.Table(full_id, schema=schema)
-    table.expires = datetime.now(timezone.utc) + STAGING_LIFETIME
+    table.expires = datetime.now(UTC) + STAGING_LIFETIME
     try:
         client.create_table(table)
     except GoogleAPICallError as e:

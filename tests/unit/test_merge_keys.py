@@ -1,4 +1,4 @@
-"""Merge keys are validated, never silently dropped (review H3, H4).
+"""Merge keys are validated, never silently dropped.
 
 Contract: key_columns must be listed, non-nullable columns of the
 primary worksheet, and a file whose keys repeat is rejected before
@@ -50,16 +50,19 @@ class TestContractKeyColumnsConfig:
     """Contract.__post_init__ rejects unusable key_columns."""
 
     def test_listed_non_nullable_keys_are_accepted(self) -> None:
+        """Listed, required columns are valid keys."""
         contract = Contract(
             key_columns=["id", "region"], worksheets=[_sheet()]
         )
         assert contract.key_columns == ["id", "region"]
 
     def test_key_not_listed_in_primary_sheet_is_rejected(self) -> None:
+        """A key that isn't a listed column is refused, naming it."""
         with pytest.raises(ValueError, match="'idd'.*not a listed column"):
             Contract(key_columns=["idd"], worksheets=[_sheet()])
 
     def test_nullable_key_is_rejected(self) -> None:
+        """A nullable column can't be a key."""
         with pytest.raises(ValueError, match="'count'.*nullable"):
             Contract(key_columns=["count"], worksheets=[_sheet()])
 
@@ -70,6 +73,7 @@ class TestContractKeyColumnsConfig:
             Contract(key_columns=["other_id"], worksheets=[_sheet(), other])
 
     def test_keys_without_worksheets_are_rejected(self) -> None:
+        """Keys need a worksheet to belong to."""
         with pytest.raises(ValueError, match="no worksheets"):
             Contract(key_columns=["id"])
 
@@ -82,6 +86,7 @@ class TestContractKeyUniqueness:
     """Contract.validate checks the composite key per row."""
 
     def test_repeated_composite_key_is_quarantined(self) -> None:
+        """A repeated (id, region) pair is rejected, naming the rows."""
         contract = Contract(
             key_columns=["id", "region"], worksheets=[_sheet()]
         )
@@ -94,6 +99,7 @@ class TestContractKeyUniqueness:
             contract.validate(data, "f.xlsx")
 
     def test_same_id_different_region_is_fine(self) -> None:
+        """Only the whole key has to be unique."""
         contract = Contract(
             key_columns=["id", "region"], worksheets=[_sheet()]
         )
@@ -102,6 +108,7 @@ class TestContractKeyUniqueness:
         assert contract.validate(data, "f.xlsx") == 2
 
     def test_warn_mode_records_duplicate_key_as_warning(self) -> None:
+        """A "warn" sheet records a repeated key as a warning."""
         contract = Contract(
             key_columns=["id"], worksheets=[_sheet(on_mismatch="warn")]
         )
@@ -114,6 +121,7 @@ class TestContractKeyUniqueness:
         assert any("Duplicate key" in w for w in warnings)
 
     def test_null_key_is_reported_once_as_required(self) -> None:
+        """A missing key is reported as required, not also as repeated."""
         contract = Contract(key_columns=["id"], worksheets=[_sheet()])
 
         with pytest.raises(ValidationError) as info:
@@ -154,6 +162,15 @@ def _warehouse(
     )
 
     def query(sql: str, **_: Any) -> Mock:
+        """Answer the duplicate check, the commit and row counts.
+
+        Args:
+            sql: The query text.
+            **_: Other query arguments, ignored.
+
+        Returns:
+            The job.
+        """
         job = Mock(job_id="q")
         if "HAVING" in sql:
             job.result.return_value = duplicates
@@ -168,6 +185,14 @@ def _warehouse(
 
 
 def _scripts(client: MagicMock) -> list[str]:
+    """Find the commit scripts load() ran.
+
+    Args:
+        client: The mocked BigQuery client.
+
+    Returns:
+        The scripts, in order.
+    """
     return [
         c.args[0]
         for c in client.query.call_args_list
@@ -187,7 +212,7 @@ class TestWarehouseKeyChecks:
         assert _scripts(client) == []
 
     def test_duplicate_keys_are_validation_error_with_counts(self) -> None:
-        """Counts only: key values are data and reach logs (M13)."""
+        """Counts only: key values are data and reach logs."""
         warehouse, client = _warehouse(
             ["id", "region", "count"], [(1, "N", 2, 0), (7, "S", 3, 0)]
         )
@@ -209,6 +234,7 @@ class TestWarehouseKeyChecks:
         assert _scripts(client) == []
 
     def test_clean_keys_merge_on_every_key_column(self) -> None:
+        """The MERGE matches on every key column."""
         warehouse, client = _warehouse(["id", "region", "count"], [])
 
         assert warehouse.load("k", "c", b"parquet", 2, ITEM) is True
@@ -216,6 +242,7 @@ class TestWarehouseKeyChecks:
         assert "ON T.`id` = S.`id` AND T.`region` = S.`region`" in script
 
     def test_duplicate_query_groups_by_every_key(self) -> None:
+        """The duplicate check groups by every key column."""
         warehouse, client = _warehouse(["id", "region", "count"], [])
 
         warehouse.load("k", "c", b"parquet", 2, ITEM)

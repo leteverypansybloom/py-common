@@ -2,31 +2,27 @@
 
 Tests define the Warehouse protocol contract without requiring live
 BigQuery services. All external dependencies are mocked.
-
-RAP Principles:
-- Reproducible: Same test data always produces same results
-- Auditable: Each test documents expected behavior
-- Transparent: No hardcoded GCP credentials in tests
 """
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
-from unittest.mock import Mock, MagicMock, patch
 
+from py_common.adapters._bq_jobs import JOB_TIMEOUT_SECONDS, wait_for_load
 from py_common.adapters.bigquery import BigQueryWarehouse
 from py_common.errors import ContractError, ServiceError
 from py_common.model import SourceItem
-from py_common.adapters._bq_jobs import JOB_TIMEOUT_SECONDS
-from py_common.adapters._bq_jobs import wait_for_load
 
 #: Source file passed to every load().
 ITEM = SourceItem("test.xlsx", "landing/test.xlsx", "1", 10)
 
 
 def _jobs(count_job: Mock):
-    """query() side effect: `count_job` for plain queries, and a job
-    returning the commit script's LOADED status for the script.
+    """Build a query() side effect for load() tests.
+
+    Plain queries get `count_job`; the commit script gets a job
+    returning its LOADED status.
 
     Args:
         count_job: Job returned for every non-script query.
@@ -36,6 +32,15 @@ def _jobs(count_job: Mock):
     """
 
     def query(sql: str, **_: object) -> Mock:
+        """Answer the key check cleanly, counts with count_job.
+
+        Args:
+            sql: The query text.
+            **_: Other query arguments, ignored.
+
+        Returns:
+            The job for this query.
+        """
         if "HAVING" in sql:
             clean = Mock(job_id="keys-1")
             clean.result.return_value = []  # no duplicate keys
@@ -68,17 +73,7 @@ class TestBigQueryWarehouseInit:
     """Test BigQueryWarehouse initialization."""
 
     def test_init_sets_properties(self):
-        """__init__() sets all properties correctly.
-
-        Args:
-            None
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If properties not set
-        """
+        """__init__() sets all properties correctly."""
         with patch("py_common.adapters.bigquery.bigquery.Client"):
             warehouse = BigQueryWarehouse(
                 project_id="test-project",
@@ -90,17 +85,7 @@ class TestBigQueryWarehouseInit:
             assert warehouse.table_id == "test_table"
 
     def test_init_default_audit_table(self):
-        """__init__() uses default audit_table_id.
-
-        Args:
-            None
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If audit_table_id not default
-        """
+        """__init__() uses default audit_table_id."""
         with patch("py_common.adapters.bigquery.bigquery.Client"):
             warehouse = BigQueryWarehouse(
                 project_id="test-project",
@@ -110,17 +95,7 @@ class TestBigQueryWarehouseInit:
             assert warehouse.audit_table_id == "audit"
 
     def test_init_custom_audit_table(self):
-        """__init__() accepts custom audit_table_id.
-
-        Args:
-            None
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If custom audit_table_id not used
-        """
+        """__init__() accepts custom audit_table_id."""
         with patch("py_common.adapters.bigquery.bigquery.Client"):
             warehouse = BigQueryWarehouse(
                 project_id="test-project",
@@ -135,19 +110,10 @@ class TestBigQueryWarehouseIdentity:
     """Test BigQueryWarehouse.identity property."""
 
     def test_identity_fully_qualified(self):
-        """identity property returns fully-qualified table name.
+        """Identity property returns fully-qualified table name.
 
         Used for distributed locking (unique per warehouse).
         Format: project.dataset.table
-
-        Args:
-            None
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If identity not fully qualified
         """
         with patch("py_common.adapters.bigquery.bigquery.Client"):
             warehouse = BigQueryWarehouse(
@@ -195,12 +161,6 @@ class TestBigQueryWarehouseLoad:
         Args:
             warehouse: BigQueryWarehouse fixture
             mock_bq_client: Mocked BigQuery client
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If row count not verified
         """
         # Staged row count (the load job's output_rows) matches.
         mock_query_job = Mock()
@@ -233,12 +193,6 @@ class TestBigQueryWarehouseLoad:
         Args:
             warehouse: BigQueryWarehouse fixture
             mock_bq_client: Mocked BigQuery client
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If ValueError not raised
         """
         # Staged row count (the load job's output_rows) differs.
         mock_query_job = Mock()
@@ -270,12 +224,6 @@ class TestBigQueryWarehouseLoad:
         Args:
             warehouse: BigQueryWarehouse fixture
             mock_bq_client: Mocked BigQuery client
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If audit not recorded
         """
         # Mock query result for row count.
         mock_query_job = Mock()
@@ -290,7 +238,6 @@ class TestBigQueryWarehouseLoad:
         # Mock get_table.
         mock_bq_client.get_table.return_value = _staging_table("col_a")
 
-        # Call load().
         warehouse.load(
             key="test.xlsx",
             checksum="abc123",
@@ -299,7 +246,6 @@ class TestBigQueryWarehouseLoad:
             item=ITEM,
         )
 
-        # Verify audit query was called.
         # Check that query() was called with INSERT INTO ... audit
         calls = [call[0][0] for call in mock_bq_client.query.call_args_list]
         audit_called = any(
@@ -310,24 +256,16 @@ class TestBigQueryWarehouseLoad:
     def test_load_merges_and_audits_in_one_transaction(
         self, warehouse, mock_bq_client
     ):
-        """load() commits the final-table write and the audit record
-        together in a single BigQuery script transaction.
+        """load() writes the final table and the audit row together.
 
-        Fix for issue #1: previously these were two separate query
-        jobs, so a final-insert success followed by an audit-insert
-        failure left committed data with no audit record. Now both
-        statements live inside one BEGIN TRANSACTION / COMMIT
-        TRANSACTION script submitted as a single job.
+        Both statements run in one BEGIN TRANSACTION / COMMIT
+        TRANSACTION script, submitted as a single job. As two jobs, a
+        failed audit insert after a successful final insert would
+        leave committed data with no audit record.
 
         Args:
             warehouse: BigQueryWarehouse fixture
             mock_bq_client: Mocked BigQuery client
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If merge and audit are not one job
         """
         mock_bq_client.get_table.return_value = _staging_table(
             "event_id", "attendees"
@@ -374,12 +312,6 @@ class TestBigQueryWarehouseLoad:
         Args:
             warehouse: BigQueryWarehouse fixture
             mock_bq_client: Mocked BigQuery client
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If ServiceError not raised
         """
         # The final table already has _loaded_at, so no ALTER TABLE
         # runs and the only query is the commit transaction.
@@ -418,9 +350,9 @@ class TestBigQueryWarehouseLoad:
 class TestBigQueryWarehouseMergeSql:
     """Test BigQueryWarehouse._build_merge_sql().
 
-    Fix for issue #2: the final table must be upserted on the
-    contract's key columns, not appended to with a plain INSERT
-    (which duplicates rows on reprocess).
+    The final table is upserted on the contract's key columns, not
+    appended to with a plain INSERT, which would duplicate rows when
+    a file is reprocessed.
     """
 
     @pytest.fixture
@@ -435,17 +367,7 @@ class TestBigQueryWarehouseMergeSql:
             )
 
     def test_init_stores_key_columns(self):
-        """__init__() stores key_columns for use in MERGE.
-
-        Args:
-            None
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If key_columns not stored
-        """
+        """__init__() stores key_columns for use in MERGE."""
         with patch("py_common.adapters.bigquery.bigquery.Client"):
             warehouse = BigQueryWarehouse(
                 project_id="test-project",
@@ -456,17 +378,7 @@ class TestBigQueryWarehouseMergeSql:
             assert warehouse.key_columns == ["event_id"]
 
     def test_init_defaults_key_columns_to_empty(self):
-        """__init__() defaults key_columns to [] (append-only).
-
-        Args:
-            None
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If default is not an empty list
-        """
+        """__init__() defaults key_columns to [] (append-only)."""
         with patch("py_common.adapters.bigquery.bigquery.Client"):
             warehouse = BigQueryWarehouse(
                 project_id="test-project",
@@ -484,12 +396,6 @@ class TestBigQueryWarehouseMergeSql:
 
         Args:
             warehouse: BigQueryWarehouse fixture with key_columns
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If MERGE doesn't upsert correctly
         """
         sql = warehouse._build_merge_sql(
             "proj.ds.t_staging",
@@ -514,12 +420,6 @@ class TestBigQueryWarehouseMergeSql:
 
         Args:
             warehouse: BigQueryWarehouse fixture with key_columns
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If composite key predicate is wrong
         """
         sql = warehouse._build_merge_sql(
             "proj.ds.t_staging",
@@ -538,18 +438,11 @@ class TestBigQueryWarehouseMergeSql:
     ):
         """With only key columns, a match still updates _loaded_at.
 
-        Previously no WHEN MATCHED clause was emitted here. Now that
-        the warehouse owns _loaded_at, a re-loaded row records when
-        it was last confirmed, like any other matched row.
+        The warehouse owns _loaded_at, so a re-loaded row records
+        when it was last confirmed, like any other matched row.
 
         Args:
             warehouse: BigQueryWarehouse fixture with key_columns
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If _loaded_at is not refreshed
         """
         sql = warehouse._build_merge_sql(
             "proj.ds.t_staging", "proj.ds.t", ["event_id"], ["event_id"]
@@ -569,12 +462,6 @@ class TestBigQueryWarehouseMergeSql:
 
         Args:
             warehouse: BigQueryWarehouse fixture with key_columns
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If _loaded_at is not set from @timestamp
         """
         sql = warehouse._build_merge_sql(
             "proj.ds.t_staging",
@@ -591,17 +478,10 @@ class TestBigQueryWarehouseMergeSql:
         )
 
     def test_load_uses_merge_sql_when_key_columns_configured(self, warehouse):
-        """load() builds a real MERGE, not a plain append INSERT,
-        when key_columns are configured.
+        """load() MERGEs, not appends, when key_columns are set.
 
         Args:
             warehouse: BigQueryWarehouse fixture with key_columns
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If load() still does a plain append
         """
         mock_bq_client = warehouse.client
         mock_bq_client.get_table.return_value = _staging_table(
@@ -634,19 +514,11 @@ class TestBigQueryWarehouseMergeSql:
         assert "SELECT * FROM" not in txn_sql
 
     def test_load_appends_when_no_key_columns_configured(self):
-        """load() stays append-only (MERGE ... WHEN NOT MATCHED only)
-        when key_columns is empty, matching the documented "empty
-        means append" behaviour and not duplicating pre-existing
-        append-only callers' data.
+        """load() only appends when key_columns is empty.
 
-        Args:
-            None
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If an upsert is performed with no keys
+        The MERGE has only WHEN NOT MATCHED, matching the documented
+        "empty means append" behaviour, so append-only callers' data
+        is not duplicated.
         """
         mock_bq_client = MagicMock()
         with patch(
@@ -722,9 +594,6 @@ class TestBigQueryWarehouseLoadedAt:
 
         INSERT ROW would copy staging as-is, which no longer has a
         _loaded_at column to match the final table.
-
-        Raises:
-            AssertionError: If INSERT ROW is used or _loaded_at unset
         """
         warehouse = self._warehouse("event_id")
 
@@ -741,11 +610,7 @@ class TestBigQueryWarehouseLoadedAt:
         )
 
     def test_source_column_named_loaded_at_is_refused(self) -> None:
-        """A source column called _loaded_at is refused, not overwritten.
-
-        Raises:
-            AssertionError: If the load proceeds
-        """
+        """A source column called _loaded_at is refused, not overwritten."""
         warehouse = self._warehouse("event_id", "_loaded_at")
 
         with pytest.raises(ContractError, match="_loaded_at"):
@@ -758,6 +623,7 @@ class TestBigQueryWarehouseLoadedAt:
 
 
 def test_load_wait_is_bounded_and_cancelled_on_timeout() -> None:
+    """A load that doesn't finish in time is cancelled and named."""
     job = Mock(job_id="load-1")
     job.result.side_effect = TimeoutError("still running")
 

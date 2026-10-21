@@ -1,287 +1,87 @@
-# Contributing to py-common
+# Contributing
 
-Thank you for contributing! This guide explains how to develop, test, and submit changes.
+How to set up, check and change py-common.
 
-## Getting Started
+## Set up
 
 Clone the repository, then follow
-[`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) for environment
-setup and test fixtures.
-
-## Development Workflow
-
-### Write Tests First (TDD)
-
-All new functionality requires tests. Write the test before the code:
-
-```python
-# tests/unit/test_mymodule.py
-def test_my_feature():
-    """Describe what should happen."""
-    result = my_function(input_data)
-    assert result == expected_output
-```
-
-Then implement:
-
-```python
-# src/py_common/mymodule.py
-def my_function(input_data):
-    """One-line description.
-    
-    Args:
-        input_data: What it is.
-    
-    Returns:
-        What it returns.
-    """
-    # Implementation
-    return result
-```
-
-### Code Standards
-
-- **PEP 8**: 79-character lines (enforced by `black`)
-- **Type hints**: All functions must be annotated
-- **Docstrings**: Google style, one per function/class
-- **No unused code**: Delete or mark `@deprecated`
-- **Comments**: Only on "why", not "what" (code should be obvious)
-
-### Run Tests Locally
+[`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) for the virtual
+environment and the test fixtures. Turn on the pre-commit hooks from
+the activated venv:
 
 ```bash
-# Run all tests
-pytest tests/ -v
-
-# Run with coverage
-pytest tests/ --cov=src/py_common --cov-report=html
-
-# Run only unit tests (skip integration)
-pytest tests/ -m "not integration"
-
-# Run one test file, or one test class
-pytest tests/unit/test_contract.py -v
-pytest tests/unit/test_pipeline.py::TestPipelineAuditKey -v
+pre-commit install
 ```
 
-All tests must pass before submitting a pull request.
+Before each commit, git then runs Black, Ruff, mypy, a secrets scan
+(`detect-secrets`, against `.secrets.baseline`) and the YAML,
+large-file, whitespace and merge-conflict checks. Run them all by hand
+with `pre-commit run --all-files`.
 
-### Format Code
-
-Pre-commit hooks run `black` and `ruff` automatically. To format manually:
-
-```bash
-black --line-length=79 src/ tests/
-ruff check --fix src/ tests/
-```
-
-### Check Types
-
-```bash
-mypy src/py_common --strict
-```
-
-All type errors must be resolved.
-
-### Quality Gates
-
-Two layers of checks run without you asking:
-
-- **On `git commit`** (`.pre-commit-config.yaml`): black, ruff, mypy,
-  detect-secrets, and YAML / large-file / whitespace / merge-conflict
-  checks. Run them all by hand with `pre-commit run --all-files`.
-- **On push and pull request** (`.github/workflows/tests.yml`):
-  ruff, black, mypy and pip-audit first (they fail fast), then pytest
-  with coverage, on Python 3.11 and 3.12.
-
-If detect-secrets flags something that is genuinely not a secret,
-update the baseline and commit it with your change:
+If detect-secrets flags something that is not a secret, update the
+baseline and commit it with your change:
 
 ```bash
 detect-secrets scan --baseline .secrets.baseline
 ```
 
-### Docker Image
+## Checks
 
-The `Dockerfile` builds py-common into a base image for projects
-that deploy to Cloud Run. It installs py-common with the `gcp` extra
-(GCS and BigQuery); a child image adds its own entry point and any
-further extras (such as `sharepoint`).
+Run these before every commit. CI runs the same checks.
 
 ```bash
-docker build -t py-common:latest .
-docker run py-common:latest
-```
-
-## Commit Guidelines
-
-### Message Format
-
-```
-Brief summary (under 50 chars, imperative mood)
-
-Optional detailed explanation if needed.
-- Bullet points okay
-- Be specific about "why"
-
-Closes #123 (if fixing an issue)
-```
-
-Examples:
-
-✅ Good:
-```
-Add validation for duplicate values in unique columns
-
-Implements check to detect duplicate entries in columns marked
-as unique. Raises ValidationError with clear error message listing
-which rows have duplicates.
-```
-
-❌ Bad:
-```
-Fixed bug
-Updated code
-New feature
-```
-
-### When to Commit
-
-Commit logically related changes together:
-- ✅ One feature per commit
-- ❌ Ten unrelated changes in one commit
-
-### Before Pushing
-
-```bash
-# Verify tests pass
-pytest tests/ -v
-
-# Verify formatting
-black --check --line-length=79 src/ tests/
-
-# Verify no secrets
-detect-secrets scan
-
-# Verify types
+black --check .
+ruff check .
 mypy src/py_common --strict
+pytest -m "not integration"
 ```
 
-## Pull Request Process
+On every push and pull request, GitHub Actions
+(`.github/workflows/tests.yml`) runs Ruff, Black, mypy and
+`pip-audit` first, as they fail fast, then pytest with coverage, on
+Python 3.11 and 3.12.
 
-1. **Create a branch** from `main`:
-   ```bash
-   git checkout main
-   git pull
-   git checkout -b feature/my-feature
-   ```
+## Code standards
 
-2. **Make changes** following the workflow above
+- PEP 8 with 79-character lines. Black and Ruff must pass (Ruff rules
+  E, W, F, I, N, D with the Google docstring convention, UP and B).
+- mypy in strict mode for `src/py_common`.
+- Type hints on every function.
+- Google-style docstrings on modules, classes, functions, fixtures and
+  test methods, with `Args:`, `Returns:`, `Yields:` and `Raises:`
+  sections where they apply.
+- Comments say why, not what.
+- No new blanket suppressions: no bare `# noqa`, no `# type: ignore`
+  without an error code, no file-wide ignores.
 
-3. **Write a clear PR description** explaining:
-   - What changed and why
-   - How to test it
-   - Any breaking changes
+## Tests
 
-4. **Request review** from at least one other developer
+- Write the test first. A bug fix comes with a test that fails
+  without the fix.
+- Unit tests (`tests/unit/`) mock every cloud service. The stateful
+  fakes in `tests/unit/_fake_bigquery.py` and `tests/unit/_fake_gcs.py`
+  are preferred to a `Mock` where the outcome depends on what was
+  stored.
+- Tests that need a cloud service are marked
+  `@pytest.mark.integration` and skip unless their environment
+  variables are set.
 
-5. **Address feedback** with new commits (don't squash)
-
-6. **Merge** once approved (use "Squash and merge" if many small commits)
-
-## Architecture Guidelines
-
-### Protocols vs Implementation
-
-Use Python Protocols for interfaces that adapters implement:
-
-```python
-from typing import Protocol
-
-class MyAdapter(Protocol):
-    """Interface for adapters."""
-    
-    def do_thing(self) -> str:
-        """Implementations must define this."""
-        ...
-```
-
-Implementations satisfy the protocol without inheriting:
-
-```python
-class LocalAdapter:
-    def do_thing(self) -> str:
-        return "done"
-
-# LocalAdapter satisfies MyAdapter protocol ✓
-```
-
-### Error Handling
-
-Use the custom exceptions in `py_common.errors` for expected errors —
-see the example in [`README.md`, Error Handling](README.md#error-handling).
-
-Do NOT catch and swallow errors silently.
-
-### Configuration
-
-Configuration should:
-- Be external (YAML, environment variables)
-- Not contain secrets (use Secret Manager names instead)
-- Be interpolated only when used
-- Be documented with examples
-
-For the format and a worked example, see
-[`docs/GETTING_STARTED.md`, Configuration](docs/GETTING_STARTED.md#7-configuration).
-
-## Testing Guidelines
-
-### Unit Tests
-
-Test one function in isolation:
-
-```python
-def test_validates_required_column():
-    """Test that validation catches missing required column."""
-    contract = Contract(
-        worksheets=[
-            Worksheet(name="Events", columns=[Column("id", nullable=False)])
-        ]
-    )
-    with pytest.raises(ContractError):
-        contract.validate(excel_without_id, "test.xlsx")
-```
-
-### Integration Tests
-
-Mark tests requiring cloud services:
-
-```python
-@pytest.mark.integration
-def test_sharepoint_connectivity():
-    """Test live SharePoint connection."""
-    # Skips unless SHAREPOINT_* env vars are set
-    ...
-```
-
-Skip by default:
+Useful variations:
 
 ```bash
-# Skip integration tests
-pytest tests/ -m "not integration"
-
-# Run only integration tests
-pytest tests/ -m "integration"
+pytest tests/ --cov=src/py_common --cov-report=html
+pytest tests/unit/test_pipeline.py::TestPipelineAuditKey -v
+pytest -m integration
 ```
 
 ### BigQuery SQL dry run
 
 `tests/integration/test_bq_dry_run.py` generates every SQL statement
-the BigQuery adapters send (the idempotent commit script for both
-warehouses, the merge-key check, the schema-update `ALTER TABLE`) and
-sends each to BigQuery with `dry_run=True`: parsed and checked
-against real tables, never run, no cost. Run it after any change to
-adapter SQL, against a sandbox project:
+the BigQuery adapters send (the commit script for both warehouses,
+the merge-key check, the schema-update `ALTER TABLE`) and sends each
+to BigQuery with `dry_run=True`: parsed and checked against real
+tables, never run, no cost. Run it after any change to adapter SQL,
+against a sandbox project:
 
 ```bash
 gcloud auth application-default login
@@ -291,8 +91,7 @@ GCP_PROJECT_ID=my-sandbox pytest -m integration tests/integration/test_bq_dry_ru
 It creates a scratch dataset (`py_common_dry_run_<random>`, tables
 expiring after a day) and deletes it afterwards, so your account
 needs `roles/bigquery.dataEditor` and `roles/bigquery.jobUser` in the
-project. It is skipped when `GCP_PROJECT_ID` is unset, and no
-emulator is involved.
+project.
 
 ### Live BigQuery tests
 
@@ -308,100 +107,69 @@ GCP_PROJECT_ID=my-project BQ_TEST_DATASET=py_common_ci \
   pytest -m integration tests/integration/test_bigquery_live.py
 ```
 
-### Fixtures
+## Docker image
 
-Use pytest fixtures in `conftest.py`:
+The `Dockerfile` builds py-common into a base image for projects that
+deploy to Cloud Run. It installs py-common with the `gcp` extra (GCS
+and BigQuery); a child image adds its own entry point and any further
+extras (such as `sharepoint`).
 
-```python
-@pytest.fixture
-def events_contract():
-    """Standard contract for testing."""
-    return Contract(...)
+```bash
+docker build -t py-common:latest .
 ```
 
-Reuse across tests instead of duplicating setup.
+## Common changes
 
-## Documentation
+### A new adapter
 
-Update documentation when:
-- Adding a new public API (docstring + README example)
-- Changing configuration format (update config examples)
-- Making architectural decisions (add to DECISIONS_en.md)
-- Changing what works or what's stubbed (update the status tables in
-  README.md and `docs/INGESTION_FRAMEWORK_GUIDE.md`, Section 5)
-- Changing anything `docs/GETTING_STARTED.md` runs (re-run its
-  snippets and update the expected output)
+1. Create `src/py_common/adapters/<name>.py`, implementing `Source`,
+   `ObjectStore` or `Warehouse` from `ports.py`. Adapters satisfy the
+   protocol without inheriting from it.
+2. Add unit tests in `tests/unit/test_<name>_adapter.py`, with the
+   service mocked, and integration tests in `tests/integration/`.
+3. Map the service's errors to `py_common.errors` (see `ports.py` for
+   which outcome each one gives).
+4. Add it to the adapter table in `README.md`.
 
-## Common Tasks
+### A new validation rule
 
-### Add a New Adapter
-
-1. Create `src/py_common/adapters/myadapter.py`
-2. Implement the protocol (Source, ObjectStore, or Warehouse)
-3. Add unit tests in `tests/unit/test_myadapter.py`, with the
-   external service mocked
-4. Add integration tests in `tests/integration/test_myadapter.py`
-5. Add it to the adapter status table in README.md
-
-### Add a New Validation Rule
-
-1. Add test to `tests/unit/test_contract.py`
-2. Implement in `Contract._validate_worksheet()` (`contract.py`);
-   `Contract.validate()` is the public wrapper that calls it
+1. Add the test to `tests/unit/test_contract.py`.
+2. Implement it in `Contract._validate_worksheet()` (`contract.py`).
 3. Add a fixture case to `make_fixtures()` in
-   `src/py_common/fixtures.py` demonstrating the rule
-4. Regenerate fixtures (see `docs/GETTING_STARTED.md`, Section 2)
-5. Update contract.py docstring
+   `src/py_common/fixtures.py`, and regenerate the fixtures
+   (`docs/GETTING_STARTED.md`, section 2).
 
-### Deprecate Something
+### Deprecating something
+
+Keep it working for one minor release and warn:
 
 ```python
-import warnings
-
-def old_function():
-    """DEPRECATED: Use new_function instead."""
-    warnings.warn(
-        "old_function is deprecated; use new_function",
-        DeprecationWarning,
-        stacklevel=2
-    )
-    # Implementation
+warnings.warn(
+    "old_function is deprecated; use new_function",
+    DeprecationWarning,
+    stacklevel=2,
+)
 ```
 
-## Getting Help
+## Decisions and docs
 
-- **Questions?** Ask in an issue or pull request discussion
-- **Stuck?** Look at existing tests and examples
-- **Design question?** See DECISIONS_en.md for rationale
+- Record each design decision in `DECISIONS_en.md`, in its format.
+- Keep the docs in step with the code: a new public API gets a
+  docstring and a `README.md` example; a change to what works updates
+  the status tables in `README.md` and
+  `docs/INGESTION_FRAMEWORK_GUIDE.md` (section 5); a change to
+  anything `docs/GETTING_STARTED.md` runs means re-running its
+  snippets.
+- Note user-visible changes in `CHANGELOG.md`.
 
-## Code Review Checklist
+## Commits and reviews
 
-When reviewing, check:
+- One commit per logical change. The summary is under 50 characters,
+  in the imperative ("Add ...", "Fix ..."); the body says why.
+- Every change reaches `main` through a pull request reviewed by
+  someone other than its author. The description says what changed,
+  why, how to test it, and any breaking change.
 
-- ✅ Tests pass (`pytest tests/ -v`)
-- ✅ Code formatted (`black --check`)
-- ✅ No linting issues (`ruff check`)
-- ✅ Types correct (`mypy --strict`)
-- ✅ New tests for new functionality
-- ✅ Docstrings are clear and complete
-- ✅ No hardcoded values or secrets
-- ✅ Commit messages are clear
-- ✅ PR description explains "why"
+## Licence
 
-## Standards
-
-This project follows:
-
-- **PEP 8**: Python style guide (79-char lines)
-- **RAP**: Reproducible Analytical Pipelines — reproducible,
-  auditable, peer-reviewed
-- **TDD**: Tests written before code
-- **Google Style**: Docstring format
-
-## License
-
-All contributions are licensed under the MIT License. By submitting, you agree to license your work under the same terms.
-
----
-
-Thank you for contributing to py-common! 🎉
+Contributions are licensed under the MIT License, as the project is.

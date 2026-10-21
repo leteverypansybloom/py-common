@@ -30,19 +30,18 @@ jobs:
           # the advisories.
           python -m pip install --upgrade pip setuptools
           # Tests import google.cloud.storage and google.cloud.bigquery,
-          # which only ship in the [gcp] extra — without it, the
-          # BigQuery/GCS adapter test modules fail to collect and CI
-          # was silently not running them.
+          # which only ship in the [gcp] extra; without it, the
+          # BigQuery/GCS adapter test modules fail to collect.
           pip install -e ".[dev,gcp]" pip-audit
 
       # Static checks run first: they take seconds and fail fast.
       - name: Lint with ruff
         run: |
-          ruff check src/ tests/
+          ruff check .
 
       - name: Format check with black
         run: |
-          black --check src/ tests/
+          black --check .
 
       - name: Type check with mypy
         run: |
@@ -58,11 +57,7 @@ jobs:
 
       - name: Run tests
         run: |
-          # tests/scripts/ tests the parked scripts/gcp_auth.py, which
-          # is due for deletion. One of its tests fakes Windows, which
-          # Python 3.11 refuses on Linux. Drop --ignore with the folder.
           pytest tests/ -v -m "not integration" \
-            --ignore=tests/scripts \
             --cov=src/py_common --cov-report=xml
 
       - name: Upload coverage to Codecov

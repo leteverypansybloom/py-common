@@ -8,12 +8,13 @@ exceptions and log lines, not the pipeline itself (test_pipeline.py).
 import base64
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
+from py_common.adapters.gcs import GCSSource
 from py_common.errors import RunFailed, ServiceError
 from py_common.model import Outcome, Result, SourceItem
 from py_common.runner import (
@@ -24,9 +25,6 @@ from py_common.runner import (
     run_job,
     run_or_raise,
 )
-from unittest.mock import MagicMock
-from unittest.mock import patch
-from py_common.adapters.gcs import GCSSource
 
 
 def _result(name: str, outcome: Outcome) -> Result:
@@ -335,7 +333,7 @@ class TestHandleUpload:
 
         A message with no eventType attribute isn't a GCS upload
         notification (perhaps mis-routed from another topic), so it
-        is acknowledged without a run (review L8).
+        is acknowledged without a run.
         """
         was = _pipeline(Outcome.LOADED)
 
@@ -382,7 +380,7 @@ class TestCheckFreshness:
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         """The alert's text names the source and its last load."""
-        last = datetime(2026, 9, 4, 6, 0, tzinfo=timezone.utc)
+        last = datetime(2026, 9, 4, 6, 0, tzinfo=UTC)
         client = _client({"source": "was", "last_loaded_at": last})
 
         with caplog.at_level(logging.ERROR, logger="py_common.runner"):
@@ -449,6 +447,7 @@ class TestCheckFreshness:
         client.query.assert_not_called()
 
     def test_hyphenated_project_is_accepted(self) -> None:
+        """Project IDs may contain hyphens."""
         client = _client()
 
         check_freshness(client, "phw-prod-1.raw_hww.source_freshness")
@@ -464,7 +463,16 @@ class TestCheckFreshness:
             check_freshness(client, "p.raw_hww.source_freshness")
 
 
-def _event_qw(bucket: str, name: str) -> dict[str, Any]:
+def _upload_event(bucket: str, name: str) -> dict[str, Any]:
+    """Build a Pub/Sub push body for one GCS upload.
+
+    Args:
+        bucket: The bucket the object landed in.
+        name: The object's name.
+
+    Returns:
+        The push request body.
+    """
     import base64
     import json
 
@@ -482,6 +490,11 @@ class TestUploadBucketCheck:
 
     @pytest.fixture
     def pipeline(self) -> MagicMock:
+        """Return a pipeline reading the hww-landing bucket.
+
+        Returns:
+            A mock pipeline with a real GCSSource.
+        """
         with patch("py_common.adapters.gcs.storage.Client"):
             source = GCSSource("p", "hww-landing", "was")
         pipeline = MagicMock()
@@ -490,27 +503,42 @@ class TestUploadBucketCheck:
         return pipeline
 
     def test_other_bucket_is_ignored(self, pipeline: MagicMock) -> None:
+        """An upload to another bucket runs nothing.
+
+        Args:
+            pipeline: The pipeline for hww-landing.
+        """
         assert (
             handle_upload(
-                _event_qw("elsewhere", "was/x.xlsx"), {"was/": pipeline}
+                _upload_event("elsewhere", "was/x.xlsx"), {"was/": pipeline}
             )
             == []
         )
         pipeline.run.assert_not_called()
 
     def test_own_bucket_runs(self, pipeline: MagicMock) -> None:
+        """An upload to the pipeline's own bucket runs it.
+
+        Args:
+            pipeline: The pipeline for hww-landing.
+        """
         handle_upload(
-            _event_qw("hww-landing", "was/x.xlsx"), {"was/": pipeline}
+            _upload_event("hww-landing", "was/x.xlsx"), {"was/": pipeline}
         )
 
         pipeline.run.assert_called_once()
 
 
 class TestUploadShape:
-    """M07: a notification without a string name is ignored, not a crash."""
+    """A notification without a string name is ignored, not a crash."""
 
     @pytest.mark.parametrize("name", [None, 7, ["x"]])
     def test_bad_name_is_rejected(self, name: Any) -> None:
+        """A name that isn't a string is ignored.
+
+        Args:
+            name: The bad object name.
+        """
         payload = {"bucket": "b", "name": name}
         data = {
             "message": {

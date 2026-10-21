@@ -6,12 +6,12 @@ on it (e.g. the Healthy Working Wales SharePoint → GCP pipeline).
 
 **Purpose:** one plain-language reference that defines the vocabulary of
 data ingestion, explains what an "ingestion framework" is expected to do,
-and states exactly what `py-common` does today versus what it does not —
+and states exactly what `py-common` does today versus what it does not - 
 naming the file (and, where it helps, the class or function) behind
 every claim, so nothing here has to be taken on trust. Line numbers are
 deliberately left out: they go stale with every refactor.
 
-**Scope:** this guide covers *ingestion* — getting data from a source
+**Scope:** this guide covers *ingestion* - getting data from a source
 system into governed cloud storage, checked and loaded. It stops where
 `py-common` stops: at a validated load into a warehouse table. Identity
 resolution, curated ("GOLD") modelling and reporting are out of scope for
@@ -19,7 +19,7 @@ this repository and are covered only briefly, in [Section 8](#8-what-sits-outsid
 so the boundary is clear.
 
 **New to this repository?** Start with
-[`GETTING_STARTED.md`](GETTING_STARTED.md) instead — a hands-on
+[`GETTING_STARTED.md`](GETTING_STARTED.md) instead - a hands-on
 walkthrough that gets you running the pipeline before you need this
 level of detail. See [`README.md`](README.md) in this folder for how
 all the docs here fit together.
@@ -62,8 +62,8 @@ about a source once it's live, the ingestion is not finished, however
 short the code that reads the file.
 
 `py-common` is one attempt at packaging up the reusable parts of that
-work — file discovery, validation, storage, warehouse loading, and the
-audit trail — so a new source is (as far as possible) *configuration*,
+work - file discovery, validation, storage, warehouse loading, and the
+audit trail - so a new source is (as far as possible) *configuration*,
 not new pipeline code. [Section 4](#4-what-py-common-is-today) shows how
 far it currently gets.
 
@@ -77,17 +77,17 @@ group's key terms are defined in plain language, followed by where (if
 anywhere) `py-common` implements the idea today. File references are
 exact; where nothing exists, that's stated plainly rather than implied.
 
-### 2.1 Connect — reaching the source and knowing what's there
+### 2.1 Connect - reaching the source and knowing what's there
 
 | Term | Plain-language meaning |
 |---|---|
 | **Source system** | Where data starts: an API, SharePoint, a database, a spreadsheet, a message queue, a device, or a third-party platform. |
 | **Source data** | The actual records, files, messages or responses the source produces. |
-| **Connector / adapter** | Reusable code that knows how to talk to *one* type of source or destination — SharePoint, a REST API, SQL Server. |
+| **Connector / adapter** | Reusable code that knows how to talk to *one* type of source or destination - SharePoint, a REST API, SQL Server. |
 | **Interface / contract** | The agreed rules for exchanging data: endpoint, fields, formats, authentication, rate limits, errors, expected behaviour. |
 | **API** | A defined way for two systems to request or send data to each other, almost always over HTTP. |
-| **Authentication** | Proving a system is allowed to connect at all — OAuth, a client secret, a certificate, an API key. |
-| **Authorisation / permissions** | What that *authenticated* system is then allowed to read, write or administer. Not the same thing as authentication — you can be who you say you are and still be refused access to a library. |
+| **Authentication** | Proving a system is allowed to connect at all - OAuth, a client secret, a certificate, an API key. |
+| **Authorisation / permissions** | What that *authenticated* system is then allowed to read, write or administer. Not the same thing as authentication - you can be who you say you are and still be refused access to a library. |
 | **Secrets management** | Storing credentials securely (a secret store) and passing *references* to them through configuration, never the secret value itself. |
 | **Connection testing** | Checking credentials, network access and permissions *before* a feed goes live, not on the first production run. |
 | **Source discovery** | Listing what objects, files, fields or API resources actually exist at a source, useful when the requested object might change or be unclear. |
@@ -98,7 +98,7 @@ exact; where nothing exists, that's stated plainly rather than implied.
   connector interface: `items()` lists what's available, `download()`
   fetches one item's bytes.
 - `LocalSource` (`src/py_common/adapters/local.py`) implements it
-  for a local folder — this is what the test suite and fixtures use.
+  for a local folder - this is what the test suite and fixtures use.
 - `SharePointSource` (`src/py_common/adapters/sharepoint.py`)
   is the SharePoint connector. It lists one folder of a document
   library through Microsoft Graph (following pagination), downloads
@@ -122,28 +122,28 @@ exact; where nothing exists, that's stated plainly rather than implied.
   port of the R `gcp_auth.R`, is not used by the library and now
   lives in `scripts/`.
 
-### 2.2 Capture — getting the bytes in, once, safely
+### 2.2 Capture - getting the bytes in, once, safely
 
 | Term | Plain-language meaning |
 |---|---|
-| **Batch ingestion** | Moving a defined set of data at intervals — a daily API extract, a folder of files. |
+| **Batch ingestion** | Moving a defined set of data at intervals - a daily API extract, a folder of files. |
 | **Streaming ingestion** | Processing individual events, continuously or near real time. |
-| **Full load** | Extracting the complete relevant dataset — first run, or a deliberate rebuild. |
+| **Full load** | Extracting the complete relevant dataset - first run, or a deliberate rebuild. |
 | **Incremental load** | Extracting only what's changed since the last successful run. |
 | **Change data capture (CDC)** | A specialised form of incremental load that reads inserts/updates/deletes straight from a database's change log. |
-| **Backfill** | A deliberate load of older, historical data — after a gap, a correction, or a new pipeline release. |
+| **Backfill** | A deliberate load of older, historical data - after a gap, a correction, or a new pipeline release. |
 | **Polling** | Asking a source repeatedly whether new data exists. |
 | **Webhook** | The source calling *you*, instead of you asking it. |
 | **Pagination** | Fetching a large API response in pages, via page numbers, cursors, or "next" links. |
 | **Cursor / watermark** | The saved point (timestamp, ID, delta token) from which the next incremental extract resumes. |
 | **Checkpoint** | Persisted progress for a pipeline stage; it should advance *only* after the relevant work has actually succeeded. |
-| **Landing zone / raw layer** | Storage for the source input in its original form, with timestamp and source context attached — the foundation for audit and recovery. |
+| **Landing zone / raw layer** | Storage for the source input in its original form, with timestamp and source context attached - the foundation for audit and recovery. |
 
 **In `py-common` today:**
 
 - Ingestion is **batch, full-listing, no cursor**. `LocalSource.items()`
   (`adapters/local.py`) lists *every* matching file in the folder
-  on every run — there is no "only what changed since last time" at the
+  on every run - there is no "only what changed since last time" at the
   source level. For a local test folder with seven fixtures that's fine;
   for a live SharePoint library with a real history it means listing
   the whole library on every run once `SharePointSource` exists.
@@ -167,7 +167,7 @@ exact; where nothing exists, that's stated plainly rather than implied.
   the file as `SKIPPED` rather than processing a half-written file
   (`pipeline.py`).
 - The **landing zone** is real: every new upload is written
-  unchanged to `raw/{identity}/{checksum}/{name}` — a
+  unchanged to `raw/{identity}/{checksum}/{name}` - a
   valid file just after validation (`Pipeline._store_raw()`), and a
   file that fails validation to both `raw/` and `quarantine/` under the
   same key
@@ -184,53 +184,53 @@ exact; where nothing exists, that's stated plainly rather than implied.
   ([`RUNBOOK.md`](RUNBOOK.md)). For cumulative files, where each
   upload holds the full history, that is all a replay would do.
 
-### 2.3 Make trustworthy — contracts, schema and quality
+### 2.3 Make trustworthy - contracts, schema and quality
 
 | Term | Plain-language meaning |
 |---|---|
 | **Staging** | A technical working representation of the data, standardised into consistent file formats and columns. |
-| **Transformation** | Changing structure or values — parsing a file, renaming fields, standardising dates, mapping codes. |
+| **Transformation** | Changing structure or values - parsing a file, renaming fields, standardising dates, mapping codes. |
 | **Harmonisation** | Making data from different sources consistent enough to compare or combine. |
 | **Mapping** | A documented rule connecting a source field/code to a target field, code or meaning. |
-| **Target data model** | The structure data must follow at its destination — a schema, a set of FHIR resources, an API payload shape. |
+| **Target data model** | The structure data must follow at its destination - a schema, a set of FHIR resources, an API payload shape. |
 | **Schema** | The expected fields, types, relationships and constraints in a dataset or message. |
-| **Schema drift** | An unplanned change to that structure — a renamed column, an altered type. |
+| **Schema drift** | An unplanned change to that structure - a renamed column, an altered type. |
 | **Schema registry** | Somewhere the expected schema (and its compatible versions) is stored, so drift can be *detected* rather than discovered by a crash. |
 | **Metadata** | Data *about* the pipeline and the data: owners, paths, schemas, schedules, mappings, quality rules, retention, deployment settings. |
 | **Metadata-driven ingestion** | A shared runner that behaves according to validated configuration, so a new (supported) feed is set up through metadata, not code changes. |
-| **Configuration** | The specific settings one pipeline run uses — connection references, schedule, source object, load method, destination. |
+| **Configuration** | The specific settings one pipeline run uses - connection references, schedule, source object, load method, destination. |
 | **Data quality checks** | Tests that decide whether data is fit to move forward: required fields, valid values, uniqueness, counts, freshness. |
 | **Validation** | Checking a request, configuration, payload or output against defined rules. |
-| **Data profiling** | Examining a source *before* building the pipeline — volumes, formats, nulls, unique values, date coverage, duplicates, anomalies. |
+| **Data profiling** | Examining a source *before* building the pipeline - volumes, formats, nulls, unique values, date coverage, duplicates, anomalies. |
 | **Quarantine / dead-letter store** | A controlled place for invalid data or failed messages, with a reason attached and a safe way to replay it later. |
 
 **In `py-common` today:**
 
 - The **contract** is the schema registry, in miniature. `Contract`,
   `Worksheet` and `Column` (`src/py_common/contract.py`) are
-  plain Python dataclasses — no YAML layer yet, so a contract is
+  plain Python dataclasses - no YAML layer yet, so a contract is
   written *in* the calling code, not alongside it as data. Each
   `Column` declares `data_type`, `nullable` and `unique`
   (`contract.py`).
 - `Contract.validate()` (`contract.py`) checks, in order:
   required worksheets exist, required columns exist, no *unexpected*
-  columns exist (an extra column is an error here, not a warning —
+  columns exist (an extra column is an error here, not a warning - 
   worth confirming this is the policy PHW actually wants; see
   [Section 5](#5-feature-by-feature-status), row "Schema-drift
   detection"), nullability, type matching for each column's
   `data_type` (`string`, `integer`, `float`, `date`), and uniqueness
   for columns marked `unique`.
 - Validation failures raise (`ContractError` for structural problems,
-  `ValidationError` for data problems — `errors.py`) with the errors
+  `ValidationError` for data problems - `errors.py`) with the errors
   joined into one string; data errors are capped at the first five,
   plus a count of the rest (`contract.py`). There is **no** per-row
   structured output
-  (no "row 17, column X, reason Y" table you can query) — just that one
+  (no "row 17, column X, reason Y" table you can query) - just that one
   string, captured in `Result.errors` (`model.py`).
 - `key_columns` is declared on every `Contract` and names the columns
   that identify a record for merge/upsert. `Pipeline` does **not**
   pass it on automatically: the caller hands it to the warehouse when
-  constructing it — `BigQueryWarehouse(..., key_columns=contract.key_columns)`.
+  constructing it - `BigQueryWarehouse(..., key_columns=contract.key_columns)`.
   `Pipeline` refuses (`ConfigError`) a warehouse whose keys differ
   from the contract's (see
   [2.4](#24-publish--writing-to-the-destination-safely)). Each key
@@ -248,15 +248,15 @@ exact; where nothing exists, that's stated plainly rather than implied.
   A sheet with headings but no data rows quarantines the file unless
   its `Worksheet` sets `allow_empty=True`. Nothing checks for "far
   fewer rows than last month".
-- **No data profiling** step anywhere — profiling (understanding a new
+- **No data profiling** step anywhere: profiling (understanding a new
   source's volumes, nulls, duplicates before writing its contract) is
   a manual, pre-project activity today, not a `py-common` feature.
 - **No metadata-driven onboarding.** There's no request file, no
   registry of "which sources exist, who owns them, what's their
-  schedule" — that's currently whatever the calling application
+  schedule" - that's currently whatever the calling application
   (outside this repo) wires up itself.
 
-### 2.4 Publish — writing to the destination, safely
+### 2.4 Publish - writing to the destination, safely
 
 | Term | Plain-language meaning |
 |---|---|
@@ -264,8 +264,8 @@ exact; where nothing exists, that's stated plainly rather than implied.
 | **Idempotency key** | A stable identifier sent with a write so the receiving system can recognise "this is a retry of that same operation." |
 | **Deduplication** | Detecting and removing/merging repeated records using agreed keys and rules. |
 | **Upsert** | Update the existing record if its key exists; insert a new one if it doesn't. |
-| **Delete handling** | The agreed policy for when a source record disappears — propagate the deletion, mark inactive, keep history, or investigate. |
-| **Retry** | Re-attempting a temporary failure — a network blip, a throttled API call. |
+| **Delete handling** | The agreed policy for when a source record disappears - propagate the deletion, mark inactive, keep history, or investigate. |
+| **Retry** | Re-attempting a temporary failure - a network blip, a throttled API call. |
 | **Backoff and jitter** | Waiting progressively longer between retries, with some randomness, so you don't hammer a struggling service in lock-step with every other retrying client. |
 | **Throttling / rate limiting** | Limits a service imposes on how fast you can call it; your pipeline has to respect them, not just retry blindly into them. |
 | **Delivery receipt / acknowledgement** | Evidence that a destination accepted, rejected, or is still processing what you sent it. |
@@ -282,7 +282,7 @@ exact; where nothing exists, that's stated plainly rather than implied.
   as **one BigQuery script transaction**, so data never commits
   without its audit record. The final-table write is a `MERGE` on the
   `key_columns` passed to the constructor (update matching rows,
-  insert new ones — `BigQueryWarehouse._build_merge_sql()`), or a
+  insert new ones - `BigQueryWarehouse._build_merge_sql()`), or a
   plain append when no key columns are given. A key column missing
   from the data is a `ContractError`, and duplicate or NULL keys in
   staging are a `ValidationError` naming up to five of them, found
@@ -314,23 +314,23 @@ exact; where nothing exists, that's stated plainly rather than implied.
 - **Retry and backoff exist only in the SharePoint adapter.**
   `SharePointSource` retries Graph throttling (429, honouring
   `Retry-After`) and transient 5xx errors, up to 4 attempts with
-  1s/2s/4s waits capped at 60s — Graph is known to throttle (Airbyte
-  documents this for its own SharePoint connector — see
+  1s/2s/4s waits capped at 60s - Graph is known to throttle (Airbyte
+  documents this for its own SharePoint connector - see
   [reference 3](#11-references)). The BigQuery client calls and the
   pipeline still make single attempts.
-- **No reconciliation** step — nothing compares "rows in the source
+- **No reconciliation** step: nothing compares "rows in the source
   file" against "rows now queryable in the final table" after a load;
   the row-count check in `BigQueryWarehouse.load()` only checks
   *staging*, before the final `INSERT`.
 
-### 2.5 Operate — knowing it worked, and recovering when it didn't
+### 2.5 Operate - knowing it worked, and recovering when it didn't
 
 | Term | Plain-language meaning |
 |---|---|
 | **Lineage** | A record of where data came from, how it changed, which code/config ran, where it ended up. |
 | **Audit trail** | Operational evidence of who/what ran a pipeline, when, with which versions, and what happened. |
 | **Observability** | The general ability to understand pipeline behaviour through logs, metrics, traces, status, alerts. |
-| **Monitoring** | Collecting and viewing operational signals — failures, duration, volume, freshness, retries, backlog age. |
+| **Monitoring** | Collecting and viewing operational signals - failures, duration, volume, freshness, retries, backlog age. |
 | **Alerting** | Telling an owner when a condition needs action. |
 | **Run ID** | A unique identifier joining logs, quality results, inputs, outputs and status for one execution. |
 | **Retention** | How long raw inputs, processed data, logs and error records are kept. |
@@ -340,7 +340,7 @@ exact; where nothing exists, that's stated plainly rather than implied.
 | **CI/CD** | Automated checks and controlled deployment of code, config and infrastructure changes. |
 | **Environment** | A separate deployment context (dev/test/prod) with its own settings and safeguards. |
 | **Access control** | Restricting people and services to the minimum data and actions they actually need. |
-| **Service-level objective (SLO)** | A measurable expectation — e.g. "daily data is published by 09:00 on 95% of days." |
+| **Service-level objective (SLO)** | A measurable expectation - e.g. "daily data is published by 09:00 on 95% of days." |
 | **Cost management** | Designing for predictable storage/processing/network/API cost, then watching actual usage against it. |
 
 **In `py-common` today:**
@@ -353,7 +353,7 @@ exact; where nothing exists, that's stated plainly rather than implied.
   the contract it was converted with (`contract_fingerprint`) and
   the py-common version, so a load can be traced to its inputs.
   This is genuinely solid, append-only, and doesn't store the raw data
-  itself — only the checksum — so it's safe to keep without extra
+  itself - only the checksum - so it's safe to keep without extra
   redaction work.
 - **Run ID:** every `Pipeline.run()` has one, on every log line it
   writes. It isn't stored in the audit records yet, so grouping a
@@ -364,7 +364,7 @@ exact; where nothing exists, that's stated plainly rather than implied.
   per file with its `outcome`.
 - **Monitoring/alerting:** log-based alerts set up by hand
   (`docs/GCP_SETUP.md`, section 7); not yet defined as code.
-- **Retention:** no retention policy is set or configurable anywhere —
+- **Retention:** no retention policy is set or configurable anywhere - 
   the landing/raw/quarantine prefixes in `GCSObjectStore` accumulate
   forever until someone sets a bucket lifecycle rule outside this code.
 - **Locking:** `GCSObjectStore.lock()` (`adapters/gcs.py`) creates a
@@ -375,16 +375,16 @@ exact; where nothing exists, that's stated plainly rather than implied.
   rules out, overlapping writers. `LocalObjectStore.lock()` (`adapters/local.py`) is still
   a no-op, appropriately, for local testing.
 - **Secrets:** the `SecretStore` protocol exists (`ports.py`)
-  but **no adapter implements it** — there is no Secret Manager class
+  but **no adapter implements it** - there is no Secret Manager class
   anywhere in `src/py_common/adapters/`. Application Default Credentials handle
   *GCP authentication* (which credential to run as) but that is a different
   problem from *fetching an application secret* (e.g. a SharePoint
-  client secret) — the two should not be confused when
+  client secret) - the two should not be confused when
   `SharePointSource` is built.
 - **IaC / CI/CD:** `.github/workflows/tests.yml` runs pytest, and a
   `Dockerfile` builds the package into a container. There is **no
   Terraform** anywhere in the repository, and the `deploy/` directory
-  exists but is empty — so none of "which bucket, which dataset, which
+  exists but is empty - so none of "which bucket, which dataset, which
   schedule, which service account" is written down as reviewable code
   yet.
 - **Manual scripts** live in `scripts/`, outside the library and the
@@ -411,8 +411,8 @@ logic should live.
 > from this SharePoint library, validate them, and load them into this
 > BigQuery table."
 
-`py-common` is the *framework*. A project that depends on it — for
-example a "Healthy Working Wales SharePoint ingestion" repository — is a
+`py-common` is the *framework*. A project that depends on it - for
+example a "Healthy Working Wales SharePoint ingestion" repository - is a
 *solution*: it should mostly consist of a `config.yaml`, a `Contract`
 definition per source, and a thin `main.py` that wires
 `SharePointSource` + `GCSObjectStore` + `BigQueryWarehouse` +
@@ -425,10 +425,10 @@ solution repo that depends on it?":
   feed, or it closes a recurring operational risk (retry/backoff logic,
   the audit trail shape, the lock implementation).
 - **Keep it in the solution** when it's about the *meaning* of one
-  source or destination — field mappings, "what counts as a duplicate
+  source or destination - field mappings, "what counts as a duplicate
   event," the exact BigQuery table layout for this project.
 - **Don't add platform complexity until a real requirement demands
-  it** — scale, low latency, many dependencies, high failure
+  it** - scale, low latency, many dependencies, high failure
   consequences, or many users. [Section 7](#7-choosing-features-for-your-scenario)
   applies this rule scenario by scenario.
 
@@ -438,12 +438,12 @@ solution repo that depends on it?":
 
 In one paragraph, for anyone who hasn't read Section 2: `py-common`
 defines four small interfaces (`Source`, `ObjectStore`, `Warehouse`,
-`SecretStore` — all in `ports.py`) so that the core pipeline
+`SecretStore` - all in `ports.py`) so that the core pipeline
 (`pipeline.py`) never has to import a cloud SDK directly. A `Pipeline`
 discovers files from a `Source`, downloads and hashes each one, validates
 it against a `Contract`, lands the raw bytes, converts valid files to
 Parquet (typed route) or to JSON rows (raw JSON route), loads them into
-a `Warehouse`, and writes an `AuditRecord` for every attempt — success,
+a `Warehouse`, and writes an `AuditRecord` for every attempt - success,
 skip, quarantine or failure alike. It runs today against a local folder
 (`LocalSource` + `LocalObjectStore`); the production GCP pieces
 (`GCSSource`, `GCSObjectStore`, `BigQueryWarehouse`,
@@ -461,7 +461,7 @@ mocked). `test_hww_fixtures.py` runs the raw JSON route end to end
 over the HWW-style fixtures with the local adapters. The integration tests
 (`test_end_to_end_gcs_bq.py`, `test_gcs_bigquery_integration.py`,
 `test_live_services.py`) need real GCP credentials and skip
-themselves without them — so CI collects them but never actually
+themselves without them - so CI collects them but never actually
 exercises them.
 
 ---
@@ -511,7 +511,7 @@ behaviour doesn't match the promise), **Missing** (nothing exists).
 | Environment management | Partial | `config.py` supports named sections (e.g. `dev`/`prod`) with `${VAR}` interpolation; no enforced separation beyond that convention. |
 | Infrastructure as code | Missing | No Terraform; `deploy/` is an empty folder. |
 | Testing and release controls | **Have** | `pytest`, `pre-commit` (black/ruff/mypy/detect-secrets), GitHub Actions CI (`.github/workflows/tests.yml`), and nightly live BigQuery tests in a test dataset (`.github/workflows/bigquery-live.yml`, `docs/CI_SETUP.md`). |
-| Cost and capacity controls | Missing | Not applicable yet — no deployment exists to size or budget. |
+| Cost and capacity controls | Missing | Not applicable yet - no deployment exists to size or budget. |
 
 ---
 
@@ -524,7 +524,7 @@ not a redesign.
 
 | Need | Recommended implementation | Maps to |
 |---|---|---|
-| Source (SharePoint) | A Microsoft Graph-based adapter: site/drive IDs, file metadata, and — once volumes justify it — delta queries for change tracking [reference 4](#11-references) | Implement `SharePointSource` against the existing `Source` protocol (`ports.py`); it currently raises `NotImplementedError` (`adapters/sharepoint.py`). |
+| Source (SharePoint) | A Microsoft Graph-based adapter: site/drive IDs, file metadata, and - once volumes justify it - delta queries for change tracking [reference 4](#11-references) | Implement `SharePointSource` against the existing `Source` protocol (`ports.py`); it currently raises `NotImplementedError` (`adapters/sharepoint.py`). |
 | Raw landing | Cloud Storage, immutable per-run/per-object paths | Already the shape of `GCSObjectStore` (`adapters/gcs.py`) via `pipeline.py`. |
 | Processing | Python, run as a Cloud Run job (batch-to-completion, not a long-lived service) | `Pipeline.run()` (`pipeline.py`) is already written as a single batch pass suitable for this. |
 | Scheduling | Cloud Scheduler triggering the Cloud Run job directly, or via a Workflows definition if more than one step needs coordinating | Not yet built; belongs in the *solution* repo's `deploy/`, using Terraform, not in `py-common`. |
@@ -542,7 +542,7 @@ loses the version/eTag metadata that `SourceItem.version`
 (`errors.py`, used at `adapters/local.py`) depend on.
 Reading via the Microsoft Graph API keeps that metadata, and is also the
 only route to `listItem: delta` change tracking later
-[reference 4](#11-references) — which is the eventual answer to the
+[reference 4](#11-references) - which is the eventual answer to the
 "list everything, every run" limitation described in
 [2.2](#22-capture--getting-the-bytes-in-once-safely).
 
@@ -559,7 +559,7 @@ to decide what actually matters for the feed in front of you.
 | A future API source (marketing/analytics, third-party) | Pagination, retries with backoff, rate-limit handling, raw-response capture, a cursor/watermark | Streaming, unless the API genuinely pushes events and low latency actually matters |
 | Writing out to a destination API (not just BigQuery) | An idempotency key, a delivery ledger with receipts, bounded retries, reconciliation | Assuming a 200 response alone proves the record arrived and was stored correctly downstream |
 | Several SharePoint libraries/providers using the same pattern | Metadata-driven onboarding (a request file + registry), a mapping-template format, shared quality rules | A bespoke pipeline per source |
-| Personal or otherwise sensitive data (this project has adviser names and attendee emails) | Named ownership, least-privilege service accounts, an explicit decision on what SILVER/GOLD may carry in the clear, safe logging (never log payloads) | Nothing here is "usually unnecessary" — treat all of it as required, early |
+| Personal or otherwise sensitive data (this project has adviser names and attendee emails) | Named ownership, least-privilege service accounts, an explicit decision on what SILVER/GOLD may carry in the clear, safe logging (never log payloads) | Nothing here is "usually unnecessary" - treat all of it as required, early |
 | A one-off historical migration | Source profiling, a mapping specification, validation, reconciliation, a signed-off record of what ran | Building general-purpose onboarding machinery for a load that happens once |
 
 ---
@@ -569,7 +569,7 @@ to decide what actually matters for the feed in front of you.
 `py-common`'s scope stops at a validated load into a RAW/staging table.
 The following stages matter to the wider Healthy Working Wales platform
 but are **not** implemented in, and arguably should not live inside,
-this shared library — they belong in downstream solution repos or a
+this shared library - they belong in downstream solution repos or a
 separate transformation project:
 
 - **Employer/organisation identity resolution** (matching inconsistent
@@ -587,13 +587,13 @@ separate transformation project:
   path for a single-warehouse setup [reference 7](#11-references).
 - **Declarative data-quality rules at the transformation layer**
   (as opposed to the schema/contract checks `py-common` does at
-  ingestion) — **Soda Core** (free, YAML-based) or Dataform/dbt-style
+  ingestion) - **Soda Core** (free, YAML-based) or Dataform/dbt-style
   assertions are the usual choices here
   [reference 8](#11-references).
 - **Orchestrating several dependent jobs** (ingest → resolve identity →
   build GOLD → publish) is a job for **Dagster** or **Prefect**, not for
   `py-common` itself, and only once there are enough dependent steps to
-  justify an orchestrator at all — a single daily batch job does not
+  justify an orchestrator at all - a single daily batch job does not
   need one, per [Section 3](#3-framework-vs-solution)'s "don't add
   complexity until it's needed" rule.
 
@@ -611,7 +611,7 @@ require the steps after it.
 **Done:** the BigQuery write now `MERGE`s on `key_columns` inside one
 transaction with its audit record (2026-09-21; see `DECISIONS_en.md`).
 
-1. ~~Implement `SharePointSource`~~ — built and tested against mocked
+1. ~~Implement `SharePointSource`~~: built and tested against mocked
    Graph responses (`adapters/sharepoint.py`), full listing, no delta
    queries yet. Still to do: once IT approves a credential flow, write
    the token provider, run `tests/integration/test_live_services.py`
@@ -621,7 +621,7 @@ transaction with its audit record (2026-09-21; see `DECISIONS_en.md`).
 2. **Add a minimum-row-count check** to `Contract` (e.g. an optional
    `min_rows` field, default 1) so an empty export is caught rather than
    silently marked `LOADED` with zero rows.
-3. ~~Implement a real `ObjectStore.lock()` for GCP~~ — done: `GCSObjectStore.lock()` (`adapters/gcs.py`) uses atomic create-if-absent, as a lease. Clearing a stale lock is in `docs/RUNBOOK.md`, with reloading and undoing uploads.
+3. ~~Implement a real `ObjectStore.lock()` for GCP~~: done: `GCSObjectStore.lock()` (`adapters/gcs.py`) uses atomic create-if-absent, as a lease. Clearing a stale lock is in `docs/RUNBOOK.md`, with reloading and undoing uploads.
 4. **Add a `SecretStore` adapter for Secret Manager**, implementing the
    existing protocol (`ports.py`), before any credential (a
    SharePoint client secret, in particular) is wired into configuration.
@@ -639,7 +639,7 @@ transaction with its audit record (2026-09-21; see `DECISIONS_en.md`).
 7. **Only then**, consider incremental/delta loading, an
    orchestrator, or anything else in
    [Section 7](#7-choosing-features-for-your-scenario)'s "usually
-   unnecessary at this stage" column — each has its own trigger
+   unnecessary at this stage" column - each has its own trigger
    condition, and none of them are blocking today's actual project.
    (Row-level quarantine is now handled by the Dataform layer for the
    raw JSON route; see [`RAW_TABLE_LAYOUT.md`](RAW_TABLE_LAYOUT.md).)
@@ -663,7 +663,7 @@ is for fast lookup.
 | Backfill | A deliberate load of older historical data. |
 | Backoff / jitter | Increasing, randomised delay between retries. |
 | Batch ingestion | Moving a defined set of data at intervals. |
-| CDC | Change data capture — reading DB inserts/updates/deletes from a change log. |
+| CDC | Change data capture - reading DB inserts/updates/deletes from a change log. |
 | Checkpoint | Persisted progress that only advances after work succeeds. |
 | CI/CD | Automated checks and controlled deployment of changes. |
 | Configuration | The specific settings one run uses. |
@@ -681,7 +681,7 @@ is for fast lookup.
 | Destination / sink | Where data is sent. |
 | Environment | A separate deployment context (dev/test/prod). |
 | Full load | Extracting the complete relevant dataset. |
-| IaC | Infrastructure as code — cloud resources defined in version control. |
+| IaC | Infrastructure as code - cloud resources defined in version control. |
 | Idempotency | A retry of the same input doesn't duplicate or corrupt results. |
 | Idempotency key | An identifier letting a receiver recognise a retried write. |
 | Incremental load | Extracting only what changed since the last successful run. |
@@ -738,26 +738,26 @@ Numbered where cited above; not exhaustive of everything reviewed.
    Thorogood) and *The Book of OHDSI*, Chapter 6 "Extract Transform
    Load" (Clair Blacketer and Erica Voss) for its profiling, mapping-
    review and maintenance guidance.
-3. Airbyte — Microsoft SharePoint connector, including its note on
+3. Airbyte: Microsoft SharePoint connector, including its note on
    Graph API throttling:
    <https://docs.airbyte.com/integrations/sources/microsoft-sharepoint>
-4. Microsoft Graph — `listItem: delta`, for incremental SharePoint list
+4. Microsoft Graph: `listItem: delta`, for incremental SharePoint list
    change tracking:
    <https://learn.microsoft.com/en-us/graph/api/listitem-delta> (see
    also the Airbyte reference above, which documents delta-query use in
    practice)
-5. Google Cloud — Cloud Run jobs on a schedule, and Cloud Storage
+5. Google Cloud: Cloud Run jobs on a schedule, and Cloud Storage
    retention policies / Bucket Lock:
    <https://cloud.google.com/run/docs/execute/jobs-on-schedule>,
    <https://cloud.google.com/storage/docs/bucket-lock>
-6. Splink — open-source probabilistic record linkage, built and used in
+6. Splink: open-source probabilistic record linkage, built and used in
    production by the UK Ministry of Justice:
    <https://moj-analytical-services.github.io/splink/>
-7. Google Cloud — Dataform, bundled into BigQuery:
+7. Google Cloud: Dataform, bundled into BigQuery:
    <https://cloud.google.com/dataform/docs/overview>
-8. Soda Core — open-source, YAML-based data quality checks:
+8. Soda Core: open-source, YAML-based data quality checks:
    <https://docs.soda.io/soda/core-concepts.html>
-9. NHS RAP community of practice — levels of Reproducible Analytical
+9. NHS RAP community of practice: levels of Reproducible Analytical
    Pipelines (Baseline/Silver/Gold), used above as the maturity
    yardstick for CI/CD and scheduled triggers:
    <https://nhsdigital.github.io/rap-community-of-practice/>
@@ -765,4 +765,4 @@ Numbered where cited above; not exhaustive of everything reviewed.
 Citations elsewhere in this guide name files, classes and functions
 rather than line numbers, and were last checked against the code on
 2026-09-23. This is a working repository; if something here disagrees
-with the code, the code wins — fix the guide in the same pull request.
+with the code, the code wins - fix the guide in the same pull request.

@@ -10,7 +10,7 @@ earlier planning documents (`roll-out/README.md`, `QUICK_REFERENCE.md`,
 `SHARING_PLAN.md`, `WALKTHROUGH.md` and `WALKTHROUGH_COMPARISON.md`,
 still visible in git history at commit `732f7e6`) that were written
 during the initial team roll-out and covered a lot of the same ground
-across five separate files — a "Use it when / Don't use it when" list
+across five separate files - a "Use it when / Don't use it when" list
 appeared, slightly differently worded, in three of them. The useful
 judgement calls from those documents are consolidated here, once, and
 corrected against the code as it stands today rather than as it was
@@ -26,17 +26,17 @@ for the framework-vs-solution distinction) for one specific shape of
 work: discover Excel workbooks at a source, validate them against a
 declared schema, land the raw and processed copies immutably, load
 them into a warehouse table, and keep an audit trail of every attempt.
-A project that depends on it — a "Healthy Working Wales SharePoint
-ingestion" repo, for example — should mostly be a `config.yaml`, a
+A project that depends on it - a "Healthy Working Wales SharePoint
+ingestion" repo, for example - should mostly be a `config.yaml`, a
 `Contract` per source, and a thin `main.py` wiring adapters together.
 
 ## Use py-common when
 
-- Your source produces **discrete files** — Excel workbooks today,
+- Your source produces **discrete files**: Excel workbooks today,
   specifically, since `Contract.validate()` calls
   `openpyxl.load_workbook()` directly (`contract.py`).
 - You need the file's **structure and data checked** before it's
-  trusted anywhere downstream — required worksheets, required and
+  trusted anywhere downstream - required worksheets, required and
   unexpected columns, nullability, basic types, uniqueness
   (`contract.py`). Each check can quarantine the file or, with
   `on_mismatch="warn"`, record a warning and load it anyway.
@@ -49,23 +49,23 @@ ingestion" repo, for example — should mostly be a `config.yaml`, a
   `RawJsonWarehouse`; see [`RAW_TABLE_LAYOUT.md`](RAW_TABLE_LAYOUT.md)),
   or merged into a **typed table** on key columns
   (`BigQueryWarehouse`).
-- You need a **defensible audit trail** — who processed what, when,
-  with what checksum and outcome — without extra work
+- You need a **defensible audit trail**: who processed what, when,
+  with what checksum and outcome - without extra work
   (`model.py`, written by `pipeline.py`).
 - You want **adding a new source to be mostly configuration**: a new
   `Contract`, a new adapter satisfying `Source`, and reuse of the
-  same `Pipeline`, `ObjectStore` and `Warehouse` — see
+  same `Pipeline`, `ObjectStore` and `Warehouse` - see
   [Adding a new adapter](#adding-a-new-adapter) below.
-- You're doing **batch, not streaming**, work — a daily or weekly
+- You're doing **batch, not streaming**, work: a daily or weekly
   extract, not continuous events.
 
-## Not a fit today — but check "future path" before ruling it out
+## Not a fit today - but check "future path" before ruling it out
 
 **Streaming or near-real-time ingestion.** `py-common` is batch-only
 by design: `Source.items()` lists everything present at call time,
 there is no event/webhook entry point, and nothing in `Pipeline` is
 written for long-lived processing. If you have a genuine low-latency
-requirement, this isn't the tool, full stop — building streaming
+requirement, this isn't the tool, full stop - building streaming
 support into a framework designed around "list, then download" would
 be a rewrite, not an extension.
 
@@ -74,12 +74,12 @@ item worth being careful about, because an earlier planning document
 (`roll-out/README.md`, commit `732f7e6`) listed "reading from
 databases directly" as a flat "don't use py-common" case. That's true
 of the code *today*, but it's an accident of what's been built so
-far, not a structural limit of the design — treat it as **not yet
+far, not a structural limit of the design - treat it as **not yet
 supported**, not as permanently out of scope:
 
 - `Source` (`ports.py`) only requires `items()` (list what's
   available) and `download()` (fetch one item's bytes). Nothing in
-  the protocol assumes a file — a `DatabaseSource` that lists
+  the protocol assumes a file - a `DatabaseSource` that lists
   "changed since last run" query results and returns each batch as
   bytes would satisfy it structurally, the same way `LocalSource` and
   `SharePointSource` do.
@@ -92,8 +92,8 @@ supported**, not as permanently out of scope:
   an in-memory workbook before handing it to the existing contract
   (workable for small extracts, wasteful for large ones).
 - **If this becomes a real requirement**, it's an additive piece of
-  work — a new `Source` implementation plus a contract-input
-  extension — not a redesign of `py-common`. Raise it as a proposed
+  work - a new `Source` implementation plus a contract-input
+  extension - not a redesign of `py-common`. Raise it as a proposed
   adapter (see [Adding a new adapter](#adding-a-new-adapter)) rather
   than writing a one-off database script outside the framework; that
   one-off script is exactly the kind of duplicated, unaudited logic
@@ -103,7 +103,7 @@ supported**, not as permanently out of scope:
   source isn't on it yet because no project has needed one, not
   because it was rejected.
 
-**Building an ML pipeline.** Not what this is for — use a proper
+**Building an ML pipeline.** Not what this is for - use a proper
 ML/feature-engineering framework and, if you need governed input data
 for it, treat `py-common` as an upstream ingestion step, not the
 pipeline itself.
@@ -111,22 +111,21 @@ pipeline itself.
 ## Adding a new adapter
 
 The pattern is the same for any new `Source`, `ObjectStore` or
-`Warehouse` — including a hypothetical `DatabaseSource`:
+`Warehouse` - including a hypothetical `DatabaseSource`:
 
 1. Look at the protocol it must satisfy in `ports.py` and at an
    existing implementation of the same protocol (`LocalSource` is the
    simplest; `SharePointSource` shows a remote source with
    pagination, retries and injected authentication).
 2. Write the test first, against the protocol's documented behaviour
-   — see `CONTRIBUTING.md`, "Write Tests First (TDD)".
+   (`CONTRIBUTING.md`, "Tests").
 3. Implement the class. It does **not** need to inherit from
-   anything — `Protocol` in `ports.py` uses structural typing, so a
+   anything: `Protocol` in `ports.py` uses structural typing, so a
    class satisfies `Source` by having the right methods with the
-   right signatures (`CONTRIBUTING.md`, "Protocols vs Implementation"
-   has a minimal worked example).
+   right signatures (`CONTRIBUTING.md`, "A new adapter").
 4. If it's a `Source` for a new *kind* of data (not Excel), check
    whether `Contract.validate()` needs a matching extension before
-   the new source is actually usable end to end — don't assume "the
+   the new source is actually usable end to end - don't assume "the
    adapter exists" means "the pipeline works," per the database
    example above.
 5. Add unit tests with the external service mocked (see
@@ -139,17 +138,17 @@ The pattern is the same for any new `Source`, `ObjectStore` or
 ## Deciding what belongs in py-common vs. your project
 
 Restated briefly from
-[`INGESTION_FRAMEWORK_GUIDE.md`, Section 3](INGESTION_FRAMEWORK_GUIDE.md#3-framework-vs-solution) —
+[`INGESTION_FRAMEWORK_GUIDE.md`, Section 3](INGESTION_FRAMEWORK_GUIDE.md#3-framework-vs-solution) - 
 read that section for the full reasoning:
 
 - Put it in `py-common` if more than one feed will need it, or it
   closes a recurring operational risk (retry logic, the audit shape,
   the lock implementation).
 - Keep it in your project's own repo if it's about the *meaning* of
-  one source — field mappings, what counts as a duplicate event, the
+  one source - field mappings, what counts as a duplicate event, the
   exact destination table layout.
-- Don't add platform complexity — an orchestrator, CDC, a connector
-  catalogue — until a real project actually needs it. See
+- Don't add platform complexity: an orchestrator, CDC, a connector
+  catalogue - until a real project actually needs it. See
   [`INGESTION_FRAMEWORK_GUIDE.md`, Section 7](INGESTION_FRAMEWORK_GUIDE.md#7-choosing-features-for-your-scenario)
   for a scenario-by-scenario breakdown of what to prioritise.
 

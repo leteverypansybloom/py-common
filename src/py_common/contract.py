@@ -201,10 +201,9 @@ class Contract:
     def __post_init__(self) -> None:
         """Check settings that would otherwise fail confusingly later.
 
-        A key the data doesn't have used to be dropped silently, and
-        a NULL key never matches in a MERGE, so both turned upserts
-        into duplicate inserts. Refuse them when the contract is
-        built instead.
+        A key the data doesn't have, or a NULL key (which never
+        matches in a MERGE), would turn upserts into duplicate
+        inserts. So they are refused when the contract is built.
 
         Raises:
             ValueError: A key column isn't a listed column of the
@@ -906,7 +905,14 @@ def formulas_without_values(
 
 
 def _local(tag: str) -> str:
-    """XML tag without its namespace."""
+    """Strip the namespace from an XML tag.
+
+    Args:
+        tag: A tag such as "{http://...}c".
+
+    Returns:
+        The local name, such as "c".
+    """
     return tag.rsplit("}", 1)[-1]
 
 

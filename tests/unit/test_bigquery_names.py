@@ -1,11 +1,10 @@
-"""M4: typed-route columns get names BigQuery accepts (REVIEW_.md).
+"""Typed-route columns get names BigQuery accepts.
 
-Headings became BigQuery column names as written. BigQuery's own
-rules (letters, digits and underscores only; case ignored, so
-"Score" and "score" clash; at most 300 characters) then rejected
-the load, as a ServiceError, so the file FAILED on every retry
-instead of loading. Headings are now turned into safe names:
-"Date of Enquiry" becomes date_of_enquiry.
+BigQuery allows only letters, digits and underscores, ignores case
+(so "Score" and "score" clash) and stops at 300 characters. A heading
+used as written could break those rules, and BigQuery would reject
+the load on every retry. Headings are turned into safe names
+instead: "Date of Enquiry" becomes date_of_enquiry.
 """
 
 import io
@@ -44,24 +43,45 @@ CASES = [
 
 
 class TestColumnName:
+    """column_name() turns one heading into a safe name."""
+
     @pytest.mark.parametrize("heading, expected", CASES)
     def test_heading_becomes_a_safe_name(
         self, heading: str, expected: str
     ) -> None:
+        """Each heading becomes the expected name.
+
+        Args:
+            heading: The heading as written.
+            expected: Its safe name.
+        """
         assert column_name(heading) == expected
 
     @pytest.mark.parametrize("_, name", CASES)
     def test_a_safe_name_is_left_alone(self, _: str, name: str) -> None:
+        """Converting a safe name again changes nothing.
+
+        Args:
+            _: The heading, unused.
+            name: A safe name.
+        """
         assert column_name(name) == name
 
     @pytest.mark.parametrize("heading", ["?!", "-", "数量", ""])
     def test_no_letters_or_digits_gives_nothing(self, heading: str) -> None:
+        """A heading of only symbols gives an empty name.
+
+        Args:
+            heading: The heading.
+        """
         assert column_name(heading) == ""
 
     def test_long_heading_is_cut_to_300(self) -> None:
+        """Names are cut to BigQuery's 300-character limit."""
         assert column_name("a" * 400) == "a" * 300
 
     def test_never_starts_with_an_underscore(self) -> None:
+        """No name starts with an underscore."""
         # So it can't take a reserved prefix (_TABLE_, _PARTITION...)
         # or a column the warehouse sets (_loaded_at, _deleted_at).
         for heading in ["_TABLE_x", "_partition", "__ROOT__", "_deleted_at"]:
@@ -69,20 +89,26 @@ class TestColumnName:
 
 
 class TestColumnNames:
+    """column_names() names a sheet's columns without clashes."""
+
     def test_names_that_clash_are_numbered(self) -> None:
+        """Names that clash get _2, _3 and so on, in column order."""
         names = column_names(["Score", "score", "SCORE %", "Score "])
 
         assert names == ["score", "score_2", "score_percent", "score_3"]
 
     def test_numbering_skips_another_column_s_own_name(self) -> None:
+        """A number another column already uses is skipped."""
         assert column_names(["a", "A", "a_2"]) == ["a", "a_3", "a_2"]
 
     def test_merge_keys_keep_their_own_names(self) -> None:
+        """A merge key keeps its name; the other column is numbered."""
         names = column_names(["ID", "id", "Name"], keys=["id"])
 
         assert names == ["id_2", "id", "name"]
 
     def test_unusable_heading_is_named_by_position(self) -> None:
+        """A heading with no usable characters is named col_<position>."""
         assert column_names(["Name", "?", "数量"]) == [
             "name",
             "col_2",
@@ -90,18 +116,23 @@ class TestColumnNames:
         ]
 
     def test_numbered_long_name_stays_within_300(self) -> None:
+        """A numbered long name is shortened to fit its suffix."""
         names = column_names(["a" * 400, "A" * 400])
 
         assert names[1] == "a" * 298 + "_2"
         assert all(len(name) <= 300 for name in names)
 
     def test_keys_that_clash_are_refused(self) -> None:
+        """Two keys with the same safe name are refused."""
         with pytest.raises(ValueError, match="'id'"):
             column_names(["ID", "id"], keys=["ID", "id"])
 
 
 class TestParquet:
+    """Parquet files use the safe names."""
+
     def test_columns_are_written_under_safe_names(self) -> None:
+        """The Parquet schema uses the safe names."""
         sheet = SheetRows(
             columns=["Participant ID", "Date of Enquiry", "Score %"],
             rows=[(2, ("P1", None, 5))],
@@ -127,6 +158,14 @@ class TestParquet:
 
 
 def _book(rows: list[list[Any]]) -> bytes:
+    """Build a Signups workbook.
+
+    Args:
+        rows: The rows, headings first.
+
+    Returns:
+        The .xlsx bytes.
+    """
     wb = Workbook()
     ws = wb.active
     assert ws is not None
@@ -154,13 +193,29 @@ CONTRACT = Contract(
 
 
 class TestTypedRoute:
+    """The typed warehouse loads and merges under the safe names."""
+
     @pytest.fixture
     def client(self) -> FakeBigQueryClient:
+        """Return a fake BigQuery client.
+
+        Returns:
+            The client.
+        """
         return FakeBigQueryClient()
 
     def _warehouse(
         self, client: FakeBigQueryClient, **kwargs: Any
     ) -> BigQueryWarehouse:
+        """Build a typed warehouse on the fake client.
+
+        Args:
+            client: The fake client.
+            **kwargs: Extra BigQueryWarehouse arguments.
+
+        Returns:
+            The warehouse.
+        """
         with patch("py_common.adapters.bigquery.bigquery.Client") as cls:
             cls.return_value = client
             return BigQueryWarehouse("p", "d", "signups", **kwargs)
@@ -168,6 +223,11 @@ class TestTypedRoute:
     def test_headings_load_and_merge_under_safe_names(
         self, client: FakeBigQueryClient
     ) -> None:
+        """A real file loads and merges under the safe names.
+
+        Args:
+            client: The fake client.
+        """
         data = _book(
             [
                 [
@@ -199,18 +259,33 @@ class TestTypedRoute:
     def test_warehouse_refuses_keys_that_clash(
         self, client: FakeBigQueryClient
     ) -> None:
+        """The warehouse refuses keys with the same safe name.
+
+        Args:
+            client: The fake client.
+        """
         with pytest.raises(ValueError, match="key_columns"):
             self._warehouse(client, key_columns=["ID", "id"])
 
     def test_warehouse_refuses_a_key_with_no_letters_or_digits(
         self, client: FakeBigQueryClient
     ) -> None:
+        """The warehouse refuses a key that has no safe name.
+
+        Args:
+            client: The fake client.
+        """
         with pytest.raises(ValueError, match="key_columns"):
             self._warehouse(client, key_columns=["?"])
 
     def test_already_safe_keys_are_unchanged(
         self, client: FakeBigQueryClient
     ) -> None:
+        """Keys that are already safe are kept as they are.
+
+        Args:
+            client: The fake client.
+        """
         warehouse = self._warehouse(client, key_columns=["event_id"])
 
         assert warehouse.key_columns == ["event_id"]

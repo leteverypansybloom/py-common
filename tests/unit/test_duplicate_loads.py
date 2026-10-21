@@ -1,10 +1,10 @@
-"""H3: an upload loaded twice is detected (REVIEW_.md).
+"""An upload loaded twice is detected.
 
 Each upload loads at most once per table: the commit transaction
 checks the audit table first. Two commits of the same upload running
 at the same moment could both pass that check (a commit still running
-after the pipeline stopped waiting for it, plus a retry). As decided,
-this rare case is detected, not prevented: check_duplicate_loads()
+after the pipeline stopped waiting for it, plus a retry). This rare
+case is detected, not prevented: check_duplicate_loads()
 reads the audit table and logs each upload with more than one LOADED
 row, for a log-based alert.
 """
@@ -25,10 +25,23 @@ class Client:
     """Answers one query with the given rows, and records it."""
 
     def __init__(self, rows: list[dict[str, Any]]) -> None:
+        """Answer every query with these rows.
+
+        Args:
+            rows: The rows to return.
+        """
         self.rows = rows
         self.sql: list[str] = []
 
     def query(self, query: str) -> Any:
+        """Record a query and return the rows.
+
+        Args:
+            query: The SQL.
+
+        Returns:
+            A job whose result() gives the rows.
+        """
         self.sql.append(query)
         return SimpleNamespace(result=lambda: self.rows)
 
@@ -36,6 +49,11 @@ class Client:
 def test_each_upload_loaded_twice_is_logged_and_returned(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """Each double load is logged as an error and returned.
+
+    Args:
+        caplog: Captures the log.
+    """
     client = Client(
         [
             {
@@ -62,6 +80,11 @@ def test_each_upload_loaded_twice_is_logged_and_returned(
 def test_nothing_is_logged_when_every_upload_loaded_once(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """No warnings when nothing loaded twice.
+
+    Args:
+        caplog: Captures the log.
+    """
     with caplog.at_level(logging.INFO, logger="py_common.runner"):
         assert check_duplicate_loads(Client([]), AUDIT) == []
 
@@ -69,6 +92,7 @@ def test_nothing_is_logged_when_every_upload_loaded_once(
 
 
 def test_counts_loaded_rows_per_table_and_upload() -> None:
+    """The query groups LOADED rows by table and upload."""
     client = Client([])
 
     check_duplicate_loads(client, AUDIT)
@@ -87,6 +111,11 @@ def test_counts_loaded_rows_per_table_and_upload() -> None:
     "bad", ["audit", "proj.audit", "p.d.t`; DROP TABLE x; --", "p.d.t.u"]
 )
 def test_only_a_qualified_table_name_is_accepted(bad: str) -> None:
+    """Anything but project.dataset.table is refused unrun.
+
+    Args:
+        bad: The refused table name.
+    """
     client = Client([])
 
     with pytest.raises(ValueError, match="project.dataset.table"):
@@ -96,8 +125,20 @@ def test_only_a_qualified_table_name_is_accepted(bad: str) -> None:
 
 
 def test_a_failed_query_raises() -> None:
+    """A query that can't run raises, rather than reporting none."""
+
     class Broken:
+        """A client whose queries fail."""
+
         def query(self, query: str) -> Any:
+            """Fail as a client without access would.
+
+            Args:
+                query: The SQL.
+
+            Raises:
+                RuntimeError: Always.
+            """
             raise RuntimeError("no access")
 
     with pytest.raises(RuntimeError):

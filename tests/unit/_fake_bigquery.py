@@ -37,6 +37,14 @@ class _Job:
         output_rows: int | None = None,
         error: Exception | None = None,
     ) -> None:
+        """Create a finished job.
+
+        Args:
+            job_id: The job's ID.
+            rows: What result() returns.
+            output_rows: The rows a load job reports writing.
+            error: Recorded as the job's error_result.
+        """
         self.job_id = job_id
         self.output_rows = output_rows
         self.state = "DONE"
@@ -45,12 +53,21 @@ class _Job:
         self._wait_error: Exception | None = None
 
     def result(self, **_: Any) -> list[tuple[Any, ...]]:
+        """Return the rows, or raise the error staged for one wait.
+
+        Args:
+            **_: Wait arguments such as timeout, ignored.
+
+        Returns:
+            The job's rows.
+        """
         if self._wait_error is not None:
             error, self._wait_error = self._wait_error, None
             raise error
         return self._rows
 
     def reload(self) -> None:
+        """Do nothing: the state is set directly by the fake client."""
         pass
 
 
@@ -67,6 +84,7 @@ class FakeBigQueryClient:
     """
 
     def __init__(self) -> None:
+        """Start with no tables, rows or audit records."""
         self.tables: dict[str, list[str]] = {}
         self.rows: dict[str, int] = {}
         self.staged: dict[str, int] = {}
@@ -79,12 +97,28 @@ class FakeBigQueryClient:
         self._jobs = 0
 
     def _job_id(self) -> str:
+        """Return a new, unique job ID.
+
+        Returns:
+            The ID.
+        """
         self._jobs += 1
         return f"job-{self._jobs}"
 
     # Tables ---------------------------------------------------------
 
     def get_table(self, table_id: str) -> Any:
+        """Return a table's schema, all STRING columns.
+
+        Args:
+            table_id: The full table ID.
+
+        Returns:
+            An object with a schema list, like a bigquery.Table.
+
+        Raises:
+            NotFound: The table doesn't exist.
+        """
         if table_id not in self.tables:
             raise NotFound(table_id)
         return SimpleNamespace(
@@ -95,6 +129,12 @@ class FakeBigQueryClient:
         )
 
     def create_table(self, table: Any, exists_ok: bool = False) -> None:
+        """Create a table, recording its ID and expiry.
+
+        Args:
+            table: A bigquery.Table, or anything with the same attributes.
+            exists_ok: Ignored: an existing table is kept.
+        """
         table_id = getattr(table, "table_id_full", None) or _full_id(table)
         schema = [field.name for field in getattr(table, "schema", [])]
         self.created.append(table_id)
@@ -103,6 +143,12 @@ class FakeBigQueryClient:
         self.rows.setdefault(table_id, 0)
 
     def delete_table(self, table_id: str, not_found_ok: bool = False) -> None:
+        """Delete a table, or raise the error staged for deletes.
+
+        Args:
+            table_id: The full table ID.
+            not_found_ok: Ignored: a missing table is never an error.
+        """
         if self.delete_error is not None:
             raise self.delete_error
         self.tables.pop(table_id, None)
@@ -112,6 +158,16 @@ class FakeBigQueryClient:
     def load_table_from_file(
         self, file: BytesIO, table_id: str, job_config: Any = None
     ) -> _Job:
+        """Stage Parquet or NDJSON rows into a table.
+
+        Args:
+            file: The data to load.
+            table_id: The staging table.
+            job_config: Ignored.
+
+        Returns:
+            A finished load job reporting the rows written.
+        """
         data = file.read()
         if data.startswith(b"PAR1"):
             parquet = pq.read_table(BytesIO(data))
@@ -127,6 +183,15 @@ class FakeBigQueryClient:
     # Queries --------------------------------------------------------
 
     def query(self, sql: str, job_config: Any = None) -> _Job:
+        """Answer the adapters' queries, running commit scripts.
+
+        Args:
+            sql: The query text.
+            job_config: Carries the query parameters.
+
+        Returns:
+            The job. A commit job may be made to fail its first wait.
+        """
         params = {
             p.name: p.value
             for p in getattr(job_config, "query_parameters", None) or []
@@ -174,7 +239,21 @@ class FakeBigQueryClient:
             compared = re.findall(r"(\w+) = @(\w+)", condition)
             literal = re.findall(r"(\w+) = '(\w+)'", condition)
 
-            def matches(row: dict[str, Any]) -> bool:
+            def matches(
+                row: dict[str, Any],
+                compared: list[tuple[str, str]] = compared,
+                literal: list[tuple[str, str]] = literal,
+            ) -> bool:
+                """Say whether an audit row matches this block's check.
+
+                Args:
+                    row: An audit row.
+                    compared: (column, parameter) pairs that must be equal.
+                    literal: (column, value) pairs that must be equal.
+
+                Returns:
+                    True if every pair matches.
+                """
                 return all(
                     row.get(col) == params[param] for col, param in compared
                 ) and all(row.get(col) == value for col, value in literal)
@@ -202,7 +281,7 @@ class FakeBigQueryClient:
             self.audit.append(
                 {
                     col: params[val[1:]] if val.startswith("@") else val
-                    for col, val in zip(columns, values)
+                    for col, val in zip(columns, values, strict=True)
                 }
             )
             any_loaded = True

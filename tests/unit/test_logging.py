@@ -1,4 +1,4 @@
-"""Structured logs for Cloud Logging (review M12).
+"""Structured logs for Cloud Logging.
 
 Every line a run writes carries the run ID and warehouse, every line
 about one file carries that file's identity, version and checksum,
@@ -6,28 +6,32 @@ BigQuery job IDs are logged at INFO, and each file ends with one
 summary line.
 """
 
+import ast
 import io
 import json
 import logging
 import sys
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, Mock, patch
 
+import pytest
 from _fake_bigquery import FakeBigQueryClient
 from openpyxl import Workbook
 
 from py_common.adapters.bigquery_raw import RawJsonWarehouse
 from py_common.contract import Column, Contract, Worksheet
 from py_common.logging import JsonFormatter, configure_json_logging
-from py_common.model import SourceItem
+from py_common.model import Outcome, SourceItem
 from py_common.pipeline import Pipeline
-import pytest
-from py_common.model import Outcome
-import ast
-from pathlib import Path
 
 
 def _workbook() -> bytes:
+    """Build a one-row Events workbook.
+
+    Returns:
+        The .xlsx bytes.
+    """
     wb = Workbook()
     ws = wb.active
     ws.title = "Events"
@@ -70,6 +74,7 @@ def _capture() -> list[dict[str, Any]]:
 
 
 def test_every_line_has_severity_message_run_id_and_warehouse() -> None:
+    """Every line has a severity, a message, the run ID and warehouse."""
     logged = _capture()
 
     assert logged
@@ -82,6 +87,7 @@ def test_every_line_has_severity_message_run_id_and_warehouse() -> None:
 
 
 def test_file_lines_carry_identity_version_and_checksum() -> None:
+    """Lines about the file carry its identity, version and checksum."""
     logged = _capture()
 
     about_file = [line for line in logged if "item_identity" in line]
@@ -93,6 +99,7 @@ def test_file_lines_carry_identity_version_and_checksum() -> None:
 
 
 def test_bigquery_job_ids_are_logged_at_info() -> None:
+    """BigQuery job IDs are logged at INFO, against the file."""
     logged = _capture()
 
     jobs = [line for line in logged if "bq_job_id" in line]
@@ -102,6 +109,7 @@ def test_bigquery_job_ids_are_logged_at_info() -> None:
 
 
 def test_one_summary_line_per_file() -> None:
+    """Each file ends with one summary line giving outcome and rows."""
     logged = _capture()
 
     summaries = [line for line in logged if "outcome" in line]
@@ -114,6 +122,7 @@ def test_one_summary_line_per_file() -> None:
 
 
 def test_exceptions_are_included() -> None:
+    """A logged exception's traceback is in the JSON line."""
     try:
         raise ValueError("boom")
     except ValueError:
@@ -129,6 +138,7 @@ def test_exceptions_are_included() -> None:
 
 
 def test_configure_twice_installs_one_handler() -> None:
+    """Configuring twice still writes each line once."""
     root = logging.getLogger()
     before = list(root.handlers), root.level
     try:
@@ -147,6 +157,11 @@ class TestJsonLoggingReplacesHandlers:
 
     @pytest.fixture(autouse=True)
     def restore_root(self) -> Any:
+        """Put the root logger's handlers and level back after the test.
+
+        Yields:
+            Nothing.
+        """
         root = logging.getLogger()
         saved = list(root.handlers), root.level
         yield
@@ -166,6 +181,11 @@ class TestJsonLoggingReplacesHandlers:
     def test_existing_handlers_are_replaced(
         self, plain: logging.Handler
     ) -> None:
+        """Handlers already on the root logger are replaced.
+
+        Args:
+            plain: A handler installed before the test.
+        """
         configure_json_logging(stream=io.StringIO())
 
         handlers = logging.getLogger().handlers
@@ -173,6 +193,11 @@ class TestJsonLoggingReplacesHandlers:
         assert [type(h.formatter) for h in handlers] == [JsonFormatter]
 
     def test_replace_false_keeps_them(self, plain: logging.Handler) -> None:
+        """replace=False keeps existing handlers and adds one of ours.
+
+        Args:
+            plain: A handler installed before the test.
+        """
         configure_json_logging(stream=io.StringIO(), replace=False)
         configure_json_logging(stream=io.StringIO(), replace=False)
 
@@ -187,7 +212,7 @@ ITEM = SourceItem("f.xlsx", "f.xlsx", "1", 1)
 
 
 class TestFailureSeverity:
-    """H06: alerts match structured outcomes at the right severity."""
+    """Alerts match structured outcomes at the right severity."""
 
     @pytest.mark.parametrize(
         ("outcome", "severity"),
@@ -200,6 +225,12 @@ class TestFailureSeverity:
     def test_summary_line_severity(
         self, outcome: Outcome, severity: str
     ) -> None:
+        """Each outcome's summary line has the severity alerts look for.
+
+        Args:
+            outcome: The file's outcome.
+            severity: The severity expected.
+        """
         from py_common.model import Result
 
         stream = io.StringIO()
@@ -217,7 +248,7 @@ class TestFailureSeverity:
 
 
 def test_smoke_script_enables_json_logging() -> None:
-    """N01: the alert test recipe needs JSON log lines."""
+    """The alert test recipe needs JSON log lines."""
     tree = ast.parse(Path("scripts/demo.py").read_text(encoding="utf-8"))
     calls = {
         node.func.id

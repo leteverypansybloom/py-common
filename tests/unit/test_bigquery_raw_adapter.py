@@ -3,27 +3,21 @@
 Tests define the Warehouse protocol contract for raw JSON tables
 without requiring live BigQuery services. All external dependencies
 are mocked.
-
-RAP Principles:
-- Reproducible: Same test data always produces same results
-- Auditable: Each test documents expected behavior
-- Transparent: No hardcoded GCP credentials in tests
 """
 
 import json
-
-import pytest
 from unittest.mock import MagicMock, Mock, patch
 
+import pytest
 from google.api_core.exceptions import NotFound
 
-from py_common.errors import ServiceError
-from py_common.model import SourceItem
 from py_common.adapters.bigquery_raw import (
     RAW_SCHEMA,
     STAGING_SCHEMA,
     RawJsonWarehouse,
 )
+from py_common.errors import ServiceError
+from py_common.model import SourceItem
 
 #: Source file passed to every load().
 ITEM = SourceItem("test.xlsx", "landing/test.xlsx", "1", 10)
@@ -79,17 +73,7 @@ class TestRawJsonWarehouseInit:
     """Test RawJsonWarehouse initialization."""
 
     def test_init_sets_properties(self):
-        """__init__() stores project, dataset and table mapping.
-
-        Args:
-            None
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If properties not set
-        """
+        """__init__() stores project, dataset and table mapping."""
         with patch("py_common.adapters.bigquery_raw.bigquery.Client"):
             warehouse = RawJsonWarehouse("p", "raw_hww", TABLES)
 
@@ -99,33 +83,13 @@ class TestRawJsonWarehouseInit:
             assert warehouse.audit_table_id == "audit"
 
     def test_init_rejects_no_tables(self):
-        """At least one sheet must map to a table.
-
-        Args:
-            None
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If ValueError isn't raised
-        """
+        """At least one sheet must map to a table."""
         with patch("py_common.adapters.bigquery_raw.bigquery.Client"):
             with pytest.raises(ValueError, match="at least one table"):
                 RawJsonWarehouse("p", "raw_hww", {})
 
     def test_init_rejects_two_sheets_sharing_a_table(self):
-        """Each sheet gets its own raw table.
-
-        Args:
-            None
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If ValueError isn't raised
-        """
+        """Each sheet gets its own raw table."""
         with patch("py_common.adapters.bigquery_raw.bigquery.Client"):
             with pytest.raises(ValueError, match="its own raw table"):
                 RawJsonWarehouse("p", "raw_hww", {"A": "t", "B": "t"})
@@ -135,17 +99,7 @@ class TestRawJsonWarehouseIdentity:
     """Test RawJsonWarehouse.identity property."""
 
     def test_identity_names_every_table_sorted(self):
-        """Identity is stable whatever order the mapping is given in.
-
-        Args:
-            None
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If identity is wrong
-        """
+        """Identity is stable whatever order the mapping is given in."""
         with patch("py_common.adapters.bigquery_raw.bigquery.Client"):
             warehouse = RawJsonWarehouse(
                 "p", "raw_hww", dict(reversed(TABLES.items()))
@@ -191,12 +145,6 @@ class TestRawJsonWarehouseLoad:
         Args:
             warehouse: RawJsonWarehouse fixture
             mock_bq_client: Mocked BigQuery client
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If staging loads are wrong
         """
         data = _ndjson("Account signups", "Survey info")
 
@@ -222,12 +170,6 @@ class TestRawJsonWarehouseLoad:
         Args:
             warehouse: RawJsonWarehouse fixture
             mock_bq_client: Mocked BigQuery client
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If the load job config is wrong
         """
         warehouse.load(
             key="hww.xlsx",
@@ -252,12 +194,6 @@ class TestRawJsonWarehouseLoad:
         Args:
             warehouse: RawJsonWarehouse fixture
             mock_bq_client: Mocked BigQuery client
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If the table isn't created as expected
         """
         mock_bq_client.get_table.side_effect = NotFound("missing")
 
@@ -284,12 +220,6 @@ class TestRawJsonWarehouseLoad:
         Args:
             warehouse: RawJsonWarehouse fixture
             mock_bq_client: Mocked BigQuery client
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If create_table is called
         """
         warehouse.load(
             key="hww.xlsx",
@@ -314,12 +244,6 @@ class TestRawJsonWarehouseLoad:
         Args:
             warehouse: RawJsonWarehouse fixture
             mock_bq_client: Mocked BigQuery client
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If ValueError isn't raised first
         """
         data = _ndjson("Survey info", "Newsletter metrics")
 
@@ -334,12 +258,6 @@ class TestRawJsonWarehouseLoad:
 
         Args:
             warehouse: RawJsonWarehouse fixture
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If ValueError isn't raised
         """
         with pytest.raises(ValueError, match="Line 1"):
             warehouse.load(
@@ -358,12 +276,6 @@ class TestRawJsonWarehouseLoad:
         Args:
             warehouse: RawJsonWarehouse fixture
             mock_bq_client: Mocked BigQuery client
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If ValueError isn't raised or a query runs
         """
         mock_bq_client.load_table_from_file.return_value = _load_job(0)
 
@@ -385,12 +297,6 @@ class TestRawJsonWarehouseLoad:
         Args:
             warehouse: RawJsonWarehouse fixture
             mock_bq_client: Mocked BigQuery client
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If the SQL isn't one transaction
         """
         warehouse.load(
             key="hww.xlsx",
@@ -418,12 +324,6 @@ class TestRawJsonWarehouseLoad:
         Args:
             warehouse: RawJsonWarehouse fixture
             mock_bq_client: Mocked BigQuery client
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If ingested_at isn't @timestamp
         """
         warehouse.load(
             key="hww.xlsx",
@@ -463,12 +363,6 @@ class TestRawJsonWarehouseLoad:
         Args:
             warehouse: RawJsonWarehouse fixture
             mock_bq_client: Mocked BigQuery client
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If ServiceError isn't raised
         """
         job = mock_bq_client.query.return_value
         job.result.side_effect = Exception("quota exceeded")
@@ -492,12 +386,6 @@ class TestRawJsonWarehouseLoad:
         Args:
             warehouse: RawJsonWarehouse fixture
             mock_bq_client: Mocked BigQuery client
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If staging is touched or audit missing
         """
         warehouse.load(
             key="hww.xlsx", checksum="abc123", data=b"", rows=0, item=ITEM

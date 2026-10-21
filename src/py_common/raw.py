@@ -12,7 +12,7 @@ testable offline and the output is a function of its inputs alone.
 
 import json
 import math
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -64,7 +64,7 @@ def json_value(value: Any) -> Any:
         )
     # datetime is a subclass of date, so it must be checked first.
     if isinstance(value, datetime) and value.tzinfo is not None:
-        value = value.astimezone(timezone.utc).replace(tzinfo=None)
+        value = value.astimezone(UTC).replace(tzinfo=None)
     if isinstance(value, (datetime, date, time)):
         return value.isoformat()
     if isinstance(value, timedelta):
@@ -122,7 +122,9 @@ def to_ndjson(
                 "checksum": checksum,
                 "payload": {
                     column: json_value(value)
-                    for column, value in zip(sheet.columns, values)
+                    for column, value in zip(
+                        sheet.columns, values, strict=True
+                    )
                 },
             }
             lines.append(

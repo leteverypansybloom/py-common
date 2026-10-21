@@ -1,4 +1,4 @@
-"""BigQueryWarehouse reconciles staging with the final table (M2)."""
+"""BigQueryWarehouse reconciles staging with the final table."""
 
 from types import SimpleNamespace
 from typing import Any
@@ -36,6 +36,17 @@ def _warehouse(
         warehouse = BigQueryWarehouse("p", "d", "events")
 
     def get_table(table_id: str) -> Any:
+        """Return the final table, or raise NotFound if it isn't set.
+
+        Args:
+            table_id: The full table ID.
+
+        Returns:
+            The final or staging table.
+
+        Raises:
+            NotFound: The final table was asked for and doesn't exist.
+        """
         if table_id == FINAL:
             if final is None:
                 raise NotFound(table_id)
@@ -48,6 +59,15 @@ def _warehouse(
     )
 
     def query(sql: str, **_: Any) -> Mock:
+        """Answer the commit, the row count and anything else.
+
+        Args:
+            sql: The query text.
+            **_: Other query arguments, ignored.
+
+        Returns:
+            The job.
+        """
         job = Mock(job_id="q")
         if "BEGIN TRANSACTION" in sql:
             job.result.return_value = [("LOADED",)]
@@ -62,10 +82,19 @@ def _warehouse(
 
 
 def _sql(client: MagicMock) -> list[str]:
+    """List the queries the warehouse ran.
+
+    Args:
+        client: The mocked BigQuery client.
+
+    Returns:
+        Their SQL, in order.
+    """
     return [c.args[0] for c in client.query.call_args_list]
 
 
 def test_matching_schema_changes_nothing() -> None:
+    """INTEGER and INT64 match, so no ALTER TABLE is run."""
     warehouse, client = _warehouse(
         _table(id="INTEGER", name="STRING"),
         _table(id="INT64", name="STRING", _loaded_at="TIMESTAMP"),
@@ -76,6 +105,7 @@ def test_matching_schema_changes_nothing() -> None:
 
 
 def test_new_column_is_added_before_the_merge() -> None:
+    """A column new in staging is added to the final table first."""
     warehouse, client = _warehouse(
         _table(id="INTEGER", notes="STRING"),
         _table(id="INTEGER", _loaded_at="TIMESTAMP"),
@@ -93,6 +123,7 @@ def test_new_column_is_added_before_the_merge() -> None:
 
 
 def test_changed_type_is_contract_error_with_diff() -> None:
+    """A changed type is a ContractError showing old and new types."""
     warehouse, client = _warehouse(
         _table(id="STRING"),
         _table(id="INTEGER", _loaded_at="TIMESTAMP"),
@@ -104,6 +135,7 @@ def test_changed_type_is_contract_error_with_diff() -> None:
 
 
 def test_removed_column_is_contract_error() -> None:
+    """A column missing from staging is a ContractError naming it."""
     warehouse, client = _warehouse(
         _table(id="INTEGER"),
         _table(id="INTEGER", region="STRING", _loaded_at="TIMESTAMP"),
@@ -115,6 +147,7 @@ def test_removed_column_is_contract_error() -> None:
 
 
 def test_missing_final_table_is_created_from_staging() -> None:
+    """A missing final table is created from the staging schema."""
     warehouse, client = _warehouse(_table(id="INTEGER", name="STRING"), None)
 
     warehouse.load("k", "c", b"pq", 1, ITEM)

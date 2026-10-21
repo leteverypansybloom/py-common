@@ -1,11 +1,11 @@
 """Tests for configuration loading and interpolation."""
 
 import os
+from pathlib import Path
 
 import pytest
 
 from py_common.config import ConfigError, interpolate, load_config
-from pathlib import Path
 
 
 def test_interpolate_valid_variable():
@@ -107,15 +107,17 @@ def test_require_keys_missing():
 
 
 class TestConfigFile:
-    """M21: UTF-8, and the top level must be a mapping."""
+    """Config files are UTF-8, and the top level must be a mapping."""
 
     def test_list_root_is_rejected(self, tmp_path: Path) -> None:
+        """A YAML list at the top level is a ConfigError."""
         path = tmp_path / "c.yaml"
         path.write_text("- a\n- b\n", encoding="utf-8")
         with pytest.raises(ConfigError, match="mapping"):
             load_config(path)
 
     def test_utf8_is_read_on_any_platform(self, tmp_path: Path) -> None:
+        """Welsh text survives on Windows, whose default isn't UTF-8."""
         path = tmp_path / "c.yaml"
-        path.write_bytes("name: Iechyd Cyhoeddus – Cymru\n".encode("utf-8"))
+        path.write_bytes("name: Iechyd Cyhoeddus – Cymru\n".encode())
         assert load_config(path) == {"name": "Iechyd Cyhoeddus – Cymru"}

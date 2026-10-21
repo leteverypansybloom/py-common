@@ -252,7 +252,7 @@ def build_pipelines() -> dict[str, Pipeline]:
 
 `configure_json_logging()` writes each log line as JSON, which Cloud
 Logging turns into a structured entry: `severity`, `message`, and
-fields to filter on — `run_id` (one per `Pipeline.run()`),
+fields to filter on - `run_id` (one per `Pipeline.run()`),
 `warehouse`, `item_identity`, `version`, `checksum` and `bq_job_id`.
 Each file ends with one summary line that also has `outcome`, `rows`
 and `seconds`. For example, everything about one file in one run:

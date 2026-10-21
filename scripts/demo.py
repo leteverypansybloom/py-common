@@ -46,7 +46,7 @@ import os
 import shutil
 import sys
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from google.api_core.exceptions import NotFound
@@ -71,7 +71,12 @@ NEW_AUDIT_COLUMNS = ("destination", "source_version")
 
 
 def check(condition: bool, message: str) -> None:
-    """Print a pass line, or stop the smoke test with a failure."""
+    """Print a pass line, or stop the smoke test with a failure.
+
+    Args:
+        condition: Whether the check passed.
+        message: What was checked.
+    """
     if not condition:
         print(f"FAIL: {message}")
         sys.exit(1)
@@ -79,7 +84,15 @@ def check(condition: bool, message: str) -> None:
 
 
 def run(pipeline: Pipeline, label: str) -> list:
-    """Run once and print each file's outcome."""
+    """Run once and print each file's outcome.
+
+    Args:
+        pipeline: The pipeline to run.
+        label: Printed before each result, to tell runs apart.
+
+    Returns:
+        The run's results.
+    """
     results = pipeline.run()
     for result in results:
         print(
@@ -90,11 +103,25 @@ def run(pipeline: Pipeline, label: str) -> list:
 
 
 def outcome_of(results: list, name: str) -> Outcome:
+    """Find one file's outcome in a run's results.
+
+    Args:
+        results: The run's results.
+        name: The file name to look for.
+
+    Returns:
+        That file's outcome.
+    """
     return next(r.outcome for r in results if r.item.name == name)
 
 
 def ensure_audit_columns(client: bigquery.Client, migrate: bool) -> None:
-    """Stop (or migrate) if the audit table predates 0.2.0."""
+    """Stop (or migrate) if the audit table predates 0.2.0.
+
+    Args:
+        client: The BigQuery client.
+        migrate: Add the missing columns rather than stopping.
+    """
     audit_id = f"{PROJECT}.{DATASET}.audit"
     try:
         columns = {f.name for f in client.get_table(audit_id).schema}
@@ -120,7 +147,15 @@ def ensure_audit_columns(client: bigquery.Client, migrate: bool) -> None:
 
 
 def delete_markers(bucket: storage.Bucket, identity: str) -> int:
-    """Delete this warehouse's "already loaded" markers in GCS."""
+    """Delete this warehouse's "already loaded" markers in GCS.
+
+    Args:
+        bucket: The raw bucket.
+        identity: The warehouse identity the markers are kept under.
+
+    Returns:
+        How many markers were deleted.
+    """
     deleted = 0
     for blob in bucket.list_blobs(prefix=f"audit/{identity}/"):
         blob.delete()
@@ -129,10 +164,20 @@ def delete_markers(bucket: storage.Bucket, identity: str) -> int:
 
 
 def count(client: bigquery.Client, sql: str) -> int:
+    """Run a COUNT query.
+
+    Args:
+        client: The BigQuery client.
+        sql: A query returning one row with one number.
+
+    Returns:
+        The number.
+    """
     return list(client.query(sql).result())[0][0]
 
 
 def main() -> None:
+    """Run the smoke test end to end against the real GCP project."""
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument(
         "--migrate",
@@ -147,7 +192,7 @@ def main() -> None:
 
     client = bigquery.Client(project=PROJECT)
     bucket = storage.Client(project=PROJECT).bucket(BUCKET)
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    run_id = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
     print(f"Smoke test run ID: {run_id}\n")
 
     print("0. Audit table schema")

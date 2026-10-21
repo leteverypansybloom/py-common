@@ -21,10 +21,11 @@ No cloud SDK is imported: this is plain `logging` plus `json`.
 import json
 import logging
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from types import MappingProxyType
 from typing import Any, TextIO
 
 #: Structured fields copied from a log record into the JSON line,
@@ -41,8 +42,11 @@ FIELDS = (
     "seconds",
 )
 
-_context: ContextVar[dict[str, Any]] = ContextVar(
-    "py_common_log_context", default={}
+# Read-only, so the default can never be changed in place and leak
+# fields into every context. log_context() always sets a new mapping.
+_NO_FIELDS: Mapping[str, Any] = MappingProxyType({})
+_context: ContextVar[Mapping[str, Any]] = ContextVar(
+    "py_common_log_context", default=_NO_FIELDS
 )
 
 
@@ -123,9 +127,7 @@ class JsonFormatter(logging.Formatter):
         entry: dict[str, Any] = {
             "severity": record.levelname,
             "message": record.getMessage(),
-            "time": datetime.fromtimestamp(
-                record.created, timezone.utc
-            ).isoformat(),
+            "time": datetime.fromtimestamp(record.created, UTC).isoformat(),
             "logger": record.name,
         }
         for name in FIELDS:

@@ -1,4 +1,4 @@
-"""Contract-typed Parquet conversion (review H5).
+"""Contract-typed Parquet conversion.
 
 The Parquet schema comes from Column.data_type, never from pandas or
 pyarrow inference, so a "warn" sheet with mixed values still
@@ -6,10 +6,11 @@ converts, and an all-empty column keeps its declared type month to
 month.
 """
 
+import io
 from datetime import date, datetime
 from io import BytesIO
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -17,19 +18,33 @@ import pytest
 from openpyxl import Workbook
 
 from py_common.contract import Column, Contract, SheetRows, Worksheet
+from py_common.errors import ValidationError
 from py_common.model import Outcome, SourceItem
 from py_common.parquet import ARROW_TYPES, to_parquet
 from py_common.pipeline import Pipeline
-import io
-from unittest.mock import MagicMock
-from py_common.errors import ValidationError
 
 
 def _read(data: bytes) -> pa.Table:
+    """Read Parquet bytes back.
+
+    Args:
+        data: The Parquet file.
+
+    Returns:
+        The table.
+    """
     return pq.read_table(BytesIO(data))
 
 
 def _sheet(**kwargs: Any) -> Worksheet:
+    """Build an Events sheet with one column of each type.
+
+    Args:
+        **kwargs: Extra Worksheet settings, such as on_mismatch.
+
+    Returns:
+        The worksheet.
+    """
     return Worksheet(
         "Events",
         columns=[
@@ -43,6 +58,14 @@ def _sheet(**kwargs: Any) -> Worksheet:
 
 
 def _rows(*rows: tuple[Any, ...]) -> SheetRows:
+    """Build rows for _sheet(), numbered from row 2.
+
+    Args:
+        *rows: (name, count, score, held_on) for each row.
+
+    Returns:
+        The sheet's rows.
+    """
     return SheetRows(
         columns=["name", "count", "score", "held_on"],
         rows=[(n, row) for n, row in enumerate(rows, start=2)],
@@ -53,6 +76,7 @@ class TestSchema:
     """Types come from the contract."""
 
     def test_schema_matches_declared_types(self) -> None:
+        """Each column's Parquet type is its declared type."""
         data = to_parquet(
             _rows(("a", 1, 2.5, datetime(2026, 1, 2, 3, 4))), _sheet()
         )
@@ -73,6 +97,7 @@ class TestSchema:
         assert table.column("count").to_pylist() == [None]
 
     def test_untyped_all_except_column_is_string(self) -> None:
+        """A column the contract doesn't declare is written as text."""
         sheet = Worksheet(
             "Events",
             columns=[Column("count", "integer")],
@@ -86,6 +111,7 @@ class TestSchema:
         assert table.column("notes").to_pylist() == ["42", "x"]
 
     def test_date_only_value_becomes_midnight(self) -> None:
+        """A date with no time is written as midnight."""
         table = _read(
             to_parquet(_rows(("a", 1, 1.0, date(2026, 3, 1))), _sheet())
         )
@@ -100,7 +126,7 @@ class TestCoercion:
     """
 
     def test_int_and_na_in_one_column_does_not_raise(self) -> None:
-        """Regression: pandas inference raised ArrowInvalid here."""
+        """Ints and "NA" in one column convert; pandas inference fails."""
         warnings: list[str] = []
 
         data = to_parquet(
@@ -139,6 +165,12 @@ class TestCoercion:
     def test_unconvertible_values_become_null(
         self, column: str, value: Any
     ) -> None:
+        """A value that doesn't fit is NULL, with a warning.
+
+        Args:
+            column: The column holding the bad value.
+            value: The bad value.
+        """
         row = {"name": "a", "count": None, "score": None, "held_on": None}
         row[column] = value
         warnings: list[str] = []
@@ -155,6 +187,7 @@ class TestCoercion:
         assert len(warnings) == 1 and f"'{column}'" in warnings[0]
 
     def test_many_bad_values_are_summarised(self) -> None:
+        """Many bad values give one warning listing the first few rows."""
         warnings: list[str] = []
         rows = _rows(*[("a", "NA", None, None)] * 7)
 
@@ -206,6 +239,14 @@ ITEM = SourceItem("f.xlsx", "f.xlsx", "1", 1)
 
 
 def _book(rows: list[list[Any]]) -> bytes:
+    """Build an Events workbook.
+
+    Args:
+        rows: The rows, headings first.
+
+    Returns:
+        The .xlsx bytes.
+    """
     wb = Workbook()
     ws = wb.active
     ws.title = "Events"
@@ -239,6 +280,14 @@ def _with_cell_value(data: bytes, old: bytes, new: bytes) -> bytes:
 
 
 def _contract(mode: str = "quarantine") -> Contract:
+    """Build a contract for an Events sheet of name and n.
+
+    Args:
+        mode: The sheet's on_mismatch setting.
+
+    Returns:
+        The contract.
+    """
     return Contract(
         worksheets=[
             Worksheet(
@@ -251,6 +300,15 @@ def _contract(mode: str = "quarantine") -> Contract:
 
 
 def _pipeline(data: bytes, contract: Contract) -> tuple[Pipeline, dict]:
+    """Build a pipeline over one upload, with an in-memory store.
+
+    Args:
+        data: The upload's bytes.
+        contract: The contract to check it against.
+
+    Returns:
+        The pipeline, and the dict the store writes into.
+    """
     objects: dict[str, bytes] = {}
     store = MagicMock()
     store.get.side_effect = objects.get
@@ -264,9 +322,10 @@ def _pipeline(data: bytes, contract: Contract) -> tuple[Pipeline, dict]:
 
 
 class TestInt64Range:
-    """H07: an integer BigQuery can't hold is never loaded as NULL."""
+    """An integer BigQuery can't hold is never loaded as NULL."""
 
     def test_quarantine_mode_rejects_out_of_range_integer(self) -> None:
+        """A strict sheet rejects an integer over INT64's maximum."""
         data = _with_cell_value(
             _book([["name", "n"], ["a", 1]]),
             b"<v>1</v>",
@@ -277,6 +336,7 @@ class TestInt64Range:
             _contract().read(data, "f.xlsx")
 
     def test_warn_mode_warns(self) -> None:
+        """A "warn" sheet warns about an integer under INT64's minimum."""
         warnings: list[str] = []
         data = _with_cell_value(
             _book([["name", "n"], ["a", 1]]),
@@ -287,12 +347,14 @@ class TestInt64Range:
         assert any("INT64" in w for w in warnings)
 
     def test_conversion_in_quarantine_mode_raises_not_nulls(self) -> None:
+        """A strict sheet raises rather than loading NULL."""
         sheet = SheetRows(["name", "n"], [(2, ("a", "NA"))])
 
         with pytest.raises(ValidationError, match="'n' row 2"):
             to_parquet(sheet, _contract().worksheets[0], "f.xlsx", [])
 
     def test_pipeline_quarantines_conversion_failure(self) -> None:
+        """A conversion failure quarantines the file."""
         contract = _contract()
         pipeline, objects = _pipeline(
             _book([["name", "n"], ["a", 1]]), contract

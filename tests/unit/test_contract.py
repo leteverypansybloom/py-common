@@ -1,23 +1,25 @@
 """Tests for workbook contract validation."""
 
+import io
 from datetime import datetime
 from io import BytesIO
 from typing import Any
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 from openpyxl import Workbook, load_workbook
 
-from py_common.contract import Column, Contract, Worksheet, read_sheet
+from py_common.adapters.bigquery import BigQueryWarehouse
+from py_common.contract import (
+    Column,
+    Contract,
+    SheetRows,
+    Worksheet,
+    read_sheet,
+)
 from py_common.errors import ContractError, ValidationError
 from py_common.fixtures import make_fixtures
-import io
-from unittest.mock import MagicMock
-from unittest.mock import Mock
-from unittest.mock import patch
-from py_common.adapters.bigquery import BigQueryWarehouse
-from py_common.contract import SheetRows
-from py_common.model import Outcome
-from py_common.model import SourceItem
+from py_common.model import Outcome, SourceItem
 from py_common.parquet import to_parquet
 from py_common.pipeline import Pipeline
 
@@ -226,9 +228,8 @@ def test_empty_worksheets_raises_contract_error():
 def test_multiple_worksheets_validated_against_matching_definitions():
     """Every configured worksheet is checked against its own schema.
 
-    Fix for issue #5: the old code only ever validated
-    self.worksheets[0]/wb.active, so a second worksheet's columns
-    were never checked at all.
+    Checking only the first or active sheet would leave a second
+    worksheet's columns unchecked.
     """
     contract = Contract(
         worksheets=[
@@ -257,11 +258,10 @@ def test_multiple_worksheets_validated_against_matching_definitions():
 def test_active_sheet_order_has_no_effect():
     """Validation targets worksheets by name, never wb.active.
 
-    Fix for issue #5: puts a non-contract sheet first (making it
-    openpyxl's active sheet by default) and the contract's primary
-    sheet second, then confirms the *contract's* first worksheet
-    ("Events") is what gets validated and counted - not whichever
-    sheet happens to be active in the workbook.
+    A non-contract sheet comes first (so openpyxl makes it the
+    active sheet) and the contract's primary sheet second. The
+    contract's first worksheet ("Events") is still the one validated
+    and counted.
     """
     contract = Contract(
         worksheets=[
@@ -288,11 +288,7 @@ def test_active_sheet_order_has_no_effect():
 
 
 def test_string_type_rejects_non_string_value():
-    """A non-string value in a 'string' column is a ValidationError.
-
-    Fix for issue #6: Contract.validate() previously only checked
-    integer/float columns, so 'string' silently accepted anything.
-    """
+    """A non-string value in a 'string' column is a ValidationError."""
     contract = Contract(
         worksheets=[
             Worksheet(
@@ -308,10 +304,7 @@ def test_string_type_rejects_non_string_value():
 
 
 def test_date_type_validates_value():
-    """Date columns are validated: wrong type rejected, real date ok.
-
-    Fix for issue #6: 'date' was never checked before.
-    """
+    """Date columns are validated: wrong type rejected, real date ok."""
     contract = Contract(
         worksheets=[
             Worksheet(
@@ -335,9 +328,9 @@ def test_date_type_validates_value():
 def test_bool_rejected_by_integer_column():
     """A Python bool does not satisfy an 'integer' column.
 
-    Fix for issue #6: bool is a subclass of int in Python, so
-    isinstance(True, int) is True. Without an explicit exclusion,
-    True/False would silently pass an integer field.
+    bool is a subclass of int in Python, so isinstance(True, int) is
+    True. Without an explicit exclusion, True and False would pass an
+    integer field.
     """
     contract = Contract(
         worksheets=[
@@ -903,6 +896,14 @@ SECRET = "jo.bloggs@example.org"
 
 
 def _book(rows: list[list[Any]]) -> bytes:
+    """Build an Events workbook.
+
+    Args:
+        rows: The rows, headings first.
+
+    Returns:
+        The .xlsx bytes.
+    """
     wb = Workbook()
     ws = wb.active
     assert ws is not None
@@ -915,9 +916,14 @@ def _book(rows: list[list[Any]]) -> bytes:
 
 
 class TestReservedColumn:
-    """N02: a source `_loaded_at` column quarantines, not retries."""
+    """A source `_loaded_at` column quarantines, not retries."""
 
     def _warehouse(self) -> BigQueryWarehouse:
+        """Build a warehouse whose final table has a _loaded_at column.
+
+        Returns:
+            The warehouse.
+        """
         client = MagicMock()
         with patch("py_common.adapters.bigquery.bigquery.Client") as cls:
             cls.return_value = client
@@ -935,10 +941,12 @@ class TestReservedColumn:
         return warehouse
 
     def test_raises_contract_error(self) -> None:
+        """The warehouse names the clashing column in a ContractError."""
         with pytest.raises(ContractError, match="_loaded_at"):
             self._warehouse().load("k", "c" * 64, b"pq", 1, ITEM)
 
     def test_pipeline_quarantines_the_file(self) -> None:
+        """The pipeline quarantines the file rather than retrying it."""
         objects: dict[str, bytes] = {}
         store = MagicMock()
         store.get.side_effect = objects.get
@@ -957,9 +965,10 @@ class TestReservedColumn:
 
 
 class TestNoValuesInMessages:
-    """M13: errors and warnings name rows and columns, not values."""
+    """Errors and warnings name rows and columns, not values."""
 
     def test_type_error_has_no_value(self) -> None:
+        """A type error names the cell, not its value."""
         contract = Contract(
             worksheets=[Worksheet("Events", [Column("n", "integer")])]
         )
@@ -968,6 +977,7 @@ class TestNoValuesInMessages:
         assert SECRET not in str(info.value)
 
     def test_duplicate_key_message_has_no_value(self) -> None:
+        """A duplicate key names the row, not the key value."""
         contract = Contract(
             key_columns=["id"],
             worksheets=[Worksheet("Events", [Column("id", "string")])],
@@ -977,6 +987,7 @@ class TestNoValuesInMessages:
         assert SECRET not in str(info.value)
 
     def test_conversion_warning_has_no_value(self) -> None:
+        """A conversion warning names the row, not the value."""
         warnings: list[str] = []
         sheet = Worksheet(
             "Events", [Column("n", "integer")], on_mismatch="warn"

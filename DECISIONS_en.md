@@ -8,7 +8,7 @@ Entries are not rewritten once made. When a decision changes, add a
 new dated entry saying which earlier entry it replaces, and mark the
 earlier entry as superseded.
 
-## 2026-10-16 — The open review items (REVIEW_.md H1–H3, M4, M6, M10, M12)
+## 2026-10-16 - Open questions on sources, reprocessing and testing
 
 Taken with the data owner's answers: production files always reach
 the pipeline through the GCS landing bucket (SharePoint files are
@@ -16,7 +16,7 @@ copied there first); both load routes are in use; and each of the
 three cumulative workbooks keeps one file name and its own landing
 folder.
 
-### A source is tracked by its agreed file name (H1)
+### A source is tracked by its agreed file name
 
 The raw tables' "latest upload" and the typed route's deleted-row
 marking both work per file name, so a copy under another name became
@@ -27,14 +27,14 @@ the expected name in the message. Renaming a workbook is a deliberate
 change with a clean-up step (`docs/RUNBOOK.md`). The raw table layout
 is unchanged.
 
-### Uploads are ordered by GCS generation (M6)
+### Uploads are ordered by GCS generation
 
 Only GCS versions (generations) are numbers that grow with each
 upload. As every production file arrives through the landing bucket,
 the "latest upload" query keeps ordering by generation, and nothing
 was built for other sources (`docs/RAW_TABLE_LAYOUT.md` says so).
 
-### Converted copies are keyed by upload and content (H2)
+### Converted copies are keyed by upload and content
 
 Supersedes the `processed/` part of "Stored copies are keyed by
 identity and checksum" (2026-09-30). A processed copy was keyed by the
@@ -46,7 +46,7 @@ the output, rather than a list of the settings behind it, can't miss
 whatever changed. Audit records name the copy, the contract
 (`Contract.fingerprint()`) and the py-common version.
 
-### Typed column names are made BigQuery-safe (M4)
+### Typed column names are made BigQuery-safe
 
 Headings became column names as written, and one BigQuery refuses
 failed the file on every retry. Fixed rules now convert them
@@ -56,7 +56,7 @@ such files (the data waits until someone renames a heading), or a
 BigQuery name for every contract column (more to write and keep in
 step). Contracts, key columns and raw JSON keys keep the headings.
 
-### A double load is detected, not prevented (H3)
+### A double load is detected, not prevented
 
 Two commits of one upload running at once could both pass the
 in-transaction "already loaded?" check. That needs a commit still
@@ -67,7 +67,7 @@ one load per upload, a second typed commit merges the same values,
 and `runner.check_duplicate_loads()` alerts if it ever happens.
 Revisit if that alert fires.
 
-### Reprocessing is an upload, not a command (M12)
+### Reprocessing is an upload, not a command
 
 Every new upload loads, and each upload of a cumulative workbook holds
 its full history. Uploading a file again therefore reloads it with the
@@ -76,7 +76,7 @@ upload; a replay command would add nothing for these files.
 `docs/RUNBOOK.md` gives the steps, including removing an upload
 completely, by hand.
 
-### BigQuery is tested for real, nightly (M10)
+### BigQuery is tested for real, nightly
 
 Nothing checked that BigQuery does what the SQL intends, and a dry run
 can't reach the statements inside the commit script's `IF` blocks.
@@ -87,7 +87,7 @@ account limited to that dataset. It doesn't run on pull requests, so
 their code never gets the credentials. No emulator: BigQuery's
 scripts and transactions are what most need checking.
 
-## 2026-10-15 — Runner helpers for scheduled and upload-triggered runs
+## 2026-10-15 - Runner helpers for scheduled and upload-triggered runs
 
 ### A run with a FAILED file fails
 
@@ -133,7 +133,7 @@ source read from that source's raw table. The daily job calls
 overdue source, and a log-based alert sends that to the team.
 Sources are due by the 7th of the month.
 
-## 2026-10-14 — Workbook layouts and a raw JSON load route
+## 2026-10-14 - Workbook layouts and a raw JSON load route
 
 ### A raw JSON route alongside the typed MERGE route
 
@@ -259,7 +259,7 @@ blank headings and on order for repeats, so moving such a column
 changes its name. Benefit: no data is lost without anyone knowing,
 and the names are the same on every run of the same layout.
 
-## 2026-09-30 — Real GCS lock; SharePoint adapter; versioned storage keys; `_loaded_at` set by BigQuery
+## 2026-09-30 - Real GCS lock; SharePoint adapter; versioned storage keys; `_loaded_at` set by BigQuery
 
 ### GCSObjectStore.lock() is a real lock, not a no-op
 
@@ -355,7 +355,7 @@ treated as new. The eTag is checked before and after download; any
 change raises `VersionMismatch` and the pipeline skips the file for
 this run. Only files directly in the configured folder are read.
 
-## 2026-09-21 — GCS and BigQuery adapters built; warehouse merges on key
+## 2026-09-21 - GCS and BigQuery adapters built; warehouse merges on key
 
 ### GCP adapters are real, not stubs
 
@@ -386,7 +386,7 @@ rather than duplicating them. The content-checksum check in
 `Pipeline` still skips byte-identical files before they reach the
 warehouse.
 
-## 2026-09-18 — py-common Library Inception
+## 2026-09-18 - py-common Library Inception
 
 ### Protocols, not abstract base classes
 
@@ -525,8 +525,8 @@ Steps 3-4 run only if the audit table has no `LOADED` row for this
 destination and file, checked inside the same transaction; otherwise
 load() writes nothing and returns False. The object store's "loaded"
 marker is written after the commit, so a crash, timeout or store
-error between the two used to mean a second load on retry (review
-C2). Now the warehouse's own audit table, committed atomically with
+error between the two used to mean a second load on retry. Now the
+warehouse's own audit table, committed atomically with
 the data, is the authority and the marker is only a cache.
 
 Both routes identify a file by identity + version (the upload),
@@ -578,4 +578,4 @@ contract sets `allow_empty=True`.
 - Code is readable and well-commented
 - Documentation is plain language, not academic
 
-**Standards**: PEP 8, type hints, Google docstrings, TDD, RAP (Reproducible Analytical Pipelines — reproducible, auditable, peer-reviewed)
+**Standards**: PEP 8, type hints, Google docstrings, TDD, RAP (Reproducible Analytical Pipelines - reproducible, auditable, peer-reviewed)

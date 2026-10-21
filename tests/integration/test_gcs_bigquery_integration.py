@@ -1,4 +1,4 @@
-"""Integration tests: GCS → BigQuery workflow.
+"""Integration tests: GCS to BigQuery workflow.
 
 Tests real GCP services (bucket, dataset, tables).
 Requires:
@@ -10,10 +10,11 @@ Skip if credentials unavailable: @pytest.mark.skipif(not has_credentials)
 """
 
 import os
+
 import pytest
 
-from py_common.adapters.gcs import GCSObjectStore
 from py_common.adapters.bigquery import BigQueryWarehouse
+from py_common.adapters.gcs import GCSObjectStore
 
 # Skip if no GCP credentials.
 HAS_CREDENTIALS = "GOOGLE_APPLICATION_CREDENTIALS" in os.environ
@@ -47,17 +48,11 @@ class TestGCSBigQueryIntegration:
         Args:
             gcs_store: Real GCS adapter
             warehouse: Real BigQuery adapter
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If workflow fails
         """
         key = "test/integration_test.parquet"
 
         # Minimal Parquet data (events_final schema).
-        # In real usage, this comes from Excel → Parquet conversion.
+        # In real usage, this comes from converting Excel to Parquet.
         parquet_data = b"PAR1\x00\x00\x00"  # Minimal Parquet header
 
         # Step 1: Upload to GCS.

@@ -8,7 +8,7 @@ record, and that run FAILED. Keys now have a random part too.
 """
 
 import io
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import Mock, patch
 
 from _memory_store import MemoryStore
@@ -18,10 +18,15 @@ from py_common.contract import Column, Contract, Worksheet
 from py_common.model import Outcome, SourceItem
 from py_common.pipeline import Pipeline
 
-TICK = datetime(2026, 10, 16, 12, 0, tzinfo=timezone.utc)
+TICK = datetime(2026, 10, 16, 12, 0, tzinfo=UTC)
 
 
 def _workbook() -> bytes:
+    """Build a one-row Events workbook.
+
+    Returns:
+        The .xlsx bytes.
+    """
     wb = Workbook()
     ws = wb.active
     assert ws is not None
@@ -34,6 +39,14 @@ def _workbook() -> bytes:
 
 
 def _pipeline(store: MemoryStore) -> Pipeline:
+    """Build a pipeline whose source always offers the same upload.
+
+    Args:
+        store: Where audit records are written.
+
+    Returns:
+        The pipeline.
+    """
     source = Mock()
     source.items.return_value = [
         SourceItem("events.xlsx", "landing/events.xlsx", "1", 1)
@@ -48,6 +61,7 @@ def _pipeline(store: MemoryStore) -> Pipeline:
 
 
 def test_two_records_in_one_clock_tick_both_land() -> None:
+    """Two runs in the same instant keep both audit records."""
     store = MemoryStore()
     pipeline = _pipeline(store)
 

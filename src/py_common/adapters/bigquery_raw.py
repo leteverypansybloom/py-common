@@ -10,17 +10,12 @@ layer (Dataform).
 All of one file's rows commit together, across every sheet, along
 with the audit record, in a single BigQuery script transaction, the
 same shape as BigQueryWarehouse.
-
-RAP Compliance:
-- Reproducible: Same NDJSON always produces the same rows
-- Auditable: Every load recorded with checksum, row count, outcome
-- Transparent: SQL and audit logic visible; no hidden behavior
 """
 
 import json
 import logging
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from io import BytesIO
 
 from google.api_core.exceptions import GoogleAPICallError, NotFound
@@ -102,9 +97,6 @@ class RawJsonWarehouse:
                 {"Account signups": "hww_account_signups"}.
             audit_table_id (str): Audit table name. Defaults to
                 "audit".
-
-        Returns:
-            None
 
         Raises:
             ValueError: No tables given, or two sheets share a table.
@@ -278,7 +270,7 @@ class RawJsonWarehouse:
         parts = self._commit_parts(staging, staged)
         job_config_txn = bigquery.QueryJobConfig(
             query_parameters=commit_parameters(
-                key, checksum, parts, item, datetime.now(timezone.utc)
+                key, checksum, parts, item, datetime.now(UTC)
             )
         )
         job, result = run_query(
@@ -325,9 +317,6 @@ class RawJsonWarehouse:
 
         Args:
             table_id (str): Raw table name.
-
-        Returns:
-            None
         """
         full_id = self._full_id(table_id)
         try:

@@ -1,165 +1,143 @@
-"""GCP authentication module — reusable by any GCP utility.
+r"""Authenticate to GCP once and share the credentials.
 
-Equivalent to R's gcp_auth.R. Auto-detects environment and handles:
-- GCE (Cloud Run, GKE) → metadata server
-- Local + ADC → cached credentials from GOOGLE_APPLICATION_CREDENTIALS
-- Local + service account key → JSON key file
-- Corporate proxy → direct token refresh (no gcloud CLI needed)
+A Python port of the R helper gcp_auth.R. It is kept in scripts/
+rather than the library: py-common's adapters take credentials from
+the Google client libraries directly.
 
-USAGE:
-    from py_common.gcp_auth import gcp_auth, gcp_token, gcp_project
+It picks a method from where the code is running:
 
-    # Authenticate once per session
-    gcp_auth(project="phw-eng-dev", method="auto")
+- On GCP (Compute Engine, Cloud Run, GKE): the attached service
+  account, through the metadata server.
+- Locally with Application Default Credentials: the cached
+  credentials file.
+- Locally with a service account key: the JSON key file.
 
-    # Pass token to GCP clients
-    from google.cloud import bigquery
-    bq_client = bigquery.Client(
-        project=gcp_project(),
-        credentials=gcp_token()
-    )
+Behind a corporate proxy, user credentials are refreshed with a
+direct call to Google's token endpoint, so gcloud is not needed.
 
-ENVIRONMENT SETUP (one-time):
-    Windows:
-        [System.Environment]::SetEnvironmentVariable(
-            "GOOGLE_APPLICATION_CREDENTIALS",
-            "C:\\path\\to\\key.json",
-            "User"
+Example:
+    From the repository root, with scripts/ on sys.path::
+
+        from gcp_auth import gcp_auth, gcp_project, gcp_token
+        from google.cloud import bigquery
+
+        gcp_auth(project="my-project")
+        client = bigquery.Client(
+            project=gcp_project(), credentials=gcp_token()
         )
 
-    Mac/Linux:
-        export GOOGLE_APPLICATION_CREDENTIALS="/path/to/key.json"
+To point it at a key file once, in PowerShell::
+
+    [System.Environment]::SetEnvironmentVariable(
+        "GOOGLE_APPLICATION_CREDENTIALS", "C:\keys\key.json", "User"
+    )
+
+or in a Mac or Linux shell::
+
+    export GOOGLE_APPLICATION_CREDENTIALS="/path/to/key.json"
 """
 
-import os
 import json
 import logging
-from typing import Optional
+import os
+import sys
+import urllib.request
 from pathlib import Path
 
 import google.auth
+from google.auth.credentials import Credentials as BaseCredentials
 from google.auth.transport.requests import Request
 from google.oauth2.service_account import Credentials
 
-logger = logging.getLogger("py_common.gcp_auth")
+logger = logging.getLogger("gcp_auth")
+
+TOKEN_URI = "https://oauth2.googleapis.com/token"
+METADATA_URL = "http://metadata.google.internal/computeMetadata/v1/instance/id"
+ADC_FILE = "application_default_credentials.json"
 
 
 class GCPAuthSession:
-    """Shared GCP authentication state across modules.
-
-    Stores token, project, method once per session. Equivalent to
-    .state environment in R's gcp_auth.R.
+    """Credentials and project shared by everything in one process.
 
     Attributes:
-        token: google.auth.credentials.Credentials
-        project (str): GCP project ID
-        billing (str): Billing project (defaults to project)
-        method (str): Auth method used
-        authenticated (bool): Whether auth succeeded
+        token: The credentials, or None before gcp_auth() runs.
+        project: The GCP project ID.
+        billing: The project queries are billed to.
+        method: The method that authenticated: "gce", "adc" or
+            "service_account".
+        authenticated: Whether gcp_auth() has succeeded.
     """
 
     def __init__(self) -> None:
-        """Initialize empty session state.
-
-        Args:
-            None
-
-        Returns:
-            None
-        """
-        self.token: Optional[google.auth.credentials.Credentials] = None
-        self.project: Optional[str] = None
-        self.billing: Optional[str] = None
-        self.method: Optional[str] = None
+        """Start with nothing authenticated."""
+        self.token: BaseCredentials | None = None
+        self.project: str | None = None
+        self.billing: str | None = None
+        self.method: str | None = None
         self.authenticated = False
 
 
-# Global session state (shared across imports)
+# One session per process, so a caller authenticates once and every
+# later gcp_token() call gets the same credentials.
 _session = GCPAuthSession()
 
 
 def _get_adc_path() -> str:
-    """Resolve Application Default Credentials path.
+    """Find the Application Default Credentials file.
 
-    Checks:
-    1. GOOGLE_APPLICATION_CREDENTIALS env var
-    2. Default ADC location (OS-aware)
-
-    Args:
-        None
+    GOOGLE_APPLICATION_CREDENTIALS is checked first, then the file
+    `gcloud auth application-default login` writes.
 
     Returns:
-        str: Path to credentials file
+        The path of the credentials file.
 
     Raises:
-        FileNotFoundError: No credentials found
+        FileNotFoundError: Neither location has a file.
     """
-    # 1. Check env var first (service account or explicit ADC)
     env_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
     if env_path and os.path.exists(env_path):
-        logger.debug(f"Found GOOGLE_APPLICATION_CREDENTIALS: {env_path}")
+        logger.debug("Using GOOGLE_APPLICATION_CREDENTIALS: %s", env_path)
         return env_path
 
-    # 2. Fallback to default ADC location (OS-aware)
-    if os.name == "nt":  # Windows
-        appdata = os.getenv("APPDATA") or str(Path.home() / "AppData" / "Roaming")
-        default_path = Path(
-            appdata,
-            "application_default_credentials.json",
+    if sys.platform == "win32":
+        appdata = os.getenv("APPDATA") or str(
+            Path.home() / "AppData" / "Roaming"
         )
-    else:  # Mac/Linux
-        default_path = (
-            Path.home()
-            / ".config"
-            / "gcloud"
-            / "application_default_credentials.json"
-        )
+        default_path = Path(appdata, "gcloud", ADC_FILE)
+    else:
+        default_path = Path.home() / ".config" / "gcloud" / ADC_FILE
 
     if default_path.exists():
-        logger.debug(f"Found default ADC: {default_path}")
+        logger.debug("Using default ADC file: %s", default_path)
         return str(default_path)
 
-    # 3. Fail with helpful message
     raise FileNotFoundError(
-        "[GCP] No credentials found.\n"
-        "Options:\n"
-        "  1. Set GOOGLE_APPLICATION_CREDENTIALS to a service account key\n"
-        "     Windows  : [System.Environment]::SetEnvironmentVariable(\n"
-        '        "GOOGLE_APPLICATION_CREDENTIALS", "C:\\keys\\key.json", '
-        '"User")\n'
-        "     Mac/Linux: export GOOGLE_APPLICATION_CREDENTIALS="
-        '"/path/to/key.json"\n'
-        "  2. For interactive auth: gcloud auth application-default "
-        "login\n"
+        "No credentials found. Either:\n"
+        "  1. Set GOOGLE_APPLICATION_CREDENTIALS to a key file, or\n"
+        "  2. Run: gcloud auth application-default login"
     )
 
 
 def _detect_environment() -> str:
-    """Detect where code is running.
-
-    Args:
-        None
+    """Work out where the code is running.
 
     Returns:
-        str: "gce" (on GCP VM), "adc" (local with credentials), or
-            "interactive" (local, no credentials)
+        "gce" when the GCP metadata server answers, "adc" when a local
+        credentials file exists, otherwise "interactive".
     """
-    # Check if running on GCE by pinging metadata server
+    # The metadata server only exists on GCP. A one-second timeout
+    # keeps the check quick on a laptop, where the name won't resolve.
+    request = urllib.request.Request(
+        METADATA_URL, headers={"Metadata-Flavor": "Google"}
+    )
     try:
-        import urllib.request
-
-        request = urllib.request.Request(
-            "http://metadata.google.internal/computeMetadata/v1/"
-            "instance/id",
-            headers={"Metadata-Flavor": "Google"},
-        )
         response = urllib.request.urlopen(request, timeout=1)
         if response.status == 200:
             return "gce"
     except Exception:
+        # Any failure (DNS, timeout, refused) means "not on GCP".
         pass
 
-    # Check for ADC file
     try:
         _get_adc_path()
         return "adc"
@@ -167,49 +145,48 @@ def _detect_environment() -> str:
         return "interactive"
 
 
-def _auth_from_json(json_path: str) -> google.auth.credentials.Credentials:
-    """Load credentials directly from JSON file.
-
-    Handles service_account and authorized_user credential types.
-    Works with corporate proxy (no browser, no gcloud CLI needed).
+def _auth_from_json(json_path: str) -> BaseCredentials:
+    """Load credentials from a service account or user JSON file.
 
     Args:
-        json_path (str): Path to credential JSON file
+        json_path: The credentials file.
 
     Returns:
-        google.auth.credentials.Credentials: Loaded credentials
+        The credentials. User credentials already hold a fresh access
+        token.
 
     Raises:
-        FileNotFoundError: File not found
-        ValueError: Unsupported credential type
+        FileNotFoundError: The file does not exist.
+        ValueError: The file has no "type", an unsupported type, or
+            Google refused to refresh the user token.
     """
     if not os.path.exists(json_path):
         raise FileNotFoundError(f"Credential file not found: {json_path}")
 
-    with open(json_path, "r") as f:
+    with open(json_path, encoding="utf-8") as f:
         cred_dict = json.load(f)
 
     cred_type = cred_dict.get("type")
     if not cred_type:
         raise ValueError(
-            f"Cannot read credential type from {json_path}. "
-            "File may be malformed."
+            f"Cannot read the credential type from {json_path}; the "
+            "file may be malformed."
         )
-
-    logger.debug(f"Credential type: {cred_type}")
+    logger.debug("Credential type: %s", cred_type)
 
     if cred_type == "service_account":
-        # Service account: direct from JSON
-        creds: google.auth.credentials.Credentials = Credentials.from_service_account_file(json_path)  # type: ignore[no-untyped-call]
+        load = Credentials.from_service_account_file
+        creds: BaseCredentials = load(json_path)  # type: ignore[no-untyped-call]
         return creds
 
-    elif cred_type == "authorized_user":
-        # Authorized user: exchange refresh_token for access_token
-        # No browser needed, works with corporate proxy
+    if cred_type == "authorized_user":
+        # Swap the refresh token for an access token directly, which
+        # works behind the proxy without a browser or gcloud.
         import requests
+        from google.oauth2.credentials import Credentials as UserCredentials
 
         resp = requests.post(
-            "https://oauth2.googleapis.com/token",
+            TOKEN_URI,
             data={
                 "client_id": cred_dict.get("client_id"),
                 "client_secret": cred_dict.get("client_secret"),
@@ -218,210 +195,151 @@ def _auth_from_json(json_path: str) -> google.auth.credentials.Credentials:
             },
             timeout=10,
         )
-
         if resp.status_code != 200:
             err = resp.json()
             raise ValueError(
-                f"Token refresh failed: {err.get('error')} — "
+                f"Token refresh failed: {err.get('error')}: "
                 f"{err.get('error_description')}. "
                 "Re-run: gcloud auth application-default login"
             )
 
-        tokens = resp.json()
-
-        # Build credentials from tokens
-        from google.oauth2.credentials import Credentials as OAuth2Credentials
-
-        creds: google.auth.credentials.Credentials = OAuth2Credentials(  # type: ignore[no-untyped-call,no-redef]
-            token=tokens.get("access_token"),
+        user_creds: BaseCredentials = UserCredentials(  # type: ignore[no-untyped-call]
+            token=resp.json().get("access_token"),
             refresh_token=cred_dict.get("refresh_token"),
-            token_uri="https://oauth2.googleapis.com/token",
+            token_uri=TOKEN_URI,
             client_id=cred_dict.get("client_id"),
             client_secret=cred_dict.get("client_secret"),
         )
-        return creds
+        return user_creds
 
-    else:
-        raise ValueError(
-            f"Unsupported credential type: {cred_type}. "
-            "Supported: service_account, authorized_user"
-        )
+    raise ValueError(
+        f"Unsupported credential type: {cred_type}. "
+        "Supported: service_account, authorized_user"
+    )
 
 
 def gcp_auth(
     project: str,
     method: str = "auto",
-    json_path: Optional[str] = None,
+    json_path: str | None = None,
 ) -> None:
-    """Authenticate with GCP — auto-detects environment.
-
-    Fetches and stores credentials that downstream GCP clients
-    (BigQuery, GCS, Pub/Sub) can retrieve via gcp_token().
-
-    Auth strategy by environment:
-    - GCE / Cloud Run / GKE  → VM's attached service account
-    - Local + ADC credentials → cached credentials file
-    - Local + service account → JSON key file
-    - Corporate proxy → direct token refresh (no gcloud CLI)
+    """Authenticate and keep the credentials for gcp_token().
 
     Args:
-        project (str): GCP project ID
-        method (str): "auto" (detect), "gce", "adc", "service_account"
-            or "interactive". Defaults to "auto".
-        json_path (str, optional): Path to service account JSON key.
-            If provided, forces method="service_account".
-
-    Returns:
-        None
+        project: The GCP project ID.
+        method: "auto" to choose from the environment, or one of
+            "gce", "adc" and "service_account".
+        json_path: A service account key file. Giving one forces
+            method "service_account".
 
     Raises:
-        ValueError: Authentication failed or unsupported method
+        ValueError: Authentication failed or the method is unknown.
+            The original error is chained.
     """
-    global _session
-
     if json_path:
         method = "service_account"
 
     if method == "auto":
         env = _detect_environment()
-        method_map = {
-            "gce": "gce",
-            "adc": "adc",
-            "interactive": "adc",  # Fall back to ADC on local
-        }
-        method = method_map[env]
-        logger.info(
-            f"[GCP] Environment detected: {env} → using method: {method}"
-        )
+        # With no credentials found, try ADC anyway so the error
+        # message says how to create them.
+        method = "gce" if env == "gce" else "adc"
+        logger.info("Environment %s, using method %s", env, method)
 
     try:
         if method == "gce":
-            # On GCE, use metadata server
             creds, project_id = google.auth.default(
                 scopes=[
                     "https://www.googleapis.com/auth/bigquery",
-                    "https://www.googleapis.com/auth/devstorage" ".read_write",
+                    "https://www.googleapis.com/auth/devstorage.read_write",
                 ]
             )
-
         elif method == "adc":
-            # Read credential file directly (handles proxy issues)
-            path = _get_adc_path()
-            creds = _auth_from_json(path)
+            creds = _auth_from_json(_get_adc_path())
             project_id = project
-
         elif method == "service_account":
-            # Service account key file
             if not json_path or not os.path.exists(json_path):
                 raise ValueError(
-                    "json_path must point to valid service account "
-                    "JSON key file."
+                    "json_path must point to a service account key file."
                 )
             creds = _auth_from_json(json_path)
             project_id = project
-
         else:
             raise ValueError(
                 f"Unsupported method: {method}. "
                 "Supported: gce, adc, service_account"
             )
 
-        # Refresh credentials to ensure they're valid
+        # Refresh now so bad credentials fail here, not on first use.
         if hasattr(creds, "refresh"):
             creds.refresh(Request())  # type: ignore[no-untyped-call]
 
-        # Store in session state
         _session.token = creds
         _session.project = project_id
         _session.billing = project_id
         _session.method = method
         _session.authenticated = True
-
-        logger.info(
-            f"[GCP] Authenticated via: {method} | project: {project_id}"
-        )
+        logger.info("Authenticated via %s, project %s", method, project_id)
 
     except Exception as e:
-        raise ValueError(f"[GCP] Authentication failed: {e}") from e
+        raise ValueError(f"Authentication failed: {e}") from e
 
 
-def gcp_token() -> google.auth.credentials.Credentials:
-    """Retrieve the shared GCP token.
-
-    Called by downstream utilities to get token without
-    re-authenticating.
-
-    Args:
-        None
+def gcp_token() -> BaseCredentials:
+    """Return the credentials gcp_auth() stored.
 
     Returns:
-        google.auth.credentials.Credentials: Stored token
+        The session's credentials.
 
     Raises:
-        ValueError: Not authenticated yet
+        ValueError: gcp_auth() has not succeeded yet.
     """
     if not _session.authenticated or _session.token is None:
-        raise ValueError("[GCP] Not authenticated. Call gcp_auth() first.")
+        raise ValueError("Not authenticated. Call gcp_auth() first.")
     return _session.token
 
 
 def gcp_project() -> str:
-    """Get the session GCP project ID.
-
-    Args:
-        None
+    """Return the session's project ID.
 
     Returns:
-        str: Project ID
+        The project ID.
 
     Raises:
-        ValueError: No project set
+        ValueError: No project has been set.
     """
     if _session.project is None:
-        raise ValueError(
-            "[GCP] No project set. Pass project= in " "gcp_auth()."
-        )
+        raise ValueError("No project set. Pass project= to gcp_auth().")
     return _session.project
 
 
 def gcp_billing() -> str:
-    """Get the session billing project.
-
-    Args:
-        None
+    """Return the project queries are billed to.
 
     Returns:
-        str: Billing project ID
+        The billing project, which defaults to the session's project.
+
+    Raises:
+        ValueError: No billing project or project has been set.
     """
     return _session.billing or gcp_project()
 
 
 def gcp_is_authenticated() -> bool:
-    """Check if GCP auth has been completed.
-
-    Args:
-        None
+    """Say whether gcp_auth() has succeeded.
 
     Returns:
-        bool: True if authenticated, False otherwise
+        True once authenticated, otherwise False.
     """
     return _session.authenticated
 
 
 def gcp_session_info() -> None:
-    """Print current auth session state.
-
-    Args:
-        None
-
-    Returns:
-        None
-    """
+    """Print the session's state."""
     print(
-        "── GCP Auth Session ────────────────────\n"
-        f" Authenticated : {_session.authenticated}\n"
-        f" Method        : {_session.method or 'none'}\n"
-        f" Project       : {_session.project or 'not set'}\n"
-        f" Billing       : {_session.billing or 'not set'}\n"
-        "────────────────────────────────────────\n"
+        "GCP auth session\n"
+        f"  Authenticated: {_session.authenticated}\n"
+        f"  Method:        {_session.method or 'none'}\n"
+        f"  Project:       {_session.project or 'not set'}\n"
+        f"  Billing:       {_session.billing or 'not set'}"
     )

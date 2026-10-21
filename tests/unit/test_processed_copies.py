@@ -1,14 +1,13 @@
-"""H2: converted copies never clash (REVIEW_.md).
+"""Converted copies never clash.
 
 The store is write-once: writing different bytes to an existing key
-raises ObjectStoreConflict. The typed route used to key its Parquet
-copy by the file's checksum alone, so the same file converted again
-with different results (a contract fix, a pyarrow upgrade) hit that
-conflict, and failed on every retry. The usual way in: fix the
-contract, then upload the same file again so it loads with the fix.
+raises ObjectStoreConflict. If the Parquet copy were keyed by the
+file's checksum alone, the same file converted again with different
+results (after a contract fix or a pyarrow upgrade, say) would hit
+that conflict and fail on every retry.
 
-Processed copies are now keyed by the upload (version) and by a
-digest of the converted bytes themselves, so whatever changes the
+So processed copies are keyed by the upload (version) and by a
+digest of the converted bytes themselves: whatever changes the
 output gets a new key, and identical output reuses its key.
 """
 
@@ -44,6 +43,11 @@ FIXED = Contract(
 
 
 def _book() -> bytes:
+    """Build an Events workbook with name and extra columns.
+
+    Returns:
+        The .xlsx bytes.
+    """
     wb = Workbook()
     ws = wb.active
     assert ws is not None
@@ -62,12 +66,30 @@ class StaticSource:
     """One file, whose version the test sets."""
 
     def __init__(self, version: str) -> None:
+        """Offer the file at one version.
+
+        Args:
+            version: The upload's version.
+        """
         self.version = version
 
     def items(self) -> list[SourceItem]:
+        """List the one file.
+
+        Returns:
+            Its SourceItem.
+        """
         return [SourceItem("events.xlsx", "was/events.xlsx", self.version, 10)]
 
     def download(self, item: SourceItem) -> bytes:
+        """Return the file's bytes, whatever the version.
+
+        Args:
+            item: The file asked for.
+
+        Returns:
+            DATA.
+        """
         return DATA
 
 
@@ -77,6 +99,17 @@ def _pipeline(
     version: str = "1",
     output_format: Any = "parquet",
 ) -> Pipeline:
+    """Build a pipeline over one upload of DATA.
+
+    Args:
+        store: The object store, shared between runs.
+        contract: The contract to apply.
+        version: The upload's version.
+        output_format: "parquet" or "raw_json".
+
+    Returns:
+        The pipeline, with a mock warehouse that accepts loads.
+    """
     warehouse = Mock(identity="p.d.t", spec=["identity", "load"])
     warehouse.load.return_value = True
     if output_format == "raw_json":
@@ -91,11 +124,22 @@ def _pipeline(
 
 
 def _processed(store: MemoryStore) -> list[str]:
+    """List the processed copies in the store.
+
+    Args:
+        store: The object store.
+
+    Returns:
+        Their keys, sorted.
+    """
     return sorted(k for k in store.objects if k.startswith("processed/"))
 
 
 class TestTypedRoute:
+    """Parquet copies are keyed by upload and content."""
+
     def test_contract_fix_then_same_file_again_loads(self) -> None:
+        """Uploading the same file after a contract fix loads it."""
         store = MemoryStore()
         first = _pipeline(store, OLD, version="1").run()
 
@@ -106,6 +150,7 @@ class TestTypedRoute:
         assert len(_processed(store)) == 2
 
     def test_retry_after_a_contract_change_loads(self) -> None:
+        """A retry after the contract changed writes a new copy and loads."""
         # The copy is stored before the load; the load fails; the
         # contract changes before the retry of the same upload.
         store = MemoryStore()
@@ -118,6 +163,7 @@ class TestTypedRoute:
         assert retry[0].outcome == Outcome.LOADED, retry[0].errors
 
     def test_a_converter_change_gets_its_own_copy(self) -> None:
+        """A converter that writes different bytes gets a new copy."""
         # E.g. a pyarrow upgrade: the Parquet footer names the
         # library version that wrote it, so the bytes differ.
         store = MemoryStore()
@@ -132,6 +178,7 @@ class TestTypedRoute:
         assert len(_processed(store)) == 2
 
     def test_a_plain_retry_reuses_its_copy(self) -> None:
+        """A retry with nothing changed reuses the stored copy."""
         store = MemoryStore()
         failing = _pipeline(store, OLD)
         failing.warehouse.load.side_effect = ServiceError("down")
@@ -143,6 +190,7 @@ class TestTypedRoute:
         assert len(_processed(store)) == 1
 
     def test_key_names_upload_and_content(self) -> None:
+        """The key holds the checksum, version and content digest."""
         store = MemoryStore()
         pipeline = _pipeline(store, OLD, version="1601")
 
@@ -159,7 +207,10 @@ class TestTypedRoute:
 
 
 class TestRawRoute:
+    """NDJSON copies are keyed by upload and content."""
+
     def test_retry_after_a_contract_change_loads(self) -> None:
+        """A retry after the contract changed writes a new copy and loads."""
         store = MemoryStore()
         failing = _pipeline(store, OLD, output_format="raw_json")
         failing.warehouse.load.side_effect = ServiceError("down")
@@ -170,6 +221,7 @@ class TestRawRoute:
         assert retry[0].outcome == Outcome.LOADED, retry[0].errors
 
     def test_key_names_upload_and_content(self) -> None:
+        """The key holds the checksum, version and content digest."""
         store = MemoryStore()
         pipeline = _pipeline(store, OLD, output_format="raw_json")
 
@@ -183,12 +235,23 @@ class TestRawRoute:
 
 
 class TestAuditRecord:
+    """The audit record says which copy, contract and library loaded."""
+
     @staticmethod
     def _record(store: MemoryStore) -> dict[str, Any]:
+        """Read the run's single audit record.
+
+        Args:
+            store: The object store.
+
+        Returns:
+            The record.
+        """
         (key,) = [k for k in store.objects if k.startswith("audit/records/")]
         return dict(json.loads(store.objects[key]))
 
     def test_names_the_copy_contract_and_library_version(self) -> None:
+        """The record names the copy, the contract and py-common's version."""
         store = MemoryStore()
         result = _pipeline(store, OLD).run()[0]
 
@@ -199,6 +262,7 @@ class TestAuditRecord:
         assert record["py_common_version"] == py_common.__version__
 
     def test_quarantined_file_has_no_processed_copy(self) -> None:
+        """A quarantined file records no processed copy."""
         store = MemoryStore()
         named = replace(OLD, file_name="other.xlsx")
 
@@ -209,7 +273,10 @@ class TestAuditRecord:
 
 
 class TestContractFingerprint:
+    """Contract.fingerprint() changes whenever the contract does."""
+
     def test_equal_contracts_have_the_same_fingerprint(self) -> None:
+        """Two equal contracts share a fingerprint."""
         assert OLD.fingerprint() == replace(OLD).fingerprint()
 
     @pytest.mark.parametrize(
@@ -221,11 +288,18 @@ class TestContractFingerprint:
         ],
     )
     def test_any_change_changes_it(self, change: dict[str, Any]) -> None:
+        """Changing any contract setting changes the fingerprint.
+
+        Args:
+            change: The setting to change.
+        """
         assert replace(OLD, **change).fingerprint() != OLD.fingerprint()
 
     def test_a_worksheet_change_changes_it(self) -> None:
+        """Changing a worksheet's columns changes the fingerprint."""
         assert FIXED.fingerprint() != OLD.fingerprint()
 
     def test_it_is_short_hex(self) -> None:
+        """The fingerprint is 16 hex digits."""
         assert len(OLD.fingerprint()) == 16
         int(OLD.fingerprint(), 16)

@@ -2,21 +2,15 @@
 
 Tests define the ObjectStore protocol contract without requiring live
 GCS services. All external dependencies are mocked.
-
-RAP Principles:
-- Reproducible: Same test data always produces same results
-- Auditable: Each test name describes what is being verified
-- Transparent: No hardcoded secrets; mocks are explicit
 """
 
 import base64
 import hashlib
 import json
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 from _fake_gcs import FakeBucket
-from unittest.mock import Mock, MagicMock, patch
-
 from google.api_core.exceptions import (
     Forbidden,
     NotFound,
@@ -51,17 +45,7 @@ class TestGCSObjectStoreInit:
     """Test GCSObjectStore initialization."""
 
     def test_init_strips_gs_prefix(self):
-        """Bucket name normalized (gs:// prefix removed).
-
-        Args:
-            None
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If bucket name not normalized
-        """
+        """Bucket name normalized (gs:// prefix removed)."""
         with patch("py_common.adapters.gcs.storage.Client"):
             store = GCSObjectStore(
                 project_id="test-project", bucket_name="gs://my-bucket"
@@ -69,17 +53,7 @@ class TestGCSObjectStoreInit:
             assert store.bucket_name == "my-bucket"
 
     def test_init_accepts_bucket_without_prefix(self):
-        """Bucket name works without gs:// prefix.
-
-        Args:
-            None
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If bucket name not accepted
-        """
+        """Bucket name works without gs:// prefix."""
         with patch("py_common.adapters.gcs.storage.Client"):
             store = GCSObjectStore(
                 project_id="test-project", bucket_name="my-bucket"
@@ -87,17 +61,7 @@ class TestGCSObjectStoreInit:
             assert store.bucket_name == "my-bucket"
 
     def test_init_sets_project_id(self):
-        """Project ID stored correctly.
-
-        Args:
-            None
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If project ID not stored
-        """
+        """Project ID stored correctly."""
         with patch("py_common.adapters.gcs.storage.Client"):
             store = GCSObjectStore(
                 project_id="my-project", bucket_name="my-bucket"
@@ -134,12 +98,6 @@ class TestGCSObjectStoreGet:
         Args:
             store: GCSObjectStore fixture
             mock_bucket: Mocked GCS bucket
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If get() does not return bytes
         """
         blob = Mock()
         blob.download_as_bytes.return_value = b"test data"
@@ -156,12 +114,6 @@ class TestGCSObjectStoreGet:
         Args:
             store: GCSObjectStore fixture
             mock_bucket: Mocked GCS bucket
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If get() does not return None
         """
         blob = Mock()
         blob.download_as_bytes.side_effect = NotFound("Blob not found")
@@ -177,12 +129,6 @@ class TestGCSObjectStoreGet:
         Args:
             store: GCSObjectStore fixture
             mock_bucket: Mocked GCS bucket
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If debug log not captured
         """
         blob = Mock()
         blob.download_as_bytes.side_effect = NotFound("Not found")
@@ -190,7 +136,6 @@ class TestGCSObjectStoreGet:
 
         with patch("py_common.adapters.gcs.logger") as mock_logger:
             store.get("missing-key")
-            # Verify debug was logged
             assert mock_logger.debug.called
 
 
@@ -224,12 +169,6 @@ class TestGCSObjectStorePut:
         Args:
             store: GCSObjectStore fixture
             mock_bucket: Mocked GCS bucket
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If object not uploaded
         """
         blob = Mock()
         mock_bucket.blob.return_value = blob
@@ -243,21 +182,14 @@ class TestGCSObjectStorePut:
     def test_put_uses_generation_precondition(self, store, mock_bucket):
         """put() uses if_generation_match=0 for atomic create-if-absent.
 
-        Fix for issue #4: the old put() called blob.exists() then
-        blob.upload_from_string() as two separate calls, so two
-        processes could both see "not exists" and both overwrite the
-        key. if_generation_match=0 makes GCS itself reject the write
-        if any generation already exists, closing that race.
+        Checking exists() and then uploading would let two processes
+        both see "not exists" and both write the key.
+        if_generation_match=0 makes GCS itself reject the write if any
+        generation already exists, so there is no race.
 
         Args:
             store: GCSObjectStore fixture
             mock_bucket: Mocked GCS bucket
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If the precondition is not applied
         """
         blob = Mock()
         mock_bucket.blob.return_value = blob
@@ -277,12 +209,6 @@ class TestGCSObjectStorePut:
         Args:
             store: GCSObjectStore fixture
             mock_bucket: Mocked GCS bucket
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If idempotency not enforced
         """
         blob = Mock()
         blob.upload_from_string.side_effect = PreconditionFailed(
@@ -291,7 +217,6 @@ class TestGCSObjectStorePut:
         mock_bucket.blob.return_value = blob
         mock_bucket.get_blob.return_value = _stored(b"data")
 
-        # Call put twice with same key and data
         store.put("existing-key", b"data")
         store.put("existing-key", b"data")
 
@@ -305,12 +230,6 @@ class TestGCSObjectStorePut:
         Args:
             store: GCSObjectStore fixture
             mock_bucket: Mocked GCS bucket
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If ObjectStoreConflict not raised
         """
         blob = Mock()
         blob.upload_from_string.side_effect = PreconditionFailed(
@@ -328,19 +247,12 @@ class TestGCSObjectStorePut:
         Args:
             store: GCSObjectStore fixture
             mock_bucket: Mocked GCS bucket
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If debug log not captured
         """
         blob = Mock()
         mock_bucket.blob.return_value = blob
 
         with patch("py_common.adapters.gcs.logger") as mock_logger:
             store.put("new-key", b"test data")
-            # Verify debug was logged
             assert mock_logger.debug.called
 
 
@@ -377,12 +289,6 @@ class TestGCSObjectStoreLock:
         Args:
             store: GCSObjectStore fixture
             bucket: Fake bucket fixture
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If lock object lifecycle is wrong
         """
         with store.lock("locks/abc"):
             assert "locks/abc" in bucket.objects
@@ -394,12 +300,6 @@ class TestGCSObjectStoreLock:
         Args:
             store: GCSObjectStore fixture
             bucket: Fake bucket fixture
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If holder details are missing
         """
         with store.lock("locks/abc"):
             holder = json.loads(bucket.objects["locks/abc"][0])
@@ -411,12 +311,6 @@ class TestGCSObjectStoreLock:
 
         Args:
             store: GCSObjectStore fixture
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If overlap is not blocked
         """
         with store.lock("locks/abc"):
             with pytest.raises(RuntimeError, match="locks/abc"):
@@ -428,12 +322,6 @@ class TestGCSObjectStoreLock:
 
         Args:
             store: GCSObjectStore fixture
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If holder is not reported
         """
         with store.lock("locks/abc"):
             with pytest.raises(RuntimeError, match="run_id"):
@@ -448,12 +336,6 @@ class TestGCSObjectStoreLock:
         Args:
             store: GCSObjectStore fixture
             bucket: Fake bucket fixture
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If the holder's lock was removed
         """
         with store.lock("locks/abc"):
             with pytest.raises(RuntimeError):
@@ -466,12 +348,6 @@ class TestGCSObjectStoreLock:
 
         Args:
             store: GCSObjectStore fixture
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If unrelated keys contend
         """
         with store.lock("locks/a"):
             with store.lock("locks/b"):
@@ -483,12 +359,6 @@ class TestGCSObjectStoreLock:
         Args:
             store: GCSObjectStore fixture
             bucket: Fake bucket fixture
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If lock leaks on error
         """
         with pytest.raises(ValueError):
             with store.lock("locks/abc"):
@@ -500,12 +370,6 @@ class TestGCSObjectStoreLock:
 
         Args:
             store: GCSObjectStore fixture
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If lock cannot be reacquired
         """
         with store.lock("locks/abc"):
             pass
@@ -517,12 +381,6 @@ class TestGCSObjectStoreLock:
 
         Args:
             store: GCSObjectStore fixture
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If the atomic precondition is not used
         """
         blob = MagicMock()
         blob.generation = 7
@@ -535,17 +393,12 @@ class TestGCSObjectStoreLock:
         }
 
     def test_release_only_deletes_own_generation(self, store):
-        """Release is conditional on our generation (never deletes
-        a lock someone else now holds).
+        """Release is conditional on our generation.
+
+        So it never deletes a lock someone else now holds.
 
         Args:
             store: GCSObjectStore fixture
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If delete is not generation-guarded
         """
         blob = MagicMock()
         blob.generation = 7
@@ -560,12 +413,6 @@ class TestGCSObjectStoreLock:
 
         Args:
             store: GCSObjectStore fixture
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If release raises or does not warn
         """
         blob = MagicMock()
         blob.generation = 7
@@ -582,12 +429,6 @@ class TestGCSObjectStoreLock:
 
         Args:
             store: GCSObjectStore fixture
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If release raises or does not log error
         """
         blob = MagicMock()
         blob.generation = 7
@@ -604,12 +445,6 @@ class TestGCSObjectStoreLock:
 
         Args:
             store: GCSObjectStore fixture
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If the error is swallowed or reworded
         """
         blob = MagicMock()
         blob.upload_from_string.side_effect = Forbidden("no access")
@@ -624,12 +459,6 @@ class TestGCSObjectStoreLock:
 
         Args:
             store: GCSObjectStore fixture
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If log messages are missing
         """
         with patch("py_common.adapters.gcs.logger") as mock_logger:
             with store.lock("locks/abc"):
@@ -662,17 +491,7 @@ class TestGCSSourceInit:
     """Test GCSSource initialization."""
 
     def test_init_normalises_bucket_and_prefix(self):
-        """gs:// is stripped and the prefix ends in one slash.
-
-        Args:
-            None
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If bucket or prefix not normalised
-        """
+        """gs:// is stripped and the prefix ends in one slash."""
         with patch("py_common.adapters.gcs.storage.Client"):
             source = GCSSource(
                 project_id="test-project",
@@ -683,49 +502,19 @@ class TestGCSSourceInit:
             assert source.prefix == "hww/monthly/"
 
     def test_init_empty_prefix_means_bucket_root(self):
-        """No prefix lists the top of the bucket.
-
-        Args:
-            None
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If prefix is not empty
-        """
+        """No prefix lists the top of the bucket."""
         with patch("py_common.adapters.gcs.storage.Client"):
             source = GCSSource(project_id="p", bucket_name="landing")
             assert source.prefix == ""
 
     def test_init_defaults_to_xlsx_only(self):
-        """.xls is not picked up: openpyxl can't read it.
-
-        Args:
-            None
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If default extensions are not .xlsx only
-        """
+        """.xls is not picked up: openpyxl can't read it."""
         with patch("py_common.adapters.gcs.storage.Client"):
             source = GCSSource(project_id="p", bucket_name="landing")
             assert source.extensions == (".xlsx",)
 
     def test_init_rejects_extension_without_dot(self):
-        """Extensions must look like ".xlsx".
-
-        Args:
-            None
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If ValueError isn't raised
-        """
+        """Extensions must look like ".xlsx"."""
         with patch("py_common.adapters.gcs.storage.Client"):
             with pytest.raises(ValueError, match="extensions"):
                 GCSSource(
@@ -755,12 +544,6 @@ class TestGCSSourceItems:
 
         Args:
             source: GCSSource fixture
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If SourceItem fields are wrong
         """
         source.client.list_blobs.return_value = [
             _listed_blob("hww/was.xlsx", generation=1712, size=2048)
@@ -782,12 +565,6 @@ class TestGCSSourceItems:
 
         Args:
             source: GCSSource fixture
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If list_blobs isn't scoped to the folder
         """
         source.client.list_blobs.return_value = []
 
@@ -802,12 +579,6 @@ class TestGCSSourceItems:
 
         Args:
             source: GCSSource fixture
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If a non-.xlsx object is listed
         """
         source.client.list_blobs.return_value = [
             _listed_blob("hww/notes.csv"),
@@ -822,12 +593,6 @@ class TestGCSSourceItems:
 
         Args:
             source: GCSSource fixture
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If items are not sorted
         """
         source.client.list_blobs.return_value = [
             _listed_blob("hww/was.xlsx"),
@@ -844,12 +609,6 @@ class TestGCSSourceItems:
 
         Args:
             source: GCSSource fixture
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If ServiceError isn't raised
         """
         source.client.list_blobs.side_effect = Forbidden("no access")
 
@@ -896,12 +655,6 @@ class TestGCSSourceDownload:
             source: GCSSource fixture
             mock_bucket: Mocked GCS bucket
             item: SourceItem fixture
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If bytes or precondition are wrong
         """
         mock_bucket.get_blob.return_value = _listed_blob(
             "hww/was.xlsx", generation=5
@@ -922,12 +675,6 @@ class TestGCSSourceDownload:
             source: GCSSource fixture
             mock_bucket: Mocked GCS bucket
             item: SourceItem fixture
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If VersionMismatch isn't raised
         """
         mock_bucket.get_blob.return_value = _listed_blob(
             "hww/was.xlsx", generation=6
@@ -946,12 +693,6 @@ class TestGCSSourceDownload:
             source: GCSSource fixture
             mock_bucket: Mocked GCS bucket
             item: SourceItem fixture
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If VersionMismatch isn't raised
         """
         mock_bucket.get_blob.return_value = _listed_blob(
             "hww/was.xlsx", generation=5
@@ -972,12 +713,6 @@ class TestGCSSourceDownload:
             source: GCSSource fixture
             mock_bucket: Mocked GCS bucket
             item: SourceItem fixture
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If NotFound isn't raised
         """
         mock_bucket.get_blob.return_value = None
 
@@ -993,12 +728,6 @@ class TestGCSSourceDownload:
             source: GCSSource fixture
             mock_bucket: Mocked GCS bucket
             item: SourceItem fixture
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If ServiceError isn't raised
         """
         mock_bucket.get_blob.side_effect = Forbidden("no access")
 

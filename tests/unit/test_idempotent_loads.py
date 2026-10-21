@@ -1,4 +1,4 @@
-"""A file is never loaded into BigQuery twice (review C2, H2, M4).
+"""A file is never loaded into BigQuery twice.
 
 Runs the real Pipeline against the real BigQuery adapters on a
 stateful fake client (_fake_bigquery.py), so the warehouse's own
@@ -35,14 +35,33 @@ class Store:
     """
 
     def __init__(self) -> None:
+        """Start empty, with no failure staged."""
         self.objects: dict[str, bytes] = {}
         self.fail_on: str | None = None
         self.failure: Exception = ServiceError("store write failed")
 
     def get(self, key: str) -> bytes | None:
+        """Return an object's bytes.
+
+        Args:
+            key: The object's key.
+
+        Returns:
+            The bytes, or None if there is no such object.
+        """
         return self.objects.get(key)
 
     def put(self, key: str, data: bytes) -> None:
+        """Write an object once, or fail if a failure is staged for it.
+
+        Args:
+            key: The object's key.
+            data: The bytes to store.
+
+        Raises:
+            ServiceError: A failure was staged for this key's prefix.
+            ObjectStoreConflict: The key holds different bytes.
+        """
         if self.fail_on is not None and key.startswith(self.fail_on):
             self.fail_on = None
             raise self.failure
@@ -52,6 +71,14 @@ class Store:
 
     @contextmanager
     def lock(self, key: str) -> Iterator[None]:
+        """Hold no lock: one test runs at a time.
+
+        Args:
+            key: The lock's key, ignored.
+
+        Yields:
+            Nothing.
+        """
         yield
 
 
@@ -93,6 +120,11 @@ class Harness:
     """
 
     def __init__(self, route: str) -> None:
+        """Build the pipeline and warehouse for one route.
+
+        Args:
+            route: "typed" or "raw".
+        """
         self.client = FakeBigQueryClient()
         self.store = Store()
         self.source = Mock()
@@ -132,11 +164,24 @@ class Harness:
 
     @property
     def rows(self) -> int:
+        """Count the rows loaded into the final table.
+
+        Returns:
+            The count.
+        """
         return self.client.rows.get(self.table, 0)
 
 
 @pytest.fixture(params=["typed", "raw"])
 def harness(request: pytest.FixtureRequest) -> Harness:
+    """Return a harness for each route.
+
+    Args:
+        request: Carries the route, "typed" or "raw".
+
+    Returns:
+        The harness.
+    """
     return Harness(request.param)
 
 
@@ -194,7 +239,7 @@ class TestCrashAfterCommit:
 
 
 class TestAuditRecordFailure:
-    """A failed audit JSON write fails that file only (M4)."""
+    """A failed audit JSON write fails that file only."""
 
     def test_audit_write_failure_marks_file_failed_and_run_continues(
         self, harness: Harness
@@ -226,14 +271,24 @@ class TestAuditRecordFailure:
 
 
 class TestDedupKey:
-    """Typed: content decides. Raw: identity + version decides (H2)."""
+    """Typed: content decides. Raw: identity + version decides."""
 
     @pytest.fixture
     def raw(self) -> Harness:
+        """Return a raw-route harness.
+
+        Returns:
+            The harness.
+        """
         return Harness("raw")
 
     @pytest.fixture
     def typed(self) -> Harness:
+        """Return a typed-route harness.
+
+        Returns:
+            The harness.
+        """
         return Harness("typed")
 
     def test_raw_revert_to_earlier_content_is_loaded(
@@ -260,8 +315,11 @@ class TestDedupKey:
     def test_typed_restore_to_earlier_content_is_loaded(
         self, typed: Harness
     ) -> None:
-        """gen1 = A, gen2 = B, gen3 = A: the restore loads, so A's
-        values win again (both routes key on the upload, not bytes)."""
+        """A restored file loads again, so its values win again.
+
+        Uploads go A, then B, then A again. Both routes key on the
+        upload, not the bytes, so the third upload loads.
+        """
         outcomes = [
             typed.upload(A, "1"),
             typed.upload(B, "2"),
@@ -276,6 +334,11 @@ class TestDedupKey:
         ]
 
     def test_typed_same_upload_twice_is_skipped(self, typed: Harness) -> None:
+        """The same upload offered twice loads once.
+
+        Args:
+            typed: A typed-route harness.
+        """
         typed.upload(A, "1")
 
         assert typed.upload(A, "1") == Outcome.SKIPPED
@@ -298,10 +361,23 @@ class TestCommitScriptSql:
     """The SQL parts that carry the idempotency semantics."""
 
     def _script(self, harness: Harness) -> str:
+        """Load one upload and return the commit script it ran.
+
+        Args:
+            harness: The route's harness.
+
+        Returns:
+            The script.
+        """
         harness.upload(A, "1")
         return harness.client.scripts[-1]
 
     def test_check_runs_inside_the_transaction(self, harness: Harness) -> None:
+        """The "already loaded?" check runs inside the transaction.
+
+        Args:
+            harness: The route's harness.
+        """
         sql = self._script(harness)
         begin = sql.index("BEGIN TRANSACTION")
         check = sql.index("SELECT COUNT(*) > 0")
@@ -312,6 +388,11 @@ class TestCommitScriptSql:
     def test_check_matches_only_loaded_rows_for_this_destination(
         self, harness: Harness
     ) -> None:
+        """The check matches this table and upload, not the bytes.
+
+        Args:
+            harness: The route's harness.
+        """
         sql = self._script(harness)
         check = sql[sql.index("SELECT COUNT(*) > 0") :].split(");")[0]
         # Both routes: this table + this upload (file and version),
@@ -325,6 +406,11 @@ class TestCommitScriptSql:
     def test_status_is_selected_after_the_block(
         self, harness: Harness
     ) -> None:
+        """The script ends by reporting LOADED or ALREADY_LOADED.
+
+        Args:
+            harness: The route's harness.
+        """
         sql = self._script(harness)
         assert sql.rstrip().endswith(
             "SELECT IF(any_loaded, 'LOADED', 'ALREADY_LOADED') AS status;"

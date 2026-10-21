@@ -1,4 +1,4 @@
-"""Error contract of both BigQuery warehouses (review H1, M11).
+"""Error contract of both BigQuery warehouses.
 
 The pipeline acts on ServiceError (retry) and
 IndeterminateCommitError (state unknown). These tests drive each
@@ -74,6 +74,15 @@ def setup(
     commit = Mock(job_id="job-42")
 
     def query(sql: str, **_: Any) -> Mock:
+        """Return the commit job for the script, a one-row job otherwise.
+
+        Args:
+            sql: The query text.
+            **_: Other query arguments, ignored.
+
+        Returns:
+            The job.
+        """
         if "BEGIN TRANSACTION" in sql:
             return commit
         other = Mock(job_id="q-1")
@@ -87,7 +96,7 @@ def setup(
 def test_job_reported_failed_raises_service_error_with_job_id(
     setup: tuple[MagicMock, Mock, Callable[[], None]],
 ) -> None:
-    """BigQuery says the script failed → ServiceError naming the job."""
+    """A failed script is a ServiceError naming the job."""
     _, commit, load = setup
     commit.result.side_effect = BadRequest("duplicate key")
     commit.state = "DONE"
@@ -117,7 +126,7 @@ def test_timeout_then_done_without_error_is_success(
 def test_transport_error_then_done_with_error_is_service_error(
     setup: tuple[MagicMock, Mock, Callable[[], None]],
 ) -> None:
-    """Re-read shows the job failed → ServiceError (safe to retry)."""
+    """A job that re-reads as failed is a ServiceError (retryable)."""
     _, commit, load = setup
     commit.result.side_effect = ConnectionError("reset by peer")
     commit.state = "DONE"
@@ -167,7 +176,7 @@ def test_staging_load_failure_is_service_error(
 
 
 class TestStagingTableCreation:
-    """Staging-table errors are ServiceErrors (review M11)."""
+    """Staging-table errors are ServiceErrors."""
 
     def test_create_failure_is_service_error(
         self, setup: tuple[MagicMock, Mock, Callable[[], None]]

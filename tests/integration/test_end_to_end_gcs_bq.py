@@ -1,14 +1,14 @@
-"""End-to-end test: Parquet → GCS → BigQuery."""
+"""End-to-end test: Parquet to GCS to BigQuery."""
 
 import os
 from io import BytesIO
 
-import pytest
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
-from py_common.adapters.gcs import GCSObjectStore
 from py_common.adapters.bigquery import BigQueryWarehouse
+from py_common.adapters.gcs import GCSObjectStore
 from py_common.model import SourceItem
 
 HAS_CREDENTIALS = "GOOGLE_APPLICATION_CREDENTIALS" in os.environ
@@ -17,7 +17,7 @@ HAS_CREDENTIALS = "GOOGLE_APPLICATION_CREDENTIALS" in os.environ
 @pytest.mark.integration
 @pytest.mark.skipif(not HAS_CREDENTIALS, reason="No GCP credentials")
 class TestEndToEndWorkflow:
-    """Full pipeline: Create data → GCS → BigQuery."""
+    """Full pipeline: create data, store it in GCS, load BigQuery."""
 
     def test_parquet_to_bigquery(self):
         """Create test Parquet, upload to GCS, load to BigQuery."""

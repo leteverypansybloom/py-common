@@ -2,11 +2,6 @@
 
 Tests define the ObjectStore/Source protocol contracts using a real
 temp folder (no mocking needed for local filesystem operations).
-
-RAP Principles:
-- Reproducible: Same test data always produces same results
-- Auditable: Each test name describes what is being verified
-- Transparent: No hardcoded secrets; uses pytest's tmp_path fixture
 """
 
 import pytest
@@ -34,12 +29,6 @@ class TestLocalObjectStorePut:
 
         Args:
             store: LocalObjectStore fixture
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If written bytes do not match input
         """
         store.put("new-key", b"new data")
 
@@ -52,12 +41,6 @@ class TestLocalObjectStorePut:
 
         Args:
             store: LocalObjectStore fixture
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If idempotency not enforced
         """
         store.put("existing-key", b"data")
         store.put("existing-key", b"data")
@@ -69,12 +52,6 @@ class TestLocalObjectStorePut:
 
         Args:
             store: LocalObjectStore fixture
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If ObjectStoreConflict not raised
         """
         store.put("existing-key", b"old data")
 
@@ -86,12 +63,6 @@ class TestLocalObjectStorePut:
 
         Args:
             store: LocalObjectStore fixture
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If original content was overwritten
         """
         store.put("existing-key", b"old data")
 
@@ -104,11 +75,9 @@ class TestLocalObjectStorePut:
 class TestLocalObjectStoreKeyResolution:
     """put()/get() must resolve keys under folder, never outside it.
 
-    Windows fix: pipeline.py used to embed a full absolute source
-    path straight into object store keys. Because joining a
-    pathlib path with an absolute right-hand side discards the
-    left side entirely, a key like "C:\\Users\\...\\file.xlsx"
-    silently escaped the store's root folder instead of raising.
+    Joining a pathlib path with an absolute right-hand side discards
+    the left side, so an absolute key such as C:/Users/.../file.xlsx
+    would escape the store's root folder rather than raise.
     """
 
     @pytest.fixture
@@ -122,12 +91,6 @@ class TestLocalObjectStoreKeyResolution:
         Args:
             store: LocalObjectStore fixture
             tmp_path: pytest temp directory fixture
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If the file isn't under the store folder
         """
         store.put("raw/events.xlsx", b"data")
 
@@ -139,13 +102,6 @@ class TestLocalObjectStoreKeyResolution:
         Args:
             store: LocalObjectStore fixture
             tmp_path: pytest temp directory fixture
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If ValueError isn't raised, or if the
-                escape target was written to
         """
         escape_target = tmp_path / "outside.txt"
 
@@ -160,13 +116,6 @@ class TestLocalObjectStoreKeyResolution:
         Args:
             store: LocalObjectStore fixture
             tmp_path: pytest temp directory fixture
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If ValueError isn't raised, or if the
-                escape target was written to
         """
         with pytest.raises(ValueError, match="escapes"):
             store.put("../outside.txt", b"data")
@@ -178,12 +127,6 @@ class TestLocalObjectStoreKeyResolution:
 
         Args:
             store: LocalObjectStore fixture
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If ValueError isn't raised
         """
         with pytest.raises(ValueError, match="escapes"):
             store.get("../../outside.txt")
@@ -192,22 +135,15 @@ class TestLocalObjectStoreKeyResolution:
 class TestLocalSourceIdentity:
     """LocalSource.items() must use portable, relative identities.
 
-    Windows fix: identity used to be the full absolute path
-    (str(path)), whose drive-letter colon breaks Windows filenames
-    once pipeline.py embeds identity in an object store key.
+    An absolute path's drive-letter colon would break Windows file
+    names once pipeline.py puts the identity in an object store key.
     """
 
     def test_identity_is_relative_to_folder(self, tmp_path):
-        """identity is the filename, not an absolute path.
+        """Identity is the filename, not an absolute path.
 
         Args:
             tmp_path: pytest temp directory fixture
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If identity is absolute or has a colon
         """
         (tmp_path / "events.xlsx").write_bytes(b"data")
         source = LocalSource(tmp_path)
@@ -219,16 +155,10 @@ class TestLocalSourceIdentity:
         assert ":" not in items[0].identity
 
     def test_identity_is_relative_for_nested_folder(self, tmp_path):
-        """identity stays relative when the source folder is nested.
+        """Identity stays relative when the source folder is nested.
 
         Args:
             tmp_path: pytest temp directory fixture
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If identity leaks the parent folder path
         """
         nested = tmp_path / "batch1"
         nested.mkdir()
@@ -244,12 +174,6 @@ class TestLocalSourceIdentity:
 
         Args:
             tmp_path: pytest temp directory fixture
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If downloaded bytes don't match the file
         """
         (tmp_path / "events.xlsx").write_bytes(b"workbook bytes")
         source = LocalSource(tmp_path)
@@ -266,12 +190,6 @@ class TestLocalSourceItems:
 
         Args:
             tmp_path: pytest temp directory fixture
-
-        Returns:
-            None
-
-        Raises:
-            AssertionError: If the .xls file is listed
         """
         (tmp_path / "events.xlsx").write_bytes(b"data")
         (tmp_path / "legacy.xls").write_bytes(b"data")

@@ -24,7 +24,7 @@ identical bytes.
 import re
 import unicodedata
 from collections.abc import Callable, Iterable, Sequence
-from datetime import date, datetime, time, timezone
+from datetime import UTC, date, datetime, time
 from io import BytesIO
 from typing import Any
 
@@ -132,7 +132,7 @@ def column_names(
     ]
     key_set = set(keys)
     used: set[str] = set()
-    for heading, base in zip(headings, bases):
+    for heading, base in zip(headings, bases, strict=True):
         if heading in key_set:
             if base in used:
                 raise ValueError(
@@ -141,7 +141,7 @@ def column_names(
             used.add(base)
     natural = set(bases)
     names: list[str] = []
-    for heading, base in zip(headings, bases):
+    for heading, base in zip(headings, bases, strict=True):
         name = base
         if heading not in key_set:
             number = 2
@@ -184,7 +184,8 @@ def to_parquet(
     bad: dict[int, list[tuple[int, Any]]] = {}
 
     for row_number, values in sheet.rows:
-        for index, (value, data_type) in enumerate(zip(values, types)):
+        cells = zip(values, types, strict=True)
+        for index, (value, data_type) in enumerate(cells):
             try:
                 columns[index].append(_coerce(value, data_type))
             except _Unconvertible:
@@ -220,14 +221,14 @@ def to_parquet(
         [
             pa.field(name, ARROW_TYPES[data_type])
             for name, data_type in zip(
-                column_names(sheet.columns, key_columns), types
+                column_names(sheet.columns, key_columns), types, strict=True
             )
         ]
     )
     table = pa.Table.from_arrays(
         [
             pa.array(values, type=field.type)
-            for values, field in zip(columns, schema)
+            for values, field in zip(columns, schema, strict=True)
         ],
         schema=schema,
     )
@@ -260,12 +261,34 @@ def _coerce(value: Any, data_type: str) -> Any:
 
 
 def _to_string(value: Any) -> str:
+    """Convert a cell to text, with dates and times in ISO format.
+
+    Args:
+        value: A non-blank cell value.
+
+    Returns:
+        The text.
+    """
     if isinstance(value, (datetime, date, time)):
         return value.isoformat()
     return str(value)
 
 
 def _to_integer(value: Any) -> int:
+    """Convert a cell to a BigQuery INT64.
+
+    Whole-number floats and numeric text are accepted; True and False
+    are not, though Python counts them as ints.
+
+    Args:
+        value: A non-blank cell value.
+
+    Returns:
+        The integer.
+
+    Raises:
+        _Unconvertible: The value isn't a whole number in INT64 range.
+    """
     if isinstance(value, bool):
         raise _Unconvertible
     if isinstance(value, float) and value.is_integer():
@@ -281,6 +304,17 @@ def _to_integer(value: Any) -> int:
 
 
 def _to_float(value: Any) -> float:
+    """Convert a cell to a BigQuery FLOAT64.
+
+    Args:
+        value: A non-blank cell value.
+
+    Returns:
+        The number.
+
+    Raises:
+        _Unconvertible: The value is a boolean or isn't numeric.
+    """
     if isinstance(value, bool):
         raise _Unconvertible
     if isinstance(value, (int, float)):
@@ -294,6 +328,17 @@ def _to_float(value: Any) -> float:
 
 
 def _to_date(value: Any) -> datetime:
+    """Convert a cell to a timezone-naive datetime in UTC.
+
+    Args:
+        value: A non-blank cell value: a date, a datetime or ISO text.
+
+    Returns:
+        The datetime. Aware values are converted to UTC first.
+
+    Raises:
+        _Unconvertible: The value isn't a date.
+    """
     if isinstance(value, str):
         try:
             value = datetime.fromisoformat(value.strip())
@@ -302,7 +347,7 @@ def _to_date(value: Any) -> datetime:
     if isinstance(value, datetime):
         if value.tzinfo is None:
             return value
-        return value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value.astimezone(UTC).replace(tzinfo=None)
     if isinstance(value, date):
         return datetime.combine(value, time())
     raise _Unconvertible

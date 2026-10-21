@@ -3,11 +3,6 @@
 Runs Pipeline(output_format="raw_json") over the generated hww_*.xlsx
 files with the local adapters, a fake warehouse that records what it
 is given, and contracts like the ones the HWW pipelines use.
-
-RAP Principles:
-- Reproducible: Fixtures are regenerated into a temp folder each run
-- Auditable: Each test name describes what is being verified
-- Transparent: No cloud services; the fake warehouse is explicit
 """
 
 import json

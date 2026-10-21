@@ -8,7 +8,7 @@ end, before reading anything else.
 only doc you need to *start*. [`USAGE_GUIDE.md`](USAGE_GUIDE.md) tells
 you whether `py-common` is the right tool for a new source, and how to
 extend it. [`INGESTION_FRAMEWORK_GUIDE.md`](INGESTION_FRAMEWORK_GUIDE.md)
-is the deep reference — every ingestion term defined, and an audit of
+is the deep reference - every ingestion term defined, and an audit of
 exactly what works today versus what's stubbed. Read this walkthrough
 first; go to the other two once you know what question you're
 actually asking.
@@ -50,7 +50,7 @@ in `tests/unit/test_packaging.py` read that metadata.
 **Why `gcp` is included:** the unit tests for `GCSObjectStore` and
 `BigQueryWarehouse` import `google.cloud` directly (mocking the calls, not the
 import), so with `.[dev]` alone `pytest` fails to collect them. No GCP
-credentials are needed — only the libraries. The optional groups in
+credentials are needed - only the libraries. The optional groups in
 `pyproject.toml` are `dev`, `gcp` and `sharepoint`; there is no `all`
 extra. Add `sharepoint` when you want to use `SharePointSource`
 against a real site (see [Section 3](#3-the-four-building-blocks-in-one-paragraph-each)).
@@ -85,14 +85,14 @@ out entirely, run `pytest tests/ -m "not integration"`.
 
 `py-common` is built around small `Protocol` interfaces in
 `src/py_common/ports.py`, so the core pipeline never imports a cloud
-SDK directly. This section is deliberately short — for the full
+SDK directly. This section is deliberately short - for the full
 feature-by-feature status of each one (what's real, what's stubbed,
 what's missing), see
 [`INGESTION_FRAMEWORK_GUIDE.md`, Section 5](INGESTION_FRAMEWORK_GUIDE.md#5-feature-by-feature-status).
 
 - **`Source`** (`ports.py`) discovers what files exist and downloads
   one. `LocalSource` (`adapters/local.py`) implements it for a
-  folder — this is what you'll use below. `SharePointSource`
+  folder - this is what you'll use below. `SharePointSource`
   (`adapters/sharepoint.py`) implements it for a SharePoint folder
   via Microsoft Graph. It is tested against mocked Graph responses
   and needs a token provider (authentication) before it can reach a
@@ -113,7 +113,7 @@ what's missing), see
   into a staging table, checks the row count, then `MERGE`s into the
   final table on the `key_columns` you pass it (normally
   `contract.key_columns`), or appends if you pass none. **There is no
-  local, in-memory `Warehouse` in this repository** — you'll write a
+  local, in-memory `Warehouse` in this repository** - you'll write a
   tiny fake yourself in [Section 5](#5-wire-your-first-pipeline),
   which is also the easiest way to learn the protocol.
 
@@ -166,7 +166,7 @@ Expect:
 py_common.errors.ContractError: events_missing_column.xlsx [Events]: Missing column 'attendees'
 ```
 
-Try it against each of the other five fixtures — the error message
+Try it against each of the other five fixtures - the error message
 always names the exact rule that failed, which is what makes a
 quarantined file something a data owner can act on without reading
 Python.
@@ -181,9 +181,9 @@ other name is rejected before it is parsed (see
 
 There's no `Warehouse` you can plug in without cloud credentials (see
 [Section 3](#3-the-four-building-blocks-in-one-paragraph-each)), so
-write a five-line fake. It's exactly the pattern `CONTRIBUTING.md`'s
-"Protocols vs Implementation" section describes: a class satisfies a
-`Protocol` by having the right methods, no inheritance required.
+write a five-line fake. A class satisfies a `Protocol` by having the
+right methods, with no inheritance required (`CONTRIBUTING.md`, "A
+new adapter").
 
 ```python
 from pathlib import Path
@@ -324,7 +324,7 @@ missing, a real warehouse's `load()` finds the upload in its own
 audit table and returns `False`, and the file is still `skipped`.
 Saving the file again (a new version) loads it again. The ten
 quarantined files, by contrast, come back `quarantined` again, every
-time — a marker is only written once an upload loads, so a file that
+time - a marker is only written once an upload loads, so a file that
 fails validation is
 re-read and re-validated on every run until it's fixed or removed from
 the source. This is deliberate (see `DECISIONS_en.md`, "Validation
@@ -373,10 +373,10 @@ README, "SharePoint source").
 
 ## 8. Next steps
 
-- **Define a contract for your real data**, not the `Events` sample —
+- **Define a contract for your real data**, not the `Events` sample - 
   copy the shape in [Section 4](#4-validate-one-file-directly), one
   `Column` per header your source actually produces.
-- **Try it against real GCS and BigQuery** — `scripts/demo.py` runs
+- **Try it against real GCS and BigQuery**: `scripts/demo.py` runs
   the fixtures through `GCSObjectStore` and `BigQueryWarehouse` in a
   development project; read its header for the environment variables
   it needs first. It writes to real cloud resources. For the raw JSON
@@ -384,12 +384,12 @@ README, "SharePoint source").
   datasets, job and alerts.
 - **Decide if `py-common` is the right fit for your new source at
   all**, and how to add one if it needs an adapter that doesn't exist
-  yet (a database, an API, a different file share) — see
+  yet (a database, an API, a different file share) - see
   [`USAGE_GUIDE.md`](USAGE_GUIDE.md).
 - **Understand exactly what's real versus stubbed** before you build
-  on a specific adapter — the feature-by-feature table in
+  on a specific adapter - the feature-by-feature table in
   [`INGESTION_FRAMEWORK_GUIDE.md`, Section 5](INGESTION_FRAMEWORK_GUIDE.md#5-feature-by-feature-status)
   is the source of truth.
 - **Follow the TDD/PR workflow** in `CONTRIBUTING.md` once you're
-  ready to add code rather than just run it — write the failing test
+  ready to add code rather than just run it - write the failing test
   first, then the smallest change that passes it.

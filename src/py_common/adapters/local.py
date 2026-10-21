@@ -9,9 +9,9 @@ docs/GETTING_STARTED.md shows a small in-memory fake.
 
 import logging
 import os
+from collections.abc import Generator, Iterable
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Generator, Iterable
 
 from py_common.errors import (
     NotFound,

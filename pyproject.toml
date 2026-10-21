@@ -5,16 +5,16 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "py-common"
 version = "0.2.0"
-description = "Shared ingestion library for Excel → Cloud workflows"
+description = "Shared ingestion library for Excel to cloud workflows"
 readme = "README.md"
 license = {text = "MIT"}
 authors = [{name = "Public Health Wales", email = "eoinvondy@gmail.com"}]
 requires-python = ">=3.11"
 # Upper bounds stop a fresh install pulling in a major version the
-# code was never tested against (review finding M14). Lower bounds
-# exclude releases with known advisories (pip-audit; REVIEW_.md M3).
-# defusedxml: openpyxl only guards against XML entity attacks in
-# uploaded workbooks when it is installed (REVIEW_.md M2).
+# code was never tested against. Lower bounds exclude releases with
+# known advisories (pip-audit). defusedxml: openpyxl only guards
+# against XML entity attacks in uploaded workbooks when it is
+# installed.
 dependencies = [
     "openpyxl>=3.1,<4",
     "pyyaml>=6.0,<7",
@@ -67,9 +67,28 @@ target-version = ["py311"]
 
 [tool.ruff]
 line-length = 79
+target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "W"]
+# The same rules as the projects that use py-common.
+select = [
+    "E", "W",   # pycodestyle (PEP 8)
+    "F",        # pyflakes: unused names, undefined names
+    "I",        # import order
+    "N",        # PEP 8 naming
+    "D",        # docstrings
+    "UP",       # modern syntax for the target Python version
+    "B",        # likely bugs (mutable defaults, closures in loops, ...)
+]
+# The exception names (NotFound, RunFailed, ...) are public API that
+# callers catch by name, so they keep their names without "Error".
+ignore = ["N818"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.isort]
+known-first-party = ["py_common"]
 
 [tool.mypy]
 python_version = "3.11"
@@ -88,9 +107,9 @@ follow_imports = "skip"
 ignore_missing_imports = true
 
 # The Google Cloud client libraries (and google-crc32c) ship without
-# type information, so mypy --strict would stop at the import line
-# (review finding M14). "google" itself is listed for environments
-# without them, such as the pre-commit hook's (REVIEW_.md L7).
+# type information, so mypy --strict would stop at the import line.
+# "google" itself is listed for environments without them, such as
+# the pre-commit hook's.
 [[tool.mypy.overrides]]
 module = [
     "google",

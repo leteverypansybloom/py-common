@@ -179,7 +179,7 @@ class TestToNdjson:
         assert list(_lines(data)[0]["payload"]) == ["z", "a", "m"]
 
     def test_non_ascii_text_is_kept_readable(self, item):
-        """Welsh text is written as UTF-8, not \\u escapes.
+        """Welsh text is written as UTF-8, not as escaped code points.
 
         Args:
             item: SourceItem fixture.

@@ -16,7 +16,7 @@ import logging
 import uuid
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from time import perf_counter
 from typing import Any, Literal
 
@@ -759,7 +759,7 @@ class Pipeline:
             result: Processing result to record.
         """
         record = AuditRecord(
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
             item_identity=result.item.identity,
             filename=result.item.name,
             version=result.item.version,

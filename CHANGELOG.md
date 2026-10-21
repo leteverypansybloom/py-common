@@ -6,16 +6,26 @@ All notable changes to py-common. The supported API is what
 [semantic versioning](https://semver.org/): while the major version
 is 0, a minor release (0.x.0) may break that API, and says how below.
 
-## 0.2.0 — 2026-10-15
+## Unreleased
 
-Implements the code review in `REVIEW.md`. The aim: a file is never
-loaded into BigQuery twice, whatever fails and wherever it fails.
+### Fixed
 
-The review documents (`REVIEW.md`, `REVIEW_.md` and an external
-review) were removed from the repository once their findings were
-dealt with. The finding IDs in comments and commit messages (H1, M4,
-L7, ...) refer to them, and git still has them, e.g. `git show
-6378a43:REVIEW_.md`.
+- `scripts/gcp_auth.py` looked for the gcloud credentials file
+  directly under `%APPDATA%` on Windows; gcloud keeps it in
+  `%APPDATA%\gcloud`.
+
+### Tooling
+
+- Ruff checks the same rules as the projects that use py-common:
+  E, W, F, I, N, D (Google docstring convention), UP and B. Every
+  function, test included, has a Google-style docstring.
+- CI runs `tests/scripts/` again: its tests no longer depend on
+  faking `os.name`, which Python refuses on Linux.
+
+## 0.2.0 - 2026-10-15
+
+The aim of this release: a file is never loaded into BigQuery twice,
+whatever fails and wherever it fails.
 
 ### Breaking
 
