@@ -6,7 +6,25 @@ All notable changes to py-common. The supported API is what
 [semantic versioning](https://semver.org/): while the major version
 is 0, a minor release (0.x.0) may break that API, and says how below.
 
-## Unreleased
+## 0.3.0 - 2026-10-24
+
+The raw JSON route is the only load route.
+
+### Breaking
+
+- **`BigQueryWarehouse` is removed**, with `py_common.parquet` and
+  `py_common.adapters.bigquery`. Load into raw tables with
+  `RawJsonWarehouse` (`py_common.adapters.bigquery_raw`) instead.
+- **`Pipeline.output_format` is removed.** A pipeline always gives
+  its warehouse every configured worksheet as newline-delimited JSON;
+  drop the `output_format=` argument.
+- **`Contract.key_columns` is removed.** Raw tables keep every row of
+  every upload; deduplication belongs in Dataform. A column's own
+  `unique` flag still applies.
+- **pyarrow is no longer a dependency.** Projects that use it
+  directly must declare it themselves.
+- Processed copies are always
+  `processed/{warehouse}/{identity}/{checksum}/{version}/{digest}/{name}.ndjson`.
 
 ### Fixed
 
@@ -16,6 +34,8 @@ is 0, a minor release (0.x.0) may break that API, and says how below.
 
 ### Tooling
 
+- The pre-commit Ruff hook uses the rules in `pyproject.toml`, the
+  same as CI, instead of its own shorter list.
 - Ruff checks the same rules as the projects that use py-common:
   E, W, F, I, N, D (Google docstring convention), UP and B. Every
   function, test included, has a Google-style docstring.

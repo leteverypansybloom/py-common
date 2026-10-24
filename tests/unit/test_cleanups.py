@@ -6,9 +6,8 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, patch
 
-from py_common.adapters.bigquery import BigQueryWarehouse
 from py_common.adapters.bigquery_raw import RawJsonWarehouse
 from py_common.adapters.gcs import GCSObjectStore, GCSSource
 from py_common.adapters.local import LocalSource
@@ -90,30 +89,6 @@ class TestRawJsonValues:
         payload = json.loads(data)["payload"]
         assert payload == {"a": 1.25, "b": 7}
         assert isinstance(payload["b"], int)
-
-
-class TestTypedRowCount:
-    """The staged row count comes from the load job, not COUNT(*)."""
-
-    def test_no_count_query_and_mismatch_still_detected(self) -> None:
-        """No COUNT(*) is run, and a short load is still caught."""
-        client = MagicMock()
-        with patch("py_common.adapters.bigquery.bigquery.Client") as cls:
-            cls.return_value = client
-            warehouse = BigQueryWarehouse("p", "d", "t")
-        client.load_table_from_file.return_value = Mock(
-            job_id="load-1", output_rows=3
-        )
-
-        try:
-            warehouse.load("k", "c" * 64, b"pq", 2, ITEM)
-        except ValueError as e:
-            assert "expected 2, got 3" in str(e)
-        else:
-            raise AssertionError("row count mismatch not raised")
-        assert not any(
-            "COUNT(*) as cnt" in c.args[0] for c in client.query.call_args_list
-        )
 
 
 class TestBucketPrefix:

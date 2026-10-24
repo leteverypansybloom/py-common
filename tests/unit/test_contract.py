@@ -4,24 +4,19 @@ import io
 from datetime import datetime
 from io import BytesIO
 from typing import Any
-from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 from openpyxl import Workbook, load_workbook
 
-from py_common.adapters.bigquery import BigQueryWarehouse
 from py_common.contract import (
     Column,
     Contract,
-    SheetRows,
     Worksheet,
     read_sheet,
 )
 from py_common.errors import ContractError, ValidationError
 from py_common.fixtures import make_fixtures
-from py_common.model import Outcome, SourceItem
-from py_common.parquet import to_parquet
-from py_common.pipeline import Pipeline
+from py_common.model import SourceItem
 
 
 def _build_workbook(
@@ -915,55 +910,6 @@ def _book(rows: list[list[Any]]) -> bytes:
     return buffer.getvalue()
 
 
-class TestReservedColumn:
-    """A source `_loaded_at` column quarantines, not retries."""
-
-    def _warehouse(self) -> BigQueryWarehouse:
-        """Build a warehouse whose final table has a _loaded_at column.
-
-        Returns:
-            The warehouse.
-        """
-        client = MagicMock()
-        with patch("py_common.adapters.bigquery.bigquery.Client") as cls:
-            cls.return_value = client
-            warehouse = BigQueryWarehouse("p", "d", "t")
-        from types import SimpleNamespace
-
-        client.get_table.return_value = SimpleNamespace(
-            schema=[
-                SimpleNamespace(name="_loaded_at", field_type="STRING"),
-            ]
-        )
-        client.load_table_from_file.return_value = Mock(
-            job_id="l", output_rows=1
-        )
-        return warehouse
-
-    def test_raises_contract_error(self) -> None:
-        """The warehouse names the clashing column in a ContractError."""
-        with pytest.raises(ContractError, match="_loaded_at"):
-            self._warehouse().load("k", "c" * 64, b"pq", 1, ITEM)
-
-    def test_pipeline_quarantines_the_file(self) -> None:
-        """The pipeline quarantines the file rather than retrying it."""
-        objects: dict[str, bytes] = {}
-        store = MagicMock()
-        store.get.side_effect = objects.get
-        store.put.side_effect = objects.__setitem__
-        source = Mock()
-        source.download.return_value = _book([["_loaded_at"], ["x"]])
-        contract = Contract(
-            worksheets=[Worksheet("Events", [Column("_loaded_at", "string")])]
-        )
-        pipeline = Pipeline(source, store, self._warehouse(), contract)
-
-        result = pipeline.process(ITEM)
-
-        assert result.outcome == Outcome.QUARANTINED
-        assert any(k.startswith("quarantine/") for k in objects)
-
-
 class TestNoValuesInMessages:
     """Errors and warnings name rows and columns, not values."""
 
@@ -976,21 +922,13 @@ class TestNoValuesInMessages:
             contract.read(_book([["n"], [SECRET]]), "f.xlsx")
         assert SECRET not in str(info.value)
 
-    def test_duplicate_key_message_has_no_value(self) -> None:
-        """A duplicate key names the row, not the key value."""
+    def test_duplicate_value_message_has_no_value(self) -> None:
+        """A repeated unique value names the row, not the value."""
         contract = Contract(
-            key_columns=["id"],
-            worksheets=[Worksheet("Events", [Column("id", "string")])],
+            worksheets=[
+                Worksheet("Events", [Column("id", "string", unique=True)])
+            ],
         )
         with pytest.raises(ValidationError, match="Row 3") as info:
             contract.read(_book([["id"], [SECRET], [SECRET]]), "f.xlsx")
         assert SECRET not in str(info.value)
-
-    def test_conversion_warning_has_no_value(self) -> None:
-        """A conversion warning names the row, not the value."""
-        warnings: list[str] = []
-        sheet = Worksheet(
-            "Events", [Column("n", "integer")], on_mismatch="warn"
-        )
-        to_parquet(SheetRows(["n"], [(2, (SECRET,))]), sheet, "f", warnings)
-        assert warnings and SECRET not in warnings[0]

@@ -37,12 +37,6 @@ class TestDependencyFloors:
         """Openpyxl only guards against XML entity attacks with it."""
         assert _requirement("defusedxml")
 
-    def test_pyarrow_floor_excludes_advisories(self) -> None:
-        """Pyarrow 23.0.0, which has advisories, can't be installed."""
-        spec = _requirement("pyarrow").specifier
-        assert not spec.contains("23.0.0")
-        assert spec.contains("23.0.1")
-
     @pytest.mark.parametrize("extra", ["sharepoint", "dev"])
     def test_requests_floor_excludes_advisories(self, extra: str) -> None:
         """Requests 2.32.4, which has advisories, can't be installed."""

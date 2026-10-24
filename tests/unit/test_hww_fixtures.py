@@ -1,6 +1,6 @@
-"""End-to-end tests of the raw JSON route on the HWW-style fixtures.
+"""End-to-end tests of the pipeline on the HWW-style fixtures.
 
-Runs Pipeline(output_format="raw_json") over the generated hww_*.xlsx
+Runs Pipeline over the generated hww_*.xlsx
 files with the local adapters, a fake warehouse that records what it
 is given, and contracts like the ones the HWW pipelines use.
 """
@@ -83,7 +83,6 @@ def _process(
         LocalObjectStore(store_dir),
         warehouse,
         contract,
-        output_format="raw_json",
     )
     return pipeline.process(item), warehouse
 

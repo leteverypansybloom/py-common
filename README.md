@@ -4,8 +4,8 @@ Reusable Python library for Excel-to-cloud workflows. Handles file discovery, va
 
 **Status**: Early development. The core pipeline, local adapters, and
 the GCS, BigQuery and SharePoint adapters are built and unit-tested
-against mocks. There are two load routes: typed tables merged on key
-columns, and raw JSON tables for cleaning in Dataform. The SharePoint
+against mocks. Workbooks load into raw JSON tables in BigQuery, for
+cleaning and typing in Dataform. The SharePoint
 adapter has not yet been run against a real site: it waits on IT's
 decision on authentication. See [Adapter status](#adapter-status).
 
@@ -25,43 +25,22 @@ Validate (against contract; quarantine or warn)
     |
 Store Raw (immutable copy)
     |
-Convert (Parquet, or JSON rows for raw tables)
+Convert (one JSON row per worksheet row)
     |
 Store Processed (immutable copy)
     |
-Load Warehouse (staging, then merge or insert)
+Load Warehouse (staging, then insert into raw tables)
     |
 Audit (record every attempt)
 ```
 
-Two load routes share the steps above:
-
-- **Typed** (`output_format="parquet"`, the default, with
-  `BigQueryWarehouse`): the primary worksheet is merged into a typed
-  table on the contract's key columns.
-- **Raw JSON** (`output_format="raw_json"`, with `RawJsonWarehouse`):
-  every configured worksheet is inserted into its own raw table, one
-  JSON payload per row, for cleaning in Dataform. See
-  [`docs/RAW_TABLE_LAYOUT.md`](docs/RAW_TABLE_LAYOUT.md) and
-  [`docs/GCP_SETUP.md`](docs/GCP_SETUP.md).
-
-**Typed column names.** BigQuery column names may only use letters,
-digits and underscores, can't start with a digit, ignore case, and
-are at most 300 characters. So the typed route names each column
-after its heading by these rules (`py_common.parquet.column_name()`):
-
-- accents are dropped, and `%`, `&`, `#` and `+` are spelled out
-  (`percent`, `and`, `number`, `plus`);
-- any other run of characters that aren't letters or digits becomes
-  one `_`, and letters are lower case;
-- a name starting with a digit gets `col_` in front; a heading with
-  no letters or digits is named by its position (`col_3`);
-- names that still clash get `_2`, `_3`, ... (merge keys keep theirs).
-
-For example, `Date of Enquiry` → `date_of_enquiry`, `% complete` →
-`percent_complete` and `2024 total` → `col_2024_total`. Contracts and
-`key_columns` still use the headings as written, and the raw route's
-JSON keys are not changed.
+Every configured worksheet is inserted into its own raw table
+(`RawJsonWarehouse`), one JSON payload per row, with the file,
+generation, sheet and row number it came from. Rows are only ever
+inserted; Dataform picks the latest upload and does the cleaning and
+typing. See [`docs/RAW_TABLE_LAYOUT.md`](docs/RAW_TABLE_LAYOUT.md)
+and [`docs/GCP_SETUP.md`](docs/GCP_SETUP.md). Why raw JSON:
+[`docs/RAW_JSON_VS_CONTRACT_VALIDATION.md`](docs/RAW_JSON_VS_CONTRACT_VALIDATION.md).
 
 ## Quick Start
 
@@ -119,8 +98,7 @@ described in
   version (GCS generation, SharePoint eTag, local modification time),
   checked per destination table; a new upload always loads
 - Records errors and refuses inconsistent configuration when built
-  (warehouse keys that differ from the contract's, a raw table
-  mapping that doesn't match the contract's sheets)
+  (a raw table mapping that doesn't match the contract's sheets)
 - Returns list of Result objects (one per file), with any warnings
 
 ### Concurrency
@@ -223,7 +201,7 @@ happens to one:
 | `IndeterminateCommitError` | Unknown whether the warehouse committed | `FAILED`: retried by the runner |
 | Anything else | Unexpected | `FAILED` |
 
-The BigQuery adapters raise only these types: a job BigQuery reports
+The BigQuery adapter raises only these types: a job BigQuery reports
 as failed is a `ServiceError` naming the job ID, and if waiting for
 the commit job fails (timeout, dropped connection) the job is re-read
 by ID before anything is reported. The full hierarchy is in
@@ -246,7 +224,6 @@ See [`CONTRIBUTING.md`, Checks](CONTRIBUTING.md#checks).
 | `LocalObjectStore` | ObjectStore | Built, unit-tested |
 | `GCSSource` | Source | Built, unit-tested against mocks; reads a landing folder, versions by object generation |
 | `GCSObjectStore` | ObjectStore | Built, unit-tested against mocks; real `lock()` |
-| `BigQueryWarehouse` | Warehouse | Built, unit-tested against mocks; `MERGE` on `key_columns` |
 | `RawJsonWarehouse` | Warehouse | Built, unit-tested against mocks; one raw JSON table per sheet, not yet run live |
 | `SharePointSource` | Source | Built, unit-tested against mocked Graph; not yet run live (auth pending IT) |
 | Secret Manager | SecretStore | Not started |
@@ -258,7 +235,7 @@ error hierarchy.
 
 ## What's Next
 
-- First live run of the raw JSON route ([`docs/GCP_SETUP.md`](docs/GCP_SETUP.md))
+- First live run of `RawJsonWarehouse` ([`docs/GCP_SETUP.md`](docs/GCP_SETUP.md))
 - SharePoint authentication (token provider), once IT approves a flow
 - Live SharePoint test: one file, then the full Cloud Run job
 - Secret Manager adapter
@@ -275,7 +252,6 @@ Core:
 - defusedxml >= 0.7.1, < 1: Lets openpyxl refuse XML entity attacks
   in uploaded workbooks
 - pyyaml >= 6.0, < 7: YAML configuration
-- pyarrow >= 23.0.1, < 27: Parquet output, typed from the contract
 
 Every runtime dependency has an upper bound, so a fresh install
 never picks up a major version the code hasn't been tested against,
@@ -297,7 +273,7 @@ Optional extras (`pip install -e ".[gcp]"` etc.):
 library or the test suite:
 
 - `scripts/demo.py`: runs the fixtures through `GCSObjectStore` and
-  `BigQueryWarehouse` against a real development project. Writes to
+  `RawJsonWarehouse` against a real development project. Writes to
   real cloud resources.
 - `scripts/check_gcp_auth.py`: checks your local GCP credentials can
   reach BigQuery and Cloud Storage.

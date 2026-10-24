@@ -1,15 +1,14 @@
-"""End-to-end test: Parquet to GCS to BigQuery."""
+"""End-to-end test: workbook rows to GCS, then into a raw table."""
 
 import os
-from io import BytesIO
 
-import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
 
-from py_common.adapters.bigquery import BigQueryWarehouse
+from py_common.adapters.bigquery_raw import RawJsonWarehouse
 from py_common.adapters.gcs import GCSObjectStore
-from py_common.model import SourceItem
+from py_common.contract import SheetRows
+from py_common.model import SourceItem, digest
+from py_common.raw import to_ndjson
 
 HAS_CREDENTIALS = "GOOGLE_APPLICATION_CREDENTIALS" in os.environ
 
@@ -17,62 +16,52 @@ HAS_CREDENTIALS = "GOOGLE_APPLICATION_CREDENTIALS" in os.environ
 @pytest.mark.integration
 @pytest.mark.skipif(not HAS_CREDENTIALS, reason="No GCP credentials")
 class TestEndToEndWorkflow:
-    """Full pipeline: create data, store it in GCS, load BigQuery."""
+    """Store NDJSON in GCS, load it into BigQuery, read the audit."""
 
-    def test_parquet_to_bigquery(self):
-        """Create test Parquet, upload to GCS, load to BigQuery."""
-        # Step 1: Create test Parquet in memory
-        data = {
-            "event_id": ["EVT001", "EVT002"],
-            "employer_id": ["EMP001", "EMP002"],
-            "attendees": [10, 20],
-            # No _loaded_at: BigQueryWarehouse sets it at commit.
+    def test_ndjson_to_bigquery(self) -> None:
+        """Store test rows in GCS and load them into a raw table."""
+        item = SourceItem("integration_events.xlsx", "test/events", "1", 0)
+        sheets = {
+            "Events": SheetRows(
+                ["event_id", "attendees"],
+                [(2, ("EVT001", 10)), (3, ("EVT002", 20))],
+            )
         }
-        table = pa.table(data)
+        checksum = digest(b"integration_events")
+        data, rows = to_ndjson(sheets, item, checksum)
 
-        # Write to BytesIO (memory, not disk)
-        buf = BytesIO()
-        pq.write_table(table, buf)
-        parquet_bytes = buf.getvalue()
-
-        # Step 2: Upload to GCS
-        project = os.getenv("GCP_PROJECT_ID")
-        bucket = os.getenv("GCS_RAW_BUCKET")
+        project = os.environ["GCP_PROJECT_ID"]
+        bucket = os.environ["GCS_RAW_BUCKET"]
         gcs = GCSObjectStore(project, bucket)
+        key = "poc_ingestion_raw/test/integration_events.ndjson"
+        gcs.put(key, data)
+        assert gcs.get(key) == data
 
-        key = "poc_ingestion_raw/test/integration_events.parquet"
-        checksum = "test-checksum-123"
-        gcs.put(key, parquet_bytes)
-
-        # Verify upload
-        retrieved = gcs.get(key)
-        assert retrieved == parquet_bytes
-
-        # Step 3: Load to BigQuery
-        dataset = os.getenv("BQ_DATASET")
-        bq = BigQueryWarehouse(project, dataset, "events_final")
-
-        item = SourceItem("integration_events.xlsx", key, "1", 0)
-        bq.load(
-            key=key, checksum=checksum, data=parquet_bytes, rows=2, item=item
+        dataset = os.environ["BQ_DATASET"]
+        warehouse = RawJsonWarehouse(
+            project, dataset, {"Events": "events_raw"}
+        )
+        load_key = f"{item.identity}_{checksum[:8]}"
+        warehouse.load(
+            key=load_key, checksum=checksum, data=data, rows=rows, item=item
         )
 
-        # Step 4: Query audit table to verify
-        query = f"""
-        SELECT * FROM `{project}.{dataset}.audit`
-        WHERE filename = @filename
-        """
         from google.cloud import bigquery
 
         client = bigquery.Client(project=project)
         job_config = bigquery.QueryJobConfig(
             query_parameters=[
-                bigquery.ScalarQueryParameter("filename", "STRING", key)
+                bigquery.ScalarQueryParameter("filename", "STRING", load_key)
             ]
         )
-        result = client.query(query, job_config=job_config)
-        rows = list(result)
+        found = list(
+            client.query(
+                f"SELECT outcome, row_count FROM `{project}.{dataset}.audit` "
+                "WHERE filename = @filename",
+                job_config=job_config,
+            )
+        )
 
-        assert len(rows) > 0
-        assert rows[0][0] == key  # filename
-        assert rows[0][3] == "LOADED"  # outcome
+        assert [(r["outcome"], r["row_count"]) for r in found] == [
+            ("LOADED", 2)
+        ]

@@ -1,15 +1,15 @@
 """Google BigQuery adapter for raw JSON tables.
 
-Implements the Warehouse protocol for the raw JSON route: it loads
-the newline-delimited JSON written by py_common.raw.to_ndjson() into
+Implements the Warehouse protocol: it loads the newline-delimited
+JSON written by py_common.raw.to_ndjson() into
 one raw table per worksheet. Each row keeps where it came from (file,
 generation, sheet, row number, checksum) and its values as a JSON
 payload. Cleaning and typing happen later, in the transformation
 layer (Dataform).
 
 All of one file's rows commit together, across every sheet, along
-with the audit record, in a single BigQuery script transaction, the
-same shape as BigQueryWarehouse.
+with the audit record, in a single BigQuery script transaction
+(see _bq_jobs.commit_script()).
 """
 
 import json
@@ -63,14 +63,13 @@ CLUSTERING_FIELDS = ["source_file", "source_generation"]
 class RawJsonWarehouse:
     """Transactional loading of raw JSON rows, one table per sheet.
 
-    Implements the Warehouse protocol. Use with
-    Pipeline(output_format="raw_json").
+    Implements the Warehouse protocol.
 
     Raw tables are created if missing, partitioned by the day of
     ingested_at. Rows are only ever inserted: every load of every
     file version is kept, and the transformation layer picks the
     latest version (see docs/RAW_TABLE_LAYOUT.md). The audit table
-    must already exist, as for BigQueryWarehouse.
+    must already exist (docs/GCP_SETUP.md).
 
     Attributes:
         project_id (str): GCP project ID.
@@ -151,7 +150,7 @@ class RawJsonWarehouse:
            roll back everything. Checking per table means adding a
            table to this warehouse later loads only the new table.
 
-        The raw route dedups on the source file's identity and
+        Loads are deduplicated on the source file's identity and
         version (the pipeline's load key starts with the identity),
         not its content: re-uploading earlier content as a new
         generation must load again, or "latest generation" in the

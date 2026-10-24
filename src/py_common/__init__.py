@@ -16,7 +16,7 @@ py_common.logging. Anything else (e.g. AuditRecord, SecretStore,
 names starting with "_") may change in any release.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 from py_common.contract import Column, Contract, Worksheet
 from py_common.errors import (

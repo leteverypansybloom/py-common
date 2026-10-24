@@ -9,27 +9,19 @@ What it checks (see docs/SMOKE_TEST.md):
 
   0. The audit table has the 0.2.0 columns (destination,
      source_version); with --migrate it adds them.
-  Typed route (BigQueryWarehouse, MERGE into events_final):
-  1. A valid file loads 2 rows; raw/ and processed/ copies exist;
-     the audit row names the destination and source version.
+  RawJsonWarehouse, inserting into smoke_events_raw:
+  1. A valid file loads 2 raw rows; raw/ and processed/ copies
+     exist; the audit row names the destination and source version.
   2. A rerun skips it (store marker).
   3. With the store markers deleted, a rerun still skips it: the
      warehouse's own audit check refuses a second load.
   4. An invalid file is quarantined and loads nothing.
-  Raw JSON route (RawJsonWarehouse, insert into smoke_events_raw):
-  5. The valid file loads 2 raw rows.
-  6. With the markers deleted, a rerun inserts nothing.
-  7. The same bytes as a new version load again (a revert must
+  5. The same bytes as a new version load again (a revert must
      become the latest generation).
-  8. No per-load staging table is left behind.
-  Typed route, a later upload of the same file:
-  9. One row changed and one row removed: the change is applied and
-     the removed row is marked deleted (_deleted_at), not dropped.
-  10. The original file uploaded again (a restore): it loads, its
-      values win, and the removed row is current again.
-  11. With Contract.file_name set, a copy under another name is
-      quarantined; the file under the agreed name is skipped as
-      already loaded.
+  6. No per-load staging table is left behind.
+  7. With Contract.file_name set, a copy under another name is
+     quarantined; the file under the agreed name is skipped as
+     already loaded.
 
 In PowerShell, first confirm these are set:
     $env:GCP_PROJECT_ID
@@ -55,7 +47,6 @@ from openpyxl import load_workbook
 
 from py_common import Column, Contract, Outcome, Pipeline, Worksheet
 from py_common.adapters import LocalSource
-from py_common.adapters.bigquery import BigQueryWarehouse
 from py_common.adapters.bigquery_raw import RawJsonWarehouse
 from py_common.adapters.gcs import GCSObjectStore
 from py_common.logging import configure_json_logging
@@ -65,7 +56,6 @@ PROJECT = os.environ["GCP_PROJECT_ID"]
 BUCKET = os.environ["GCS_RAW_BUCKET"].removeprefix("gs://")
 DATASET = os.environ["BQ_DATASET"]
 FIXTURES = Path(__file__).resolve().parents[1] / "tests/data/fixtures"
-TYPED_TABLE = "events_final"
 RAW_TABLE = "smoke_events_raw"
 NEW_AUDIT_COLUMNS = ("destination", "source_version")
 
@@ -215,7 +205,6 @@ def main() -> None:
     checksum = digest(valid_file.read_bytes())
 
     contract = Contract(
-        key_columns=["event_id"],
         worksheets=[
             Worksheet(
                 name="Events",
@@ -228,17 +217,15 @@ def main() -> None:
         ],
     )
     store = GCSObjectStore(PROJECT, BUCKET)
-    typed = BigQueryWarehouse(
-        PROJECT,
-        DATASET,
-        TYPED_TABLE,
-        key_columns=contract.key_columns,
-        mark_deleted_rows=True,
+    raw = RawJsonWarehouse(PROJECT, DATASET, {"Events": RAW_TABLE})
+    pipeline = Pipeline(LocalSource(input_dir), store, raw, contract)
+    raw_rows = (
+        f"SELECT COUNT(*) FROM `{PROJECT}.{DATASET}.{RAW_TABLE}` "
+        f"WHERE checksum = '{checksum}'"
     )
-    typed_pipeline = Pipeline(LocalSource(input_dir), store, typed, contract)
 
-    print("\n1. Typed route: valid file")
-    results = run(typed_pipeline, "run 1")
+    print("\n1. Valid file")
+    results = run(pipeline, "run 1")
     check(results[0].outcome == Outcome.LOADED, "valid file LOADED")
     check(results[0].rows_processed == 2, "2 rows")
 
@@ -250,20 +237,11 @@ def main() -> None:
     check(bucket.blob(f"raw/{version_key}").exists(), "raw/ copy exists")
     processed_key = results[0].processed_key
     check(
-        processed_key.startswith(f"processed/{typed.identity}/")
+        processed_key.startswith(f"processed/{raw.identity}/")
         and bucket.blob(processed_key).exists(),
-        "processed/ Parquet exists",
+        "processed/ NDJSON exists",
     )
-    rows = list(
-        client.query(
-            f"SELECT event_id, attendees, _loaded_at "
-            f"FROM `{PROJECT}.{DATASET}.{TYPED_TABLE}` "
-            f"WHERE event_id LIKE 'DEMO-{run_id}%' ORDER BY event_id"
-        ).result()
-    )
-    for row in rows:
-        print(f"  {dict(row.items())}")
-    check(len(rows) == 2, "2 rows in BigQuery")
+    check(count(client, raw_rows) == 2, "2 raw rows in BigQuery")
     audit = list(
         client.query(
             f"SELECT destination, source_version FROM "
@@ -272,35 +250,27 @@ def main() -> None:
         ).result()
     )
     check(
-        len(audit) == 1 and audit[0]["destination"] == typed.identity,
+        len(audit) == 1
+        and audit[0]["destination"] == f"{PROJECT}.{DATASET}.{RAW_TABLE}",
         "one audit row naming the destination",
     )
 
-    print("\n2. Typed route: rerun unchanged file")
-    results = run(typed_pipeline, "run 2")
+    print("\n2. Rerun unchanged file")
+    results = run(pipeline, "run 2")
     check(results[0].outcome == Outcome.SKIPPED, "SKIPPED by store marker")
 
-    print("\n3. Typed route: store markers lost, rerun")
-    print(f"  deleted {delete_markers(bucket, typed.identity)} marker(s)")
-    results = run(typed_pipeline, "run 3")
+    print("\n3. Store markers lost, rerun")
+    print(f"  deleted {delete_markers(bucket, raw.identity)} marker(s)")
+    results = run(pipeline, "run 3")
     check(
         results[0].outcome == Outcome.SKIPPED,
         "SKIPPED by the warehouse's own audit check",
     )
-    check(
-        count(
-            client,
-            f"SELECT COUNT(*) FROM `{PROJECT}.{DATASET}.audit` "
-            f"WHERE checksum = '{checksum}' "
-            f"AND destination = '{typed.identity}'",
-        )
-        == 1,
-        "still exactly one audit row",
-    )
+    check(count(client, raw_rows) == 2, "still 2 raw rows")
 
-    print("\n4. Typed route: invalid file")
+    print("\n4. Invalid file")
     shutil.copy2(FIXTURES / "events_missing_column.xlsx", invalid_file)
-    results = run(typed_pipeline, "run 4")
+    results = run(pipeline, "run 4")
     check(
         outcome_of(results, invalid_file.name) == Outcome.QUARANTINED,
         "invalid file QUARANTINED",
@@ -312,29 +282,10 @@ def main() -> None:
     check(bucket.blob(invalid_key).exists(), "quarantine/ copy exists")
     invalid_file.unlink()
 
-    print("\n5. Raw JSON route: valid file")
-    raw = RawJsonWarehouse(PROJECT, DATASET, {"Events": RAW_TABLE})
-    raw_pipeline = Pipeline(
-        LocalSource(input_dir), store, raw, contract, output_format="raw_json"
-    )
-    raw_rows = (
-        f"SELECT COUNT(*) FROM `{PROJECT}.{DATASET}.{RAW_TABLE}` "
-        f"WHERE checksum = '{checksum}'"
-    )
-    results = run(raw_pipeline, "run 5")
-    check(results[0].outcome == Outcome.LOADED, "valid file LOADED")
-    check(count(client, raw_rows) == 2, "2 raw rows")
-
-    print("\n6. Raw JSON route: store markers lost, rerun")
-    print(f"  deleted {delete_markers(bucket, raw.identity)} marker(s)")
-    results = run(raw_pipeline, "run 6")
-    check(results[0].outcome == Outcome.SKIPPED, "SKIPPED by warehouse")
-    check(count(client, raw_rows) == 2, "still 2 raw rows")
-
-    print("\n7. Raw JSON route: same bytes, new version (a revert)")
+    print("\n5. Same bytes, new version (a revert)")
     stat = valid_file.stat()
     os.utime(valid_file, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000))
-    results = run(raw_pipeline, "run 7")
+    results = run(pipeline, "run 5")
     check(results[0].outcome == Outcome.LOADED, "new version LOADED")
     check(count(client, raw_rows) == 4, "4 raw rows, 2 per version")
     generations = count(
@@ -344,7 +295,7 @@ def main() -> None:
     )
     check(generations == 2, "two distinct source_generation values")
 
-    print("\n8. Staging tables cleaned up")
+    print("\n6. Staging tables cleaned up")
     leftovers = [
         t.table_id
         for t in client.list_tables(f"{PROJECT}.{DATASET}")
@@ -352,51 +303,11 @@ def main() -> None:
     ]
     check(not leftovers, f"no staging tables left ({leftovers or 'none'})")
 
-    def typed_rows() -> dict:
-        """event_id -> (attendees, deleted?) for this run's rows."""
-        return {
-            row["event_id"]: (row["attendees"], row["_deleted_at"] is not None)
-            for row in client.query(
-                f"SELECT event_id, attendees, _deleted_at "
-                f"FROM `{PROJECT}.{DATASET}.{TYPED_TABLE}` "
-                f"WHERE event_id LIKE 'DEMO-{run_id}%'"
-            ).result()
-        }
-
-    first_id, second_id = f"DEMO-{run_id}-001", f"DEMO-{run_id}-002"
-    original = valid_file.read_bytes()
-
-    print("\n9. Typed route: same file, one row changed, one removed")
-    workbook = load_workbook(valid_file)
-    sheet = workbook["Events"]
-    sheet["C2"] = 15
-    sheet.delete_rows(3)
-    workbook.save(valid_file)
-    results = run(typed_pipeline, "run 9")
-    check(results[0].outcome == Outcome.LOADED, "new version LOADED")
-    rows_now = typed_rows()
-    print(f"  {rows_now}")
-    check(rows_now[first_id] == (15, False), "changed row updated")
-    check(rows_now[second_id][1], "removed row marked deleted")
-
-    print("\n10. Typed route: original file uploaded again (a restore)")
-    valid_file.write_bytes(original)
-    stat = valid_file.stat()
-    os.utime(valid_file, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000))
-    results = run(typed_pipeline, "run 10")
-    check(results[0].outcome == Outcome.LOADED, "restore LOADED")
-    rows_now = typed_rows()
-    print(f"  {rows_now}")
-    check(rows_now[first_id] == (10, False), "original value back")
-    check(rows_now[second_id] == (20, False), "removed row current again")
-
-    print("\n11. Typed route: a copy under another name (file_name)")
+    print("\n7. A copy under another name (file_name)")
     named = replace(contract, file_name=valid_file.name)
     misnamed = input_dir / f"copy of {valid_file.name}"
     shutil.copy2(valid_file, misnamed)
-    results = run(
-        Pipeline(LocalSource(input_dir), store, typed, named), "run 11"
-    )
+    results = run(Pipeline(LocalSource(input_dir), store, raw, named), "run 7")
     check(
         outcome_of(results, misnamed.name) == Outcome.QUARANTINED,
         "other name QUARANTINED",

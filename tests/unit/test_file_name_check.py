@@ -1,11 +1,10 @@
 """A contract can require the agreed file name.
 
-A feed is identified by its file name: the raw route's "latest
-upload" and the typed route's deleted-row marking both work per
-name. So an upload under another name (a copy saved as "WAS export
-(1).xlsx", say) would become a second "latest" upload, and duplicate
-the current rows downstream. Contract(file_name=...) quarantines it
-instead, before it is parsed.
+A feed is identified by its file name: the raw tables' "latest
+upload" works per name. So an upload under another name (a copy
+saved as "WAS export (1).xlsx", say) would become a second "latest"
+upload, and duplicate the current rows downstream.
+Contract(file_name=...) quarantines it instead, before it is parsed.
 """
 
 import io

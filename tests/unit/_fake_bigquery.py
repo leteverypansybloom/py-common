@@ -1,15 +1,15 @@
 """A stateful stand-in for google.cloud.bigquery.Client.
 
-Enough of the client for BigQueryWarehouse and RawJsonWarehouse to
-run unmodified: tables, staging loads, and the commit script. The
-script is not executed as SQL, but its parts that carry the
+Enough of the client for RawJsonWarehouse to run unmodified: tables,
+staging loads, and the commit script. The script is not executed as
+SQL, but its parts that carry the
 idempotency semantics are interpreted from the SQL text itself:
 
 - per destination table, the audit columns compared in its
   "already loaded?" check (every `col = @param` in the COUNT
   subquery);
-- each `INSERT INTO target ... FROM staging` / `MERGE INTO target
-  USING staging` moves the staged row count into the target;
+- each `INSERT INTO target ... FROM staging` moves the staged row
+  count into the target;
 - `INSERT INTO audit (cols) VALUES (@params)` records an audit row.
 
 So a test that runs the same file twice against one FakeBigQueryClient
@@ -23,7 +23,6 @@ from io import BytesIO
 from types import SimpleNamespace
 from typing import Any
 
-import pyarrow.parquet as pq
 from google.api_core.exceptions import NotFound
 
 
@@ -158,7 +157,7 @@ class FakeBigQueryClient:
     def load_table_from_file(
         self, file: BytesIO, table_id: str, job_config: Any = None
     ) -> _Job:
-        """Stage Parquet or NDJSON rows into a table.
+        """Stage NDJSON rows into a table.
 
         Args:
             file: The data to load.
@@ -169,13 +168,9 @@ class FakeBigQueryClient:
             A finished load job reporting the rows written.
         """
         data = file.read()
-        if data.startswith(b"PAR1"):
-            parquet = pq.read_table(BytesIO(data))
-            count, columns = parquet.num_rows, parquet.column_names
-        else:
-            lines = [line for line in data.splitlines() if line.strip()]
-            count = len(lines)
-            columns = list(json.loads(lines[0])) if lines else []
+        lines = [line for line in data.splitlines() if line.strip()]
+        count = len(lines)
+        columns = list(json.loads(lines[0])) if lines else []
         self.tables[table_id] = columns
         self.staged[table_id] = count
         return _Job(self._job_id(), output_rows=count)
@@ -196,9 +191,6 @@ class FakeBigQueryClient:
             p.name: p.value
             for p in getattr(job_config, "query_parameters", None) or []
         }
-        if "HAVING" in sql:
-            # Duplicate/NULL merge-key check: staged keys are clean.
-            return _Job(self._job_id(), rows=[])
         if "BEGIN TRANSACTION" not in sql:
             match = re.search(r"COUNT\(\*\).*FROM `([^`]+)`", sql, re.S)
             if match:
@@ -262,8 +254,7 @@ class FakeBigQueryClient:
                 continue
 
             for target, staging in re.findall(
-                r"(?:INSERT INTO|MERGE INTO) `([^`]+)`[^;]*?"
-                r"(?:FROM|USING) `([^`]+)`",
+                r"INSERT INTO `([^`]+)`[^;]*?FROM `([^`]+)`",
                 body,
                 re.S,
             ):

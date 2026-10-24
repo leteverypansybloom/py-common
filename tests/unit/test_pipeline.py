@@ -14,14 +14,12 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, Mock, patch
 
-import pandas as pd
 import pytest
 from _fake_gcs import FakeBucket
 from _memory_store import MemoryStore
 from google.api_core.exceptions import Forbidden
 from openpyxl import Workbook
 
-from py_common.adapters.bigquery import BigQueryWarehouse
 from py_common.adapters.bigquery_raw import RawJsonWarehouse
 from py_common.adapters.gcs import GCSObjectStore
 from py_common.adapters.local import LocalSource
@@ -159,9 +157,8 @@ class TestPipelineProcessWarehouseOutcomes:
     """Exercise process() past validation: conversion and load.
 
     Unlike `pipeline`/`item` above, these fixtures use a real
-    Contract and a real minimal workbook so `_to_parquet`'s
-    worksheet lookup (`contract.worksheets[0].name`) resolves
-    against actual data instead of a Mock.
+    Contract and a real minimal workbook, so conversion reads
+    actual worksheet data instead of a Mock.
     """
 
     @pytest.fixture
@@ -342,6 +339,39 @@ def _workbook(rows: list[tuple[str, int]]) -> bytes:
     return buffer.getvalue()
 
 
+def _loaded(contract: Contract, data: bytes) -> bytes:
+    """Run a workbook through a pipeline and return what it loaded.
+
+    Args:
+        contract: The contract to read it with.
+        data: The workbook's bytes.
+
+    Returns:
+        The NDJSON the warehouse was given.
+    """
+    source = Mock()
+    source.download.return_value = data
+    warehouse = _warehouse()
+    result = Pipeline(source, MemoryStore(), warehouse, contract).process(
+        SourceItem("events.xlsx", "ID1", "v1", 10)
+    )
+    assert result.outcome == Outcome.LOADED, result.errors
+    loaded: bytes = warehouse.load.call_args.kwargs["data"]
+    return loaded
+
+
+def _lines(data: bytes) -> list[dict[str, Any]]:
+    """Parse NDJSON into one dict per row.
+
+    Args:
+        data: The NDJSON bytes.
+
+    Returns:
+        The rows, in order.
+    """
+    return [json.loads(line) for line in data.decode().splitlines()]
+
+
 class TestPipelineStorageKeysAreVersioned:
     """A file edited in place (same identity, new bytes) must load.
 
@@ -433,7 +463,7 @@ class TestPipelineStorageKeysAreVersioned:
     def test_processed_key_includes_checksum(
         self, store: MemoryStore, contract: Contract
     ) -> None:
-        """Parquet is stored per content version and upload too.
+        """NDJSON is stored per content version and upload too.
 
         Args:
             store: In-memory store.
@@ -445,7 +475,7 @@ class TestPipelineStorageKeysAreVersioned:
 
         prefix = f"processed/project.dataset.events/ID1/{digest(data)}/v1/"
         assert result.processed_key.startswith(prefix)
-        assert result.processed_key.endswith("/events.xlsx.parquet")
+        assert result.processed_key.endswith("/events.xlsx.ndjson")
         assert result.processed_key in store.objects
 
     def test_quarantine_keys_include_checksum(
@@ -485,12 +515,12 @@ class TestPipelineStorageKeysAreVersioned:
 class TestPipelineRetryAfterWarehouseFailure:
     """A file whose warehouse load failed must load on the next run.
 
-    Processed Parquet is keyed by content checksum and written before
+    Processed NDJSON is keyed by content checksum and written before
     the warehouse load. If it carried a conversion-time timestamp, a
     retry would produce different bytes for the same key and fail
-    with ObjectStoreConflict on every later run. So the Parquet must
-    be a pure function of the source bytes; the warehouse stamps
-    _loaded_at at commit time instead.
+    with ObjectStoreConflict on every later run. So the NDJSON must
+    be a pure function of the source bytes; the warehouse sets
+    ingested_at at commit time instead.
     """
 
     @pytest.fixture
@@ -508,7 +538,7 @@ class TestPipelineRetryAfterWarehouseFailure:
             ]
         )
 
-    def test_parquet_is_identical_for_identical_input(
+    def test_ndjson_is_identical_for_identical_input(
         self, contract: Contract
     ) -> None:
         """Converting the same workbook twice gives the same bytes.
@@ -516,26 +546,22 @@ class TestPipelineRetryAfterWarehouseFailure:
         Args:
             contract: Contract fixture.
         """
-        pipeline = Pipeline(Mock(), Mock(), Mock(), contract)
         data = _workbook([("a", 1), ("b", 2)])
 
-        assert pipeline._to_parquet(data) == pipeline._to_parquet(data)
+        assert _loaded(contract, data) == _loaded(contract, data)
 
-    def test_parquet_holds_only_source_columns(
+    def test_ndjson_holds_only_source_columns(
         self, contract: Contract
     ) -> None:
-        """No pipeline-added columns such as _loaded_at.
+        """No load time is written: the warehouse sets ingested_at.
 
         Args:
             contract: Contract fixture.
         """
-        pipeline = Pipeline(Mock(), Mock(), Mock(), contract)
-        parquet = pipeline._to_parquet(_workbook([("a", 1)]))
+        lines = _lines(_loaded(contract, _workbook([("a", 1)])))
 
-        assert list(pd.read_parquet(BytesIO(parquet)).columns) == [
-            "name",
-            "count",
-        ]
+        assert "ingested_at" not in lines[0]
+        assert list(lines[0]["payload"]) == ["name", "count"]
 
     @pytest.mark.parametrize(
         ("error", "first_outcome"),
@@ -573,8 +599,8 @@ class TestPipelineRetryAfterWarehouseFailure:
         assert second[0].outcome == Outcome.LOADED, second[0].errors
 
 
-class TestPipelineToParquetHeaderRow:
-    """_to_parquet() reads headings from the contract's header_row."""
+class TestPipelineHeaderRow:
+    """Conversion reads headings from the contract's header_row."""
 
     def test_title_line_above_headings_is_not_a_column(self) -> None:
         """Columns come from row 2 when header_row=2."""
@@ -598,21 +624,19 @@ class TestPipelineToParquetHeaderRow:
         ws.append(["a", 1])
         buffer = BytesIO()
         wb.save(buffer)
-        pipeline = Pipeline(Mock(), Mock(), Mock(), contract)
+        lines = _lines(_loaded(contract, buffer.getvalue()))
 
-        frame = pd.read_parquet(
-            BytesIO(pipeline._to_parquet(buffer.getvalue()))
-        )
-
-        assert list(frame.columns) == ["name", "count"]
-        assert frame.to_dict("records") == [{"name": "a", "count": 1}]
+        assert [line["payload"] for line in lines] == [
+            {"name": "a", "count": 1}
+        ]
+        assert lines[0]["row_number"] == 3
 
 
-class TestPipelineToParquetHeadingNames:
-    """_to_parquet() keeps every column, under a BigQuery-safe name."""
+class TestPipelineHeadingNames:
+    """Conversion keeps every column, repeated headings numbered."""
 
     def test_repeated_headings_are_all_kept(self) -> None:
-        """Both "Other" columns reach the Parquet file, renamed."""
+        """Both "Other" columns reach the payload."""
         contract = Contract(
             worksheets=[
                 Worksheet(
@@ -631,20 +655,16 @@ class TestPipelineToParquetHeadingNames:
         ws.append(["a", "b"])
         buffer = BytesIO()
         wb.save(buffer)
-        pipeline = Pipeline(Mock(), Mock(), Mock(), contract)
+        lines = _lines(_loaded(contract, buffer.getvalue()))
 
-        frame = pd.read_parquet(
-            BytesIO(pipeline._to_parquet(buffer.getvalue()))
-        )
-
-        assert frame.to_dict("records") == [{"other": "a", "other_2": "b"}]
+        assert lines[0]["payload"] == {"Other": "a", "Other_2": "b"}
 
 
-class TestPipelineToParquetColumnSelection:
-    """_to_parquet() writes only the columns the contract selects."""
+class TestPipelineColumnSelection:
+    """Conversion writes only the columns the contract selects."""
 
     def test_excluded_column_is_not_written(self) -> None:
-        """An excluded personal-data column never reaches Parquet."""
+        """An excluded personal-data column never reaches the payload."""
         contract = Contract(
             worksheets=[
                 Worksheet(
@@ -661,13 +681,10 @@ class TestPipelineToParquetColumnSelection:
         ws.append(["a", "a@example.org"])
         buffer = BytesIO()
         wb.save(buffer)
-        pipeline = Pipeline(Mock(), Mock(), Mock(), contract)
+        data = _loaded(contract, buffer.getvalue())
 
-        frame = pd.read_parquet(
-            BytesIO(pipeline._to_parquet(buffer.getvalue()))
-        )
-
-        assert list(frame.columns) == ["name"]
+        assert _lines(data)[0]["payload"] == {"name": "a"}
+        assert b"a@example.org" not in data
 
 
 class TestPipelineProcessWarnings:
@@ -695,7 +712,6 @@ class TestPipelineProcessWarnings:
         """Pipeline whose contract passes the file with one warning."""
         pipeline.contract.worksheets = [Worksheet("Events")]
         pipeline.contract.read.side_effect = self._warn
-        pipeline._sheets_to_parquet = Mock(return_value=b"parquet")
         return pipeline
 
     def test_file_with_warnings_loads(
@@ -768,7 +784,6 @@ class TestPipelineProcessWarnings:
         pipeline.contract.read.return_value = {
             "Events": SheetRows(["a"], [(2, (1,))])
         }
-        pipeline._sheets_to_parquet = Mock(return_value=b"parquet")
 
         assert pipeline.process(item).warnings == []
 
@@ -853,7 +868,7 @@ class TestPipelineKeysPerDestination:
         assert repeat.outcome == Outcome.SKIPPED
 
     def test_each_destination_keeps_its_own_processed_copy(self) -> None:
-        """Different sheets' Parquet doesn't collide in the store."""
+        """Different sheets' NDJSON doesn't collide in the store."""
         store = MemoryStore()
         data = self._two_sheet_workbook()
         item = SourceItem("hww.xlsx", "ID1", "v1", 10)
@@ -883,8 +898,8 @@ class TestPipelineKeysPerDestination:
         assert record["warehouse"] == "p.d.a"
 
 
-class TestPipelineOutputFormat:
-    """output_format chooses Parquet or raw JSON rows for the load."""
+class TestPipelineRawRows:
+    """The warehouse is given every sheet's rows as NDJSON."""
 
     @staticmethod
     def _two_sheet_contract() -> Contract:
@@ -927,7 +942,7 @@ class TestPipelineOutputFormat:
         return buffer.getvalue()
 
     def _raw_pipeline(self, store: MemoryStore) -> Pipeline:
-        """Pipeline in raw_json mode over the two-sheet workbook.
+        """Pipeline over the two-sheet workbook.
 
         Args:
             store: Object store.
@@ -944,19 +959,7 @@ class TestPipelineOutputFormat:
             store,
             warehouse,
             self._two_sheet_contract(),
-            output_format="raw_json",
         )
-
-    def test_default_is_parquet(self) -> None:
-        """Existing pipelines keep loading Parquet."""
-        pipeline = Pipeline(Mock(), Mock(), Mock(), Mock())
-
-        assert pipeline.output_format == "parquet"
-
-    def test_unknown_format_is_rejected(self) -> None:
-        """A typo fails when the pipeline is built."""
-        with pytest.raises(ValueError, match="output_format"):
-            Pipeline(Mock(), Mock(), Mock(), Mock(), output_format="csv")
 
     def test_raw_json_loads_rows_from_every_sheet(self) -> None:
         """The warehouse gets NDJSON for all sheets and their total."""
@@ -1044,19 +1047,6 @@ def _warehouse() -> Mock:
     return warehouse
 
 
-def _typed(keys: list[str]) -> BigQueryWarehouse:
-    """Build a typed warehouse without a real client.
-
-    Args:
-        keys: The warehouse's merge keys.
-
-    Returns:
-        The warehouse.
-    """
-    with patch("py_common.adapters.bigquery.bigquery.Client"):
-        return BigQueryWarehouse("p", "d", "t", key_columns=keys)
-
-
 def _raw(tables: dict[str, str]) -> RawJsonWarehouse:
     """Build a raw JSON warehouse without a real client.
 
@@ -1068,12 +1058,6 @@ def _raw(tables: dict[str, str]) -> RawJsonWarehouse:
     """
     with patch("py_common.adapters.bigquery_raw.bigquery.Client"):
         return RawJsonWarehouse("p", "d", tables)
-
-
-KEYED = Contract(
-    key_columns=["id"],
-    worksheets=[Worksheet("Events", [Column("id", "integer")])],
-)
 
 
 TWO_SHEETS = Contract(
@@ -1248,36 +1232,12 @@ class TestMarkerBeforeDownload:
 
 
 class TestPipelineConfigChecks:
-    """Mismatched keys or sheet mappings are refused when built."""
-
-    def test_warehouse_without_the_contract_keys_is_refused(self) -> None:
-        """A keyed contract needs a warehouse with the same keys."""
-        with pytest.raises(ConfigError, match="key_columns"):
-            Pipeline(Mock(), Mock(), _typed([]), KEYED)
-
-    def test_warehouse_with_other_keys_is_refused(self) -> None:
-        """A warehouse keyed on other columns is refused."""
-        contract = Contract(
-            key_columns=["id"],
-            worksheets=[
-                Worksheet(
-                    "Events", [Column("id", "integer"), Column("n", "integer")]
-                )
-            ],
-        )
-        with pytest.raises(ConfigError, match="'n'"):
-            Pipeline(Mock(), Mock(), _typed(["n"]), contract)
-
-    def test_matching_keys_are_accepted(self) -> None:
-        """Matching keys build a pipeline."""
-        assert Pipeline(Mock(), Mock(), _typed(["id"]), KEYED)
+    """Mismatched sheet mappings are refused when built."""
 
     def test_raw_sheet_without_a_table_is_refused(self) -> None:
         """Every sheet in the contract needs a raw table."""
         with pytest.raises(ConfigError, match="Other"):
-            Pipeline(
-                Mock(), Mock(), _raw({"Events": "t1"}), TWO_SHEETS, "raw_json"
-            )
+            Pipeline(Mock(), Mock(), _raw({"Events": "t1"}), TWO_SHEETS)
 
     def test_raw_table_without_a_sheet_is_refused(self) -> None:
         """Every raw table needs a sheet in the contract."""
@@ -1287,7 +1247,6 @@ class TestPipelineConfigChecks:
                 Mock(),
                 _raw({"Events": "t1", "Other": "t2", "Extra": "t3"}),
                 TWO_SHEETS,
-                "raw_json",
             )
 
     def test_matching_mapping_is_accepted(self) -> None:
@@ -1297,7 +1256,6 @@ class TestPipelineConfigChecks:
             Mock(),
             _raw({"Events": "t1", "Other": "t2"}),
             TWO_SHEETS,
-            "raw_json",
         )
 
 

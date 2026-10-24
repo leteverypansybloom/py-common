@@ -218,8 +218,7 @@ class TestWhitespaceIsEmpty:
         assert _contract().validate(data, "f.xlsx") == 1
 
 
-@pytest.mark.parametrize("output_format", ["parquet", "raw_json"])
-def test_pipeline_parses_each_workbook_once(output_format: str) -> None:
+def test_pipeline_parses_each_workbook_once() -> None:
     """process() validates and converts from a single parse."""
     from unittest.mock import Mock
 
@@ -234,7 +233,7 @@ def test_pipeline_parses_each_workbook_once(output_format: str) -> None:
     warehouse.identity = "p.d.events"
     warehouse.load.return_value = True
     pipeline = Pipeline(
-        source, store, warehouse, _contract(), output_format=output_format
+        source, store, warehouse, _contract()
     )  # type: ignore[arg-type]
     real = openpyxl.load_workbook
 

@@ -1,9 +1,9 @@
 """Converted copies never clash.
 
 The store is write-once: writing different bytes to an existing key
-raises ObjectStoreConflict. If the Parquet copy were keyed by the
+raises ObjectStoreConflict. If the NDJSON copy were keyed by the
 file's checksum alone, the same file converted again with different
-results (after a contract fix or a pyarrow upgrade, say) would hit
+results (after a contract fix or a py-common upgrade, say) would hit
 that conflict and fail on every retry.
 
 So processed copies are keyed by the upload (version) and by a
@@ -97,7 +97,6 @@ def _pipeline(
     store: MemoryStore,
     contract: Contract,
     version: str = "1",
-    output_format: Any = "parquet",
 ) -> Pipeline:
     """Build a pipeline over one upload of DATA.
 
@@ -105,22 +104,14 @@ def _pipeline(
         store: The object store, shared between runs.
         contract: The contract to apply.
         version: The upload's version.
-        output_format: "parquet" or "raw_json".
 
     Returns:
         The pipeline, with a mock warehouse that accepts loads.
     """
-    warehouse = Mock(identity="p.d.t", spec=["identity", "load"])
+    warehouse = Mock(identity="p.d.t", spec=["identity", "load", "tables"])
     warehouse.load.return_value = True
-    if output_format == "raw_json":
-        warehouse.tables = {"Events": "events_raw"}
-    return Pipeline(
-        StaticSource(version),
-        store,
-        warehouse,
-        contract,
-        output_format=output_format,
-    )
+    warehouse.tables = {"Events": "events_raw"}
+    return Pipeline(StaticSource(version), store, warehouse, contract)
 
 
 def _processed(store: MemoryStore) -> list[str]:
@@ -135,8 +126,8 @@ def _processed(store: MemoryStore) -> list[str]:
     return sorted(k for k in store.objects if k.startswith("processed/"))
 
 
-class TestTypedRoute:
-    """Parquet copies are keyed by upload and content."""
+class TestProcessedCopies:
+    """NDJSON copies are keyed by upload and content."""
 
     def test_contract_fix_then_same_file_again_loads(self) -> None:
         """Uploading the same file after a contract fix loads it."""
@@ -164,14 +155,14 @@ class TestTypedRoute:
 
     def test_a_converter_change_gets_its_own_copy(self) -> None:
         """A converter that writes different bytes gets a new copy."""
-        # E.g. a pyarrow upgrade: the Parquet footer names the
-        # library version that wrote it, so the bytes differ.
+        # E.g. a py-common upgrade that writes a value differently.
         store = MemoryStore()
         failing = _pipeline(store, OLD)
         failing.warehouse.load.side_effect = ServiceError("down")
         failing.run()
 
-        with patch("py_common.pipeline.to_parquet", return_value=b"PAR1x"):
+        changed = (b'{"payload":{}}\n', 1)
+        with patch("py_common.pipeline.to_ndjson", return_value=changed):
             retry = _pipeline(store, OLD).run()
 
         assert retry[0].outcome == Outcome.LOADED, retry[0].errors
@@ -196,42 +187,14 @@ class TestTypedRoute:
 
         result = pipeline.run()[0]
 
-        parquet = pipeline.warehouse.load.call_args.kwargs["data"]
+        ndjson = pipeline.warehouse.load.call_args.kwargs["data"]
         key = (
             f"processed/p.d.t/was/events.xlsx/{digest(DATA)}/1601/"
-            f"{digest(parquet)[:16]}/events.xlsx.parquet"
+            f"{digest(ndjson)[:16]}/events.xlsx.ndjson"
         )
         assert _processed(store) == [key]
-        assert store.objects[key] == parquet
+        assert store.objects[key] == ndjson
         assert result.processed_key == key
-
-
-class TestRawRoute:
-    """NDJSON copies are keyed by upload and content."""
-
-    def test_retry_after_a_contract_change_loads(self) -> None:
-        """A retry after the contract changed writes a new copy and loads."""
-        store = MemoryStore()
-        failing = _pipeline(store, OLD, output_format="raw_json")
-        failing.warehouse.load.side_effect = ServiceError("down")
-        assert failing.run()[0].outcome == Outcome.FAILED
-
-        retry = _pipeline(store, FIXED, output_format="raw_json").run()
-
-        assert retry[0].outcome == Outcome.LOADED, retry[0].errors
-
-    def test_key_names_upload_and_content(self) -> None:
-        """The key holds the checksum, version and content digest."""
-        store = MemoryStore()
-        pipeline = _pipeline(store, OLD, output_format="raw_json")
-
-        pipeline.run()
-
-        ndjson = pipeline.warehouse.load.call_args.kwargs["data"]
-        assert _processed(store) == [
-            f"processed/p.d.t/was/events.xlsx/{digest(DATA)}/1/"
-            f"{digest(ndjson)[:16]}/events.xlsx.ndjson"
-        ]
 
 
 class TestAuditRecord:
@@ -282,7 +245,6 @@ class TestContractFingerprint:
     @pytest.mark.parametrize(
         "change",
         [
-            {"key_columns": ["name"]},
             {"file_name": "events.xlsx"},
             {"max_file_bytes": 1024},
         ],

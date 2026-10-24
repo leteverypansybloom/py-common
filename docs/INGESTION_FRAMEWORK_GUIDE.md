@@ -6,7 +6,7 @@ on it (e.g. the Healthy Working Wales SharePoint → GCP pipeline).
 
 **Purpose:** one plain-language reference that defines the vocabulary of
 data ingestion, explains what an "ingestion framework" is expected to do,
-and states exactly what `py-common` does today versus what it does not - 
+and states exactly what `py-common` does today versus what it does not -
 naming the file (and, where it helps, the class or function) behind
 every claim, so nothing here has to be taken on trust. Line numbers are
 deliberately left out: they go stale with every refactor.
@@ -214,7 +214,7 @@ exact; where nothing exists, that's stated plainly rather than implied.
   (`contract.py`).
 - `Contract.validate()` (`contract.py`) checks, in order:
   required worksheets exist, required columns exist, no *unexpected*
-  columns exist (an extra column is an error here, not a warning - 
+  columns exist (an extra column is an error here, not a warning -
   worth confirming this is the policy PHW actually wants; see
   [Section 5](#5-feature-by-feature-status), row "Schema-drift
   detection"), nullability, type matching for each column's
@@ -227,20 +227,12 @@ exact; where nothing exists, that's stated plainly rather than implied.
   structured output
   (no "row 17, column X, reason Y" table you can query) - just that one
   string, captured in `Result.errors` (`model.py`).
-- `key_columns` is declared on every `Contract` and names the columns
-  that identify a record for merge/upsert. `Pipeline` does **not**
-  pass it on automatically: the caller hands it to the warehouse when
-  constructing it - `BigQueryWarehouse(..., key_columns=contract.key_columns)`.
-  `Pipeline` refuses (`ConfigError`) a warehouse whose keys differ
-  from the contract's (see
-  [2.4](#24-publish--writing-to-the-destination-safely)). Each key
-  column must be a listed, `nullable=False` column of the first
-  worksheet (`Contract` refuses anything else when it is built), and
-  `Contract.validate()` checks the key columns together are unique
-  per row, as well as each column's own `unique` flag.
+- **No record keys.** The raw tables keep every row of every upload;
+  which rows are "the same record" is decided in Dataform, not here.
+  `Contract.validate()` still checks each column's own `unique` flag.
 - **The agreed file name.** A source is tracked by its file name
-  (the raw tables' "latest upload" and the typed route's
-  deleted-row marking both work per name), so `Contract.file_name`
+  (the raw tables' "latest upload" works per name), so
+  `Contract.file_name`
   can require the name a workbook is always uploaded under. A file
   under any other name is quarantined before it is parsed, instead
   of becoming a second "latest" upload.
@@ -274,43 +266,27 @@ exact; where nothing exists, that's stated plainly rather than implied.
 **In `py-common` today:**
 
 - The `Warehouse` protocol (`ports.py`) promises: stage, verify row
-  count, merge on key columns, record audit,
-  commit-or-roll-back-everything.
-- `BigQueryWarehouse.load()` (`adapters/bigquery.py`) delivers that.
-  It loads Parquet into a staging table of its own (one per load,
-  dropped afterwards) and verifies the row count, then runs the final-table write and the audit `INSERT`
-  as **one BigQuery script transaction**, so data never commits
-  without its audit record. The final-table write is a `MERGE` on the
-  `key_columns` passed to the constructor (update matching rows,
-  insert new ones - `BigQueryWarehouse._build_merge_sql()`), or a
-  plain append when no key columns are given. A key column missing
-  from the data is a `ContractError`, and duplicate or NULL keys in
-  staging are a `ValidationError` naming up to five of them, found
-  before the `MERGE`; both quarantine the file. Column names are made
-  BigQuery-safe from the headings (`Date of Enquiry` →
-  `date_of_enquiry`; rules in the README, "Typed column names").
-- **The one thing to get right as a caller:** pass
-  `key_columns=contract.key_columns` when you construct
-  `BigQueryWarehouse`. If you don't, every new upload of a file
-  appends its rows again instead of updating them.
+  count, record audit, commit-or-roll-back-everything.
+- `RawJsonWarehouse.load()` (`adapters/bigquery_raw.py`) delivers
+  that. It loads each worksheet's JSON rows into a staging table of
+  its own (one per load, dropped afterwards) and verifies the row
+  count, then runs the raw-table inserts and the audit `INSERT` as
+  **one BigQuery script transaction**, so data never commits without
+  its audit record. Rows are only ever inserted, each upload under
+  its own `source_generation`.
 - **Cumulative files** (each upload holds every current row, with new
-  rows added and some earlier rows changed) should also pass
-  `mark_deleted_rows=True`. A row that disappears from a file's newest
-  upload then gets `_deleted_at` set rather than staying in the table
-  looking current; if it comes back, `_deleted_at` is cleared. Only
-  rows from that same file (`_source_file`) are affected, so several
-  files can feed one table. Rows are never physically deleted:
-  reports and Dataform should filter `WHERE _deleted_at IS NULL`.
+  rows added and some earlier rows changed) need nothing special:
+  Dataform reads the latest upload of each file
+  ([`RAW_TABLE_LAYOUT.md`](RAW_TABLE_LAYOUT.md)), so a row missing
+  from it is simply not read.
 - A BigQuery failure during `load()` is raised as `ServiceError`
   (BigQuery reported the job failed, so nothing committed) or
   `IndeterminateCommitError` (waiting for the commit failed and the
   job's final state couldn't be confirmed by re-reading it).
   `Pipeline` records both as `FAILED`, so they are retried, and moves
   on to the next file.
-- **Deleted rows:** on the typed route, `mark_deleted_rows=True`
-  sets `_deleted_at` on rows missing from a file's newest upload;
-  without it they stay as they were. On the raw route nothing is
-  deleted, and reading the latest upload leaves removed rows out.
+- **Deleted rows:** nothing is deleted from the raw tables; reading
+  the latest upload leaves removed rows out.
 - **Retry and backoff exist only in the SharePoint adapter.**
   `SharePointSource` retries Graph throttling (429, honouring
   `Retry-After`) and transient 5xx errors, up to 4 attempts with
@@ -320,7 +296,7 @@ exact; where nothing exists, that's stated plainly rather than implied.
   pipeline still make single attempts.
 - **No reconciliation** step: nothing compares "rows in the source
   file" against "rows now queryable in the final table" after a load;
-  the row-count check in `BigQueryWarehouse.load()` only checks
+  the row-count check in `RawJsonWarehouse.load()` only checks
   *staging*, before the final `INSERT`.
 
 ### 2.5 Operate - knowing it worked, and recovering when it didn't
@@ -364,7 +340,7 @@ exact; where nothing exists, that's stated plainly rather than implied.
   per file with its `outcome`.
 - **Monitoring/alerting:** log-based alerts set up by hand
   (`docs/GCP_SETUP.md`, section 7); not yet defined as code.
-- **Retention:** no retention policy is set or configurable anywhere - 
+- **Retention:** no retention policy is set or configurable anywhere -
   the landing/raw/quarantine prefixes in `GCSObjectStore` accumulate
   forever until someone sets a bucket lifecycle rule outside this code.
 - **Locking:** `GCSObjectStore.lock()` (`adapters/gcs.py`) creates a
@@ -415,8 +391,8 @@ logic should live.
 example a "Healthy Working Wales SharePoint ingestion" repository - is a
 *solution*: it should mostly consist of a `config.yaml`, a `Contract`
 definition per source, and a thin `main.py` that wires
-`SharePointSource` + `GCSObjectStore` + `BigQueryWarehouse` +
-`Pipeline` together (see [Section 6](#6-the-recommended-sharepoint--gcp-architecture)).
+`GCSSource` + `GCSObjectStore` + `RawJsonWarehouse` + `Pipeline`
+together (see [Section 6](#6-the-recommended-sharepoint--gcp-architecture)).
 
 A practical decision rule for "does this belong in `py-common`, or in the
 solution repo that depends on it?":
@@ -442,25 +418,23 @@ defines four small interfaces (`Source`, `ObjectStore`, `Warehouse`,
 (`pipeline.py`) never has to import a cloud SDK directly. A `Pipeline`
 discovers files from a `Source`, downloads and hashes each one, validates
 it against a `Contract`, lands the raw bytes, converts valid files to
-Parquet (typed route) or to JSON rows (raw JSON route), loads them into
-a `Warehouse`, and writes an `AuditRecord` for every attempt - success,
+JSON rows, loads them into a `Warehouse`, and writes an `AuditRecord` for every attempt - success,
 skip, quarantine or failure alike. It runs today against a local folder
 (`LocalSource` + `LocalObjectStore`); the production GCP pieces
-(`GCSSource`, `GCSObjectStore`, `BigQueryWarehouse`,
-`RawJsonWarehouse`) are written and unit-tested against mocks, and so
+(`GCSSource`, `GCSObjectStore`, `RawJsonWarehouse`) are written and unit-tested against mocks, and so
 is the SharePoint side (`SharePointSource`, not yet run live). There is
 no orchestration, scheduling, alerting, secrets, or infrastructure
 code in the repository yet; [`GCP_SETUP.md`](GCP_SETUP.md) gives the
-manual steps for the raw JSON route.
+manual steps.
 
 The test suite (`tests/unit/`, `tests/integration/`) confirms this shape:
 unit tests cover `Pipeline` (one test per outcome), `Contract`,
 `raw.py`, `config.py`, `fixtures.py`, the local
 adapters, and the GCS and BigQuery adapters (with the cloud clients
-mocked). `test_hww_fixtures.py` runs the raw JSON route end to end
-over the HWW-style fixtures with the local adapters. The integration tests
-(`test_end_to_end_gcs_bq.py`, `test_gcs_bigquery_integration.py`,
-`test_live_services.py`) need real GCP credentials and skip
+mocked). `test_hww_fixtures.py` runs the pipeline end to end over
+the HWW-style fixtures with the local adapters. The integration tests
+(`test_end_to_end_gcs_bq.py`, `test_bigquery_live.py`,
+`test_bq_dry_run.py`, `test_live_services.py`) need real GCP credentials and skip
 themselves without them - so CI collects them but never actually
 exercises them.
 
@@ -481,7 +455,7 @@ behaviour doesn't match the promise), **Missing** (nothing exists).
 | Connection testing | Missing | No pre-flight credential/permission check anywhere. |
 | Source discovery | Missing | No "list what's available at this source" helper. `GCSSource` lists a landing folder, but only for loading, not for browsing. |
 | Raw landing storage | **Have** | `pipeline.py`, immutable `raw/{identity}/{checksum}/{name}` key per file version; edited files keep every version. |
-| Standardisation layer | Partial | Excel → Parquet (`pipeline.py`) and Excel → JSON rows (`raw.py`) exist, both through one heading reader (`read_sheet()`, `contract.py`) that names blank and repeated headings. No CSV or other input format yet. |
+| Standardisation layer | Partial | Excel → JSON rows (`raw.py`) exists, through one heading reader (`read_sheet()`, `contract.py`) that names blank and repeated headings. No CSV or other input format yet. |
 | Schema registry | Partial | `Contract` dataclasses exist (`contract.py`); no external, diffable file format (e.g. YAML) yet. |
 | Schema-drift detection | **Have** | Missing and extra columns are detected per worksheet (`contract.py`). `on_mismatch="quarantine"` rejects the file; `on_mismatch="warn"` loads it and records a warning. `column_selection="all_except"` accepts new columns. |
 | Data profiling | Missing | No profiling tool or script. |
@@ -497,10 +471,10 @@ behaviour doesn't match the promise), **Missing** (nothing exists).
 | Queueing / buffering | N/A | Not needed at current file volumes. |
 | Rate limiting / throttling | Partial | `SharePointSource` honours Graph `Retry-After` on 429; nothing else does. |
 | Retries and backoff | Partial | `SharePointSource` retries 429/5xx and network errors (bounded, exponential); other external calls are single attempts. |
-| Idempotency and deduplication | **Have** | Each upload (identity + version) loads at most once per destination table: a marker cache in the store (`Pipeline._is_duplicate()`) and an audit check inside the BigQuery commit transaction. Typed tables also `MERGE` on `key_columns` (`BigQueryWarehouse`), and `Pipeline` refuses a warehouse whose keys differ from the contract's; see [2.4](#24-publish--writing-to-the-destination-safely). The one gap (two commits of one upload at once) is detected: `runner.check_duplicate_loads()` alerts on it. |
+| Idempotency and deduplication | **Have** | Each upload (identity + version) loads at most once per destination table: a marker cache in the store (`Pipeline._is_duplicate()`) and an audit check inside the BigQuery commit transaction. See [2.4](#24-publish--writing-to-the-destination-safely). The one gap (two commits of one upload at once) is detected: `runner.check_duplicate_loads()` alerts on it. |
 | Checkpointing | Partial | File-level: a crash loses at most one file's work (results are appended per file). No run-level checkpoint. |
 | Delivery ledger / receipts | Partial | The audit record *is* a delivery ledger for BigQuery; no equivalent receipt concept for external destination APIs (none exist yet). |
-| Quarantine / dead-letter storage | **Have** (file-level) | `pipeline.py`, `quarantine/{identity}/{checksum}/{name}` key, with the original file also kept in `raw/`. Row-level quarantine belongs in the Dataform layer for the raw JSON route. |
+| Quarantine / dead-letter storage | **Have** (file-level) | `pipeline.py`, `quarantine/{identity}/{checksum}/{name}` key, with the original file also kept in `raw/`. Row-level quarantine belongs in the Dataform layer. |
 | Reconciliation | Missing | No source-count vs. destination-count check after a load completes. |
 | Backfill and replay | Partial | No command, by design: uploading a file again reloads it with the current contract, and restoring an earlier GCS version undoes a bad upload (`docs/RUNBOOK.md`). Earlier versions aren't loaded in bulk. |
 | Lineage and audit trail | **Have** (file-level) | `model.py`, written by `pipeline.py`. Each record names the converted copy loaded, the contract (`contract_fingerprint`) and the py-common version used. No run-level record. |
@@ -529,7 +503,7 @@ not a redesign.
 | Processing | Python, run as a Cloud Run job (batch-to-completion, not a long-lived service) | `Pipeline.run()` (`pipeline.py`) is already written as a single batch pass suitable for this. |
 | Scheduling | Cloud Scheduler triggering the Cloud Run job directly, or via a Workflows definition if more than one step needs coordinating | Not yet built; belongs in the *solution* repo's `deploy/`, using Terraform, not in `py-common`. |
 | Operational state (locks, checkpoints) | GCS lock object for the run lock; Firestore or another approved store for checkpoints if needed | Built: `GCSObjectStore.lock()` (`adapters/gcs.py`) refuses overlapping runs. The lock is a lease: a run killed mid-flight blocks others until it expires, then the next run takes it over, provided `lease_seconds` exceeds the job timeout. Clearing a lock early is in `docs/RUNBOOK.md`. |
-| Warehouse | BigQuery, with a `MERGE` on `Contract.key_columns` | Built: `BigQueryWarehouse.load()` (`adapters/bigquery.py`); the solution's `main.py` must pass `key_columns=contract.key_columns`. |
+| Warehouse | BigQuery raw JSON tables, one per worksheet | Built: `RawJsonWarehouse.load()` (`adapters/bigquery_raw.py`); the solution's `main.py` maps each worksheet to its raw table. |
 | Secrets | Secret Manager, referenced (never inlined) from configuration | Needs a new adapter implementing `SecretStore` (`ports.py`); none exists today. |
 | Quality | Reusable checks: schema, required fields, uniqueness, valid codes, record counts, freshness | `Contract.validate()` covers the first four; freshness is a per-source view read by `runner.check_freshness()` (`GCP_SETUP.md`); row-count checks are not built (see [Section 5](#5-feature-by-feature-status)). |
 | Monitoring | Cloud Logging (already reachable via Python `logging`) plus named Cloud Monitoring alerts on failure and on staleness | Not built; needs both a structured-logging change and alert policies defined as IaC. |
@@ -608,8 +582,8 @@ downstream of ingestion" stays visible when scoping future work.
 Ordered so each step is small, independently testable, and doesn't
 require the steps after it.
 
-**Done:** the BigQuery write now `MERGE`s on `key_columns` inside one
-transaction with its audit record (2026-09-21; see `DECISIONS_en.md`).
+**Done:** the BigQuery write inserts each upload's rows inside one
+transaction with its audit record (see `DECISIONS_en.md`).
 
 1. ~~Implement `SharePointSource`~~: built and tested against mocked
    Graph responses (`adapters/sharepoint.py`), full listing, no delta
@@ -641,8 +615,8 @@ transaction with its audit record (2026-09-21; see `DECISIONS_en.md`).
    [Section 7](#7-choosing-features-for-your-scenario)'s "usually
    unnecessary at this stage" column - each has its own trigger
    condition, and none of them are blocking today's actual project.
-   (Row-level quarantine is now handled by the Dataform layer for the
-   raw JSON route; see [`RAW_TABLE_LAYOUT.md`](RAW_TABLE_LAYOUT.md).)
+   (Row-level quarantine is handled by the Dataform layer; see
+   [`RAW_TABLE_LAYOUT.md`](RAW_TABLE_LAYOUT.md).)
 
 ---
 

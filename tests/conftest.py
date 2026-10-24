@@ -42,7 +42,6 @@ def local_store(temp_dir):
 def events_contract():
     """Contract for 'events' source (employer events)."""
     return Contract(
-        key_columns=["event_id"],
         worksheets=[
             Worksheet(
                 name="Events",
@@ -73,7 +72,6 @@ def events_contract():
 def was_contract():
     """Contract for 'was' source (workplace assessment summary)."""
     return Contract(
-        key_columns=["was_id"],
         worksheets=[
             Worksheet(
                 name="Results",

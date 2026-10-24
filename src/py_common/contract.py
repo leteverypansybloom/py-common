@@ -170,10 +170,6 @@ class Contract:
     """Workbook schema and validation rules.
 
     Attributes:
-        key_columns: Columns of the primary (first) worksheet that
-            identify a row, used to MERGE into the warehouse. Each
-            must be a listed, non-nullable column, and together they
-            must be unique within a file. Empty means append.
         worksheets: List of required worksheets.
         max_file_bytes: Largest workbook accepted, as uploaded. A
             larger one is rejected (quarantined) before it is parsed.
@@ -186,13 +182,11 @@ class Contract:
             e.g. "WAS export.xlsx". A file under any other name is
             rejected (quarantined) before it is parsed. A source is
             tracked by its file name: the raw tables' "latest upload"
-            and the typed route's deleted-row marking both work per
-            name, so a copy under another name would become a second
-            "latest" upload. None (the default) accepts any name.
+            works per name, so a copy under another name would become
+            a second "latest" upload. None (the default) accepts any name.
             The match is exact, capitals included.
     """
 
-    key_columns: list[str] = field(default_factory=list)
     worksheets: list[Worksheet] = field(default_factory=list)
     max_file_bytes: int = DEFAULT_MAX_FILE_BYTES
     max_uncompressed_bytes: int = DEFAULT_MAX_UNCOMPRESSED_BYTES
@@ -201,15 +195,9 @@ class Contract:
     def __post_init__(self) -> None:
         """Check settings that would otherwise fail confusingly later.
 
-        A key the data doesn't have, or a NULL key (which never
-        matches in a MERGE), would turn upserts into duplicate
-        inserts. So they are refused when the contract is built.
-
         Raises:
-            ValueError: A key column isn't a listed column of the
-                primary worksheet, is nullable, or there are key
-                columns but no worksheets; a size limit isn't
-                positive; or file_name is blank or a path.
+            ValueError: A size limit isn't positive, or file_name is
+                blank or a path.
         """
         if self.file_name is not None and (
             not self.file_name.strip()
@@ -225,27 +213,6 @@ class Contract:
                 raise ValueError(
                     f"Contract {name} must be positive, got "
                     f"{getattr(self, name)}"
-                )
-        if not self.key_columns:
-            return
-        if not self.worksheets:
-            raise ValueError(
-                "Contract has key_columns but no worksheets to take "
-                "them from"
-            )
-        primary = self.worksheets[0]
-        listed = {column.name: column for column in primary.columns}
-        for key in self.key_columns:
-            column = listed.get(key)
-            if column is None:
-                raise ValueError(
-                    f"Key column '{key}' is not a listed column of the "
-                    f"primary worksheet '{primary.name}'"
-                )
-            if column.nullable:
-                raise ValueError(
-                    f"Key column '{key}' of worksheet '{primary.name}' "
-                    "is nullable; key columns need nullable=False"
                 )
 
     def fingerprint(self) -> str:
@@ -384,7 +351,7 @@ class Contract:
                 else {}
             )
             sheets: dict[str, SheetRows] = {}
-            for index, ws_def in enumerate(self.worksheets):
+            for ws_def in self.worksheets:
                 ws = wb[ws_def.name]
                 # Read-only mode trusts the sheet's stored dimensions,
                 # which some tools write wrongly; read what is there.
@@ -412,11 +379,8 @@ class Contract:
                         source_name,
                         warnings,
                     )
-                    # Keys belong to the primary worksheet (see
-                    # __post_init__).
-                    keys = self.key_columns if index == 0 else []
                     self._validate_worksheet(
-                        names, rows, ws_def, source_name, warnings, keys
+                        names, rows, ws_def, source_name, warnings
                     )
                     # After the column checks, so a wrong header_row or
                     # missing columns are reported as such first.
@@ -573,7 +537,6 @@ class Contract:
         ws_def: Worksheet,
         source_name: str,
         warnings: list[str],
-        key_columns: list[str] | None = None,
     ) -> int:
         """Validate one worksheet against its Worksheet definition.
 
@@ -584,8 +547,6 @@ class Contract:
             source_name: Filename for error messages.
             warnings: Where problems go when ws_def.on_mismatch is
                 "warn" (mutated).
-            key_columns: Columns whose values together must be unique
-                per row (the contract's merge key); empty for none.
 
         Returns:
             Number of non-empty data rows (below the heading row) if
@@ -635,35 +596,7 @@ class Contract:
         # possible in "warn" mode); don't report it again on every row.
         present = [c for c in ws_def.columns if c.name in header_index]
 
-        # The composite merge key must be unique, or the warehouse
-        # MERGE fails ("must match at most one source row"). A key
-        # column missing from the sheet was reported above.
-        keys = [k for k in key_columns or [] if k in header_index]
-        if len(keys) != len(key_columns or []):
-            keys = []
-        first_seen: dict[tuple[Any, ...], int] = {}
-
         for row_idx, row in rows:
-            if keys:
-                key_values = tuple(
-                    (
-                        row[header_index[k]]
-                        if header_index[k] < len(row)
-                        else None
-                    )
-                    for k in keys
-                )
-                # A NULL key is reported as "required" below.
-                if not any(_is_blank(v) for v in key_values):
-                    if key_values in first_seen:
-                        row_errors.append(
-                            f"Row {row_idx}: Duplicate key in "
-                            f"({', '.join(keys)}), first on row "
-                            f"{first_seen[key_values]}"
-                        )
-                    else:
-                        first_seen[key_values] = row_idx
-
             for col_def in present:
                 col_idx = header_index[col_def.name]
                 value = row[col_idx] if col_idx < len(row) else None

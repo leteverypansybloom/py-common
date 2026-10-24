@@ -8,6 +8,32 @@ Entries are not rewritten once made. When a decision changes, add a
 new dated entry saying which earlier entry it replaces, and mark the
 earlier entry as superseded.
 
+## 2026-10-24 - Raw JSON is the only load route
+
+### Raw JSON is the only load route
+
+Supersedes "A raw JSON route alongside the typed MERGE route"
+(2026-10-14) and the typed-route entries below it. The team chose
+the raw JSON route for Healthy Working Wales, so py-common keeps only
+that route: `Pipeline` always writes every configured worksheet as
+newline-delimited JSON, and `RawJsonWarehouse` inserts it into one
+raw table per worksheet. `BigQueryWarehouse`, `py_common.parquet`,
+`Pipeline.output_format` and `Contract.key_columns` are removed, and
+pyarrow is no longer a dependency.
+
+Why: cleaning, typing, deduplication and merging belong in Dataform,
+where the rest of the modelling is (see
+`docs/RAW_JSON_VS_CONTRACT_VALIDATION.md`). Keeping a second route
+meant the same rules in two places and twice the code, tests and
+setup to keep working. The contract still checks headings, types,
+required values and uniqueness before anything loads, and still
+leaves excluded columns out.
+
+**Trade-off**: there are no typed tables in BigQuery until Dataform
+builds them, so every reader goes through the raw tables' "latest
+upload" query (`docs/RAW_TABLE_LAYOUT.md`). Benefit: one route to
+build, test, document and run.
+
 ## 2026-10-16 - Open questions on sources, reprocessing and testing
 
 Taken with the data owner's answers: production files always reach
@@ -47,6 +73,8 @@ whatever changed. Audit records name the copy, the contract
 (`Contract.fingerprint()`) and the py-common version.
 
 ### Typed column names are made BigQuery-safe
+
+*Superseded by "Raw JSON is the only load route" (2026-10-24).*
 
 Headings became column names as written, and one BigQuery refuses
 failed the file on every retry. Fixed rules now convert them
@@ -136,6 +164,8 @@ Sources are due by the 7th of the month.
 ## 2026-10-14 - Workbook layouts and a raw JSON load route
 
 ### A raw JSON route alongside the typed MERGE route
+
+*Superseded by "Raw JSON is the only load route" (2026-10-24).*
 
 The Healthy Working Wales project lands data in BigQuery as raw JSON
 and cleans it in Dataform (see
@@ -330,6 +360,8 @@ the raw layer holds exactly what was received for each version.
 
 ### BigQuery sets `_loaded_at`, not the Parquet file
 
+*Superseded by "Raw JSON is the only load route" (2026-10-24).*
+
 `_loaded_at` used to be added to the Parquet during conversion, so the
 same workbook produced different Parquet bytes on every run. Parquet
 is stored under a checksum key before the warehouse load, so a retry
@@ -374,6 +406,8 @@ install the `gcp` extra (`pip install -e ".[dev,gcp]"`) even when
 working offline. No credentials are needed to run them.
 
 ### BigQueryWarehouse merges on the contract's key columns
+
+*Superseded by "Raw JSON is the only load route" (2026-10-24).*
 
 `BigQueryWarehouse` takes `key_columns` (normally
 `Contract.key_columns`) and `MERGE`s staging into the final table on

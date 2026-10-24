@@ -18,8 +18,8 @@ repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.17.0
     hooks:
+      # Rules and line length come from pyproject.toml.
       - id: ruff-check
-        args: ["--line-length=79", "--select=E,F,W"]
 
   # Type checking
   - repo: https://github.com/pre-commit/mirrors-mypy

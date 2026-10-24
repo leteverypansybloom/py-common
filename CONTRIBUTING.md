@@ -77,9 +77,9 @@ pytest -m integration
 ### BigQuery SQL dry run
 
 `tests/integration/test_bq_dry_run.py` generates every SQL statement
-the BigQuery adapters send (the commit script for both warehouses,
-the merge-key check, the schema-update `ALTER TABLE`) and sends each
-to BigQuery with `dry_run=True`: parsed and checked against real
+`RawJsonWarehouse` sends (the commit script with its "already
+loaded?" check and the inserts) and sends each to BigQuery with
+`dry_run=True`: parsed and checked against real
 tables, never run, no cost. Run it after any change to adapter SQL,
 against a sandbox project:
 
@@ -95,10 +95,9 @@ project.
 
 ### Live BigQuery tests
 
-`tests/integration/test_bigquery_live.py` runs both warehouses in
-real BigQuery, in an existing test dataset, and checks what lands
-(merges, deleted rows, restores, rollback, the "latest upload"
-query). GitHub Actions runs it nightly and on demand
+`tests/integration/test_bigquery_live.py` runs `RawJsonWarehouse`
+in real BigQuery, in an existing test dataset, and checks what lands
+(each upload once, reverts, rollback, the "latest upload" query). GitHub Actions runs it nightly and on demand
 (`.github/workflows/bigquery-live.yml`); the one-off set-up is in
 [`docs/CI_SETUP.md`](docs/CI_SETUP.md). To run it yourself:
 

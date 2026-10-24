@@ -50,21 +50,9 @@ gcloud storage cp \
   "gs://$LANDING_BUCKET/was/WAS export.xlsx"
 ```
 
-- **Raw route:** the new upload is the latest, so Dataform's "latest
-  upload" query reads it. The earlier load's rows stay in the raw
-  table (it is insert-only), unread.
-- **Typed route:** the new upload is merged over the table. A column
-  the fix adds is added to the table automatically. A fix that
-  removes a column or changes its type is refused (the file is
-  quarantined: "data no longer matches") until the table is changed
-  to match:
-  - removed column: `ALTER TABLE \`<table>\` DROP COLUMN <column>`;
-  - changed type: only widening changes (e.g. `INT64` to `NUMERIC`
-    or `FLOAT64`) can be made in place, with `ALTER TABLE ... ALTER
-    COLUMN ... SET DATA TYPE`. For anything else, copy the table if
-    you want its history, drop it, and upload the file again:
-    py-common recreates the table from that upload. Only the history
-    of `_deleted_at` (which rows were marked deleted, when) is lost.
+The new upload is the latest, so Dataform's "latest upload" query
+reads it. The earlier load's rows stay in the raw table (it is
+insert-only), unread.
 
 ## An upload was wrong (bad data)
 
@@ -77,12 +65,8 @@ gcloud storage cp "gs://$LANDING_BUCKET/was/WAS export.xlsx#<good generation>" \
   "gs://$LANDING_BUCKET/was/WAS export.xlsx"
 ```
 
-- **Raw route:** Dataform reads the restored upload, the newest. The
-  bad upload's rows stay in the raw table, unread.
-- **Typed route:** the merge puts the good values back. With
-  `mark_deleted_rows`, rows that were only in the bad upload are
-  marked deleted, and rows the bad upload had dropped are current
-  again.
+Dataform reads the restored upload, the newest. The bad upload's
+rows stay in the raw table, unread.
 
 ## An upload must be removed completely
 
@@ -91,9 +75,8 @@ deliberate, so it is done by hand, by someone with more access than
 the pipeline (its service account can't delete stored copies).
 
 1. **Replace it first** with a corrected upload (as above), so the
-   folder still has a current file and the typed table has the
-   corrected values. If a whole column must go, exclude it in the
-   contract, and on the typed route also `DROP COLUMN` it.
+   folder still has a current file. If a whole column must go,
+   exclude it in the contract.
 2. **Raw tables:** for each raw table of that workbook (one per
    sheet), `DELETE FROM \`<raw table>\` WHERE source_file = '<file
    name>' AND source_generation = '<generation>'`.
@@ -122,22 +105,9 @@ DPIA needs.
 ## A workbook is renamed on purpose
 
 Change the contract's `file_name`, deploy, then upload under the new
-name. Uploads are tracked per name, so the old name needs one
-clean-up step:
-
-- **Raw route:** the old name's last upload still counts as "latest"
-  for that name. Filter it out in Dataform
-  (`WHERE source_file != '<old name>'`) or delete its rows.
-- **Typed route with `mark_deleted_rows`:** once the new name has
-  loaded, every row still in its file has been moved to the new name
-  (`_source_file`). Rows still under the old name are gone from the
-  workbook, so mark them:
-
-  ```sql
-  UPDATE `<table>`
-  SET _deleted_at = CURRENT_TIMESTAMP()
-  WHERE _source_file = '<old identity>' AND _deleted_at IS NULL
-  ```
+name. Uploads are tracked per name, so the old name's last upload
+still counts as "latest" for that name. Filter it out in Dataform
+(`WHERE source_file != '<old name>'`) or delete its rows.
 
 ## A run's lock is stuck
 

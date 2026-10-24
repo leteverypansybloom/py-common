@@ -1,12 +1,12 @@
-r"""Dry-run every SQL statement the BigQuery adapters generate.
+r"""Dry-run every SQL statement the BigQuery adapter generates.
 
 The unit tests check SQL text against mocks; this checks BigQuery
-accepts it. Each adapter's load() runs against a
-recording client, which answers like BigQuery would and keeps every
-statement with its parameters. A scratch dataset then gets every
-table those statements name, and each statement is sent with
-QueryJobConfig(dry_run=True): parsed, planned and checked against the
-real tables, but never run, so it costs nothing.
+accepts it. RawJsonWarehouse.load() runs against a recording client,
+which answers like BigQuery would and keeps every statement with its
+parameters. A scratch dataset then gets every table those statements
+name, and each statement is sent with QueryJobConfig(dry_run=True):
+parsed, planned and checked against the real tables, but never run,
+so it costs nothing.
 
 Needs GCP_PROJECT_ID and credentials allowed to create a dataset and
 run query jobs there (roles/bigquery.dataEditor + jobUser). Skipped
@@ -32,7 +32,6 @@ import pytest
 bigquery = pytest.importorskip("google.cloud.bigquery")
 from google.api_core.exceptions import NotFound  # noqa: E402
 
-from py_common.adapters.bigquery import BigQueryWarehouse  # noqa: E402
 from py_common.adapters.bigquery_raw import (  # noqa: E402
     RAW_SCHEMA,
     STAGING_SCHEMA,
@@ -58,50 +57,28 @@ AUDIT_SCHEMA = [
     bigquery.SchemaField("outcome", "STRING"),
     bigquery.SchemaField("timestamp", "TIMESTAMP"),
 ]
-TYPED_STAGING = [
-    bigquery.SchemaField("id", "INT64"),
-    bigquery.SchemaField("name", "STRING"),
-    bigquery.SchemaField("notes", "STRING"),
-]
-TYPED_FINAL = [
-    bigquery.SchemaField("id", "INT64"),
-    bigquery.SchemaField("name", "STRING"),
-    bigquery.SchemaField("_loaded_at", "TIMESTAMP"),
-]
 
 
 class Recorder:
     """Stands in for bigquery.Client; records every query.
 
-    Answers so that load() walks every SQL path: no duplicate keys,
-    a LOADED status, and a final table missing the staging table's
-    "notes" column (so the ALTER TABLE is generated too).
+    Answers so that load() walks every SQL path: no table exists yet,
+    each load stages one row, and the commit reports LOADED.
     """
 
-    def __init__(self, dataset: str) -> None:
-        """Start recording.
-
-        Args:
-            dataset: The dataset the statements name.
-        """
-        self.dataset = dataset
+    def __init__(self) -> None:
+        """Start recording."""
         self.statements: list[tuple[str, Any]] = []
 
     def get_table(self, table_id: str) -> Any:
-        """Return the typed tables' schemas; nothing else exists.
+        """Report every table missing, so load() creates them.
 
         Args:
             table_id: The full table ID.
 
-        Returns:
-            An object with a schema list, like a bigquery.Table.
-
         Raises:
-            NotFound: Any other table.
+            NotFound: Always.
         """
-        schema = TYPED_STAGING if "_stg_" in table_id else TYPED_FINAL
-        if table_id.endswith(".events") or "_stg_" in table_id:
-            return SimpleNamespace(schema=schema)
         raise NotFound(table_id)
 
     def create_table(self, table: Any, exists_ok: bool = False) -> None:
@@ -111,7 +88,6 @@ class Recorder:
             table: The table to create.
             exists_ok: Ignored.
         """
-        pass
 
     def delete_table(self, table_id: str, not_found_ok: bool = False) -> None:
         """Do nothing: the scratch dataset is deleted whole.
@@ -120,7 +96,6 @@ class Recorder:
             table_id: The table to delete.
             not_found_ok: Ignored.
         """
-        pass
 
     def load_table_from_file(self, file: Any, table_id: str, **_: Any) -> Any:
         """Pretend to stage one row.
@@ -133,7 +108,6 @@ class Recorder:
         Returns:
             A finished load job reporting one row.
         """
-        # Every load stages the one row the callers below expect.
         return SimpleNamespace(
             job_id="load", output_rows=1, result=lambda **_: None
         )
@@ -149,31 +123,20 @@ class Recorder:
             A finished job.
         """
         self.statements.append((sql, job_config))
-        if "BEGIN TRANSACTION" in sql:
-            rows = [("LOADED",)]
-        else:
-            rows = []
+        rows = [("LOADED",)] if "BEGIN TRANSACTION" in sql else []
         return SimpleNamespace(job_id="q", result=lambda **_: rows)
 
 
 def _statements(dataset: str) -> list[tuple[str, Any]]:
-    """Every statement both adapters generate for one load."""
-    recorder = Recorder(dataset)
-    with patch("py_common.adapters.bigquery.bigquery.Client") as cls:
-        cls.return_value = recorder
-        BigQueryWarehouse(PROJECT, dataset, "events", key_columns=["id"]).load(
-            "k", CHECKSUM, b"PAR1", 1, ITEM
-        )
-        BigQueryWarehouse(PROJECT, dataset, "events").load(
-            "k", CHECKSUM, b"PAR1", 1, ITEM
-        )
-        BigQueryWarehouse(
-            PROJECT,
-            dataset,
-            "events",
-            key_columns=["id"],
-            mark_deleted_rows=True,
-        ).load("k", CHECKSUM, b"PAR1", 1, ITEM)
+    """Return every statement the adapter generates for one load.
+
+    Args:
+        dataset: The dataset the statements name.
+
+    Returns:
+        (SQL, job config) per statement, in order.
+    """
+    recorder = Recorder()
     with patch("py_common.adapters.bigquery_raw.bigquery.Client") as cls:
         cls.return_value = recorder
         RawJsonWarehouse(PROJECT, dataset, {"S": "raw_s"}).load(
@@ -217,24 +180,23 @@ def dataset(client: Any) -> Iterator[str]:
 
 
 def _create_tables(client: Any, dataset: str, sql: list[str]) -> None:
-    """Create every table the statements name, with the right schema."""
+    """Create every table the statements name, with the right schema.
+
+    Args:
+        client: The BigQuery client.
+        dataset: The scratch dataset.
+        sql: The statements.
+
+    Raises:
+        AssertionError: A statement names a table this test doesn't
+            know the schema of.
+    """
     named = set()
     for text in sql:
         named.update(re.findall(rf"`{PROJECT}\.{dataset}\.(\w+)`", text))
     for table in named:
         if table == "audit":
             schema = AUDIT_SCHEMA
-        elif table == "events":
-            # As after the ALTER TABLE: a dry run doesn't apply it,
-            # and the MERGE that follows writes the new column.
-            schema = [
-                *TYPED_STAGING,
-                bigquery.SchemaField("_loaded_at", "TIMESTAMP"),
-                bigquery.SchemaField("_deleted_at", "TIMESTAMP"),
-                bigquery.SchemaField("_source_file", "STRING"),
-            ]
-        elif table.startswith("events_stg_"):
-            schema = TYPED_STAGING
         elif table.startswith("raw_s_stg_"):
             schema = STAGING_SCHEMA
         elif table == "raw_s":
@@ -250,22 +212,14 @@ def _create_tables(client: Any, dataset: str, sql: list[str]) -> None:
 def test_every_generated_statement_passes_a_dry_run(
     client: Any, dataset: str
 ) -> None:
-    """BigQuery accepts every statement the adapters generate.
+    """BigQuery accepts every statement the adapter generates.
 
     Args:
         client: The BigQuery client.
         dataset: The scratch dataset.
     """
     statements = _statements(dataset)
-    kinds = {
-        "commit script": any("BEGIN TRANSACTION" in s for s, _ in statements),
-        "key check": any("HAVING" in s for s, _ in statements),
-        "schema update": any("ALTER TABLE" in s for s, _ in statements),
-        "deleted-row marking": any(
-            "NOT MATCHED BY SOURCE" in s for s, _ in statements
-        ),
-    }
-    assert all(kinds.values()), kinds
+    assert any("BEGIN TRANSACTION" in s for s, _ in statements)
     _create_tables(client, dataset, [s for s, _ in statements])
 
     failures = []
@@ -282,9 +236,12 @@ def test_every_generated_statement_passes_a_dry_run(
     assert not failures, "\n\n".join(failures)
 
 
-def test_recorder_sees_the_typed_route_merge(dataset: str) -> None:
-    """Guard: the statements really include the MERGE we ship."""
+def test_recorder_sees_the_insert_into_the_raw_table(dataset: str) -> None:
+    """Guard: the statements really include the insert we ship.
+
+    Args:
+        dataset: The scratch dataset.
+    """
     sql = "\n".join(s for s, _ in _statements(dataset))
 
-    assert "MERGE INTO" in sql
-    assert "ON T.`id` = S.`id`" in sql
+    assert f"INSERT INTO `{PROJECT}.{dataset}.raw_s`" in sql

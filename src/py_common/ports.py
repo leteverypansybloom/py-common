@@ -110,8 +110,8 @@ class Warehouse(Protocol):
       happened (e.g. the connection dropped while waiting). The file
       is FAILED and retried.
     - ValidationError (including ContractError): the file's data
-      can't be loaded as it is (e.g. duplicate merge keys). The file
-      is QUARANTINED and not retried.
+      can't be loaded as it is. The file is QUARANTINED and not
+      retried.
 
     Any other exception is treated as FAILED too, but is a bug in
     the adapter: map it to one of the types above.
@@ -145,7 +145,7 @@ class Warehouse(Protocol):
             key: Unique identifier for this load. Pipeline derives it
                 from the source identity and checksum.
             checksum: SHA-256 of the source file.
-            data: Converted bytes to load (Parquet or NDJSON).
+            data: NDJSON rows to load (py_common.raw.to_ndjson()).
             rows: Expected row count; verified before committing.
             item: Source file the data came from (for its version).
 

@@ -1,14 +1,13 @@
-"""Error contract of both BigQuery warehouses.
+"""Error contract of the BigQuery raw warehouse.
 
 The pipeline acts on ServiceError (retry) and
-IndeterminateCommitError (state unknown). These tests drive each
+IndeterminateCommitError (state unknown). These tests drive the
 adapter's commit job into every outcome and assert the type raised,
 so the pipeline branches that handle them are reachable in
 production, not only with mocked warehouses.
 """
 
 from collections.abc import Callable
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, Mock, patch
 
@@ -19,7 +18,6 @@ from google.api_core.exceptions import (
     ServiceUnavailable,
 )
 
-from py_common.adapters.bigquery import BigQueryWarehouse
 from py_common.adapters.bigquery_raw import RawJsonWarehouse
 from py_common.errors import IndeterminateCommitError, ServiceError
 from py_common.model import SourceItem
@@ -38,17 +36,6 @@ def _load(warehouse: Any, data: bytes) -> None:
     warehouse.load("k.xlsx", "abc123", data, 1, ITEM)
 
 
-def _typed(client: MagicMock) -> Callable[[], None]:
-    """Build a BigQueryWarehouse on `client`; return a load call."""
-    with patch("py_common.adapters.bigquery.bigquery.Client") as cls:
-        cls.return_value = client
-        warehouse = BigQueryWarehouse("p", "d", "t")
-    client.get_table.return_value = SimpleNamespace(
-        schema=[SimpleNamespace(name="id", field_type="INTEGER")]
-    )
-    return lambda: _load(warehouse, b"parquet")
-
-
 def _raw(client: MagicMock) -> Callable[[], None]:
     """Build a RawJsonWarehouse on `client`; return a load call."""
     with patch("py_common.adapters.bigquery_raw.bigquery.Client") as cls:
@@ -57,11 +44,9 @@ def _raw(client: MagicMock) -> Callable[[], None]:
     return lambda: _load(warehouse, _NDJSON)
 
 
-@pytest.fixture(params=[_typed, _raw], ids=["typed", "raw"])
-def setup(
-    request: pytest.FixtureRequest,
-) -> tuple[MagicMock, Mock, Callable[[], None]]:
-    """(client, commit job, load()) for each adapter.
+@pytest.fixture
+def setup() -> tuple[MagicMock, Mock, Callable[[], None]]:
+    """(client, commit job, load()) for the raw warehouse.
 
     Every query except the commit script succeeds with one row
     holding 1, which satisfies any row-count or status check.
@@ -90,7 +75,7 @@ def setup(
         return other
 
     client.query.side_effect = query
-    return client, commit, request.param(client)
+    return client, commit, _raw(client)
 
 
 def test_job_reported_failed_raises_service_error_with_job_id(
@@ -168,7 +153,7 @@ def test_staging_load_failure_is_service_error(
     """A failed staging load (nothing committed) is ServiceError."""
     client, _, load = setup
     client.load_table_from_file.return_value.result.side_effect = BadRequest(
-        "bad parquet"
+        "bad json"
     )
 
     with pytest.raises(ServiceError, match="load-1"):

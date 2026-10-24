@@ -324,7 +324,6 @@ def check_duplicate_loads(client: QueryClient, audit_table: str) -> list[str]:
     No harm is done meanwhile. The documented "latest upload" query
     for raw tables reads one load per upload (docs/RAW_TABLE_LAYOUT.md);
     to tidy up, delete the rows of the later load (its ingested_at).
-    On a typed table the second commit merged the same values again.
 
     Args:
         client: BigQuery client.

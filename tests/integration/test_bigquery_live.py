@@ -1,11 +1,10 @@
-r"""Run both BigQuery warehouses against real BigQuery.
+r"""Run the raw JSON warehouse against real BigQuery.
 
-The unit tests run the adapters against a fake client that reads the
+The unit tests run the adapter against a fake client that reads the
 SQL text, and test_bq_dry_run.py checks that BigQuery accepts it.
-These tests run it for real and check what lands: merges, deleted-row
-marking, restores, BigQuery-safe column names, schema changes, the
-per-table "already loaded?" check, rollback, the documented "latest
-upload" query and check_duplicate_loads().
+These tests run it for real and check what lands: each upload loaded
+once, reverts, the per-table "already loaded?" check, rollback, the
+documented "latest upload" query and check_duplicate_loads().
 
 Needs GCP_PROJECT_ID and BQ_TEST_DATASET, an existing dataset the
 credentials can write to (roles/bigquery.dataEditor on it, and
@@ -37,17 +36,14 @@ bigquery = pytest.importorskip("google.cloud.bigquery")
 from openpyxl import Workbook  # noqa: E402
 
 from py_common.adapters import bigquery_raw  # noqa: E402
-from py_common.adapters.bigquery import BigQueryWarehouse  # noqa: E402
 from py_common.adapters.bigquery_raw import RawJsonWarehouse  # noqa: E402
 from py_common.contract import (  # noqa: E402
     Column,
     Contract,
-    SheetRows,
     Worksheet,
 )
-from py_common.errors import ObjectStoreConflict, ValidationError  # noqa: E402
+from py_common.errors import ObjectStoreConflict  # noqa: E402
 from py_common.model import Outcome, SourceItem, digest  # noqa: E402
-from py_common.parquet import to_parquet  # noqa: E402
 from py_common.pipeline import Pipeline  # noqa: E402
 from py_common.runner import check_duplicate_loads  # noqa: E402
 
@@ -275,227 +271,7 @@ def audit(client: Any, name: str) -> str:
     return table
 
 
-# -------------------------------------------------------- typed route
-
-SIGNUPS = Contract(
-    key_columns=["Participant ID"],
-    worksheets=[
-        Worksheet(
-            "Signups",
-            [
-                Column("Participant ID", "string"),
-                Column("Number of sites", "integer", nullable=True),
-                Column("Score %", "float", nullable=True),
-            ],
-        )
-    ],
-    file_name=FILE,
-)
-HEADINGS = ["Participant ID", "Number of sites", "Score %"]
-
-
-def _signups(*rows: list[Any]) -> bytes:
-    """Build a Signups workbook.
-
-    Args:
-        *rows: The data rows, below the standard headings.
-
-    Returns:
-        The .xlsx bytes.
-    """
-    return _book({"Signups": [HEADINGS, *rows]})
-
-
-def _typed_state(client: Any, table: str) -> dict[str, tuple[Any, bool]]:
-    """participant_id -> (number_of_sites, marked deleted?)."""
-    return {
-        row["participant_id"]: (row["number_of_sites"], row["deleted"])
-        for row in _rows(
-            client,
-            "SELECT participant_id, number_of_sites, "
-            f"_deleted_at IS NOT NULL AS deleted FROM `{_full(table)}`",
-        )
-    }
-
-
-def test_typed_route_merges_marks_deleted_rows_and_restores(
-    client: Any, name: str, audit: str
-) -> None:
-    """The typed route merges, marks removed rows, and restores them.
-
-    Args:
-        client: The BigQuery client.
-        name: This test's table-name stem.
-        audit: The audit table.
-    """
-    table = f"{name}_signups"
-    warehouse = BigQueryWarehouse(
-        PROJECT,
-        DATASET,
-        table,
-        audit_table_id=audit,
-        key_columns=SIGNUPS.key_columns,
-        mark_deleted_rows=True,
-    )
-    uploads = Uploads()
-    pipeline = Pipeline(uploads, Store(), warehouse, SIGNUPS)
-    first = _signups(["P1", 10, 0.5], ["P2", 20, None])
-
-    uploads.upload(first, "1")
-    assert _outcomes(pipeline) == [Outcome.LOADED]
-    schema = [f.name for f in client.get_table(_full(table)).schema]
-    assert schema == [
-        "participant_id",
-        "number_of_sites",
-        "score_percent",
-        "_loaded_at",
-        "_deleted_at",
-        "_source_file",
-    ]
-    assert _typed_state(client, table) == {
-        "P1": (10, False),
-        "P2": (20, False),
-    }
-
-    # The same upload again, with the store's marker cache lost: the
-    # audit check inside the commit transaction refuses it.
-    again = Pipeline(uploads, Store(), warehouse, SIGNUPS)
-    assert _outcomes(again) == [Outcome.SKIPPED]
-    assert _count(client, audit, "outcome = 'LOADED'") == 1
-
-    # A later upload: P1 changed, P2 gone, P3 new.
-    uploads.upload(_signups(["P1", 15, 0.5], ["P3", 30, 1.0]), "2")
-    assert _outcomes(pipeline) == [Outcome.LOADED]
-    assert _typed_state(client, table) == {
-        "P1": (15, False),
-        "P2": (20, True),
-        "P3": (30, False),
-    }
-
-    # The first upload again (a restore): its values win, P2 is back
-    # and P3, which it doesn't have, is marked deleted.
-    uploads.upload(first, "3")
-    assert _outcomes(pipeline) == [Outcome.LOADED]
-    assert _typed_state(client, table) == {
-        "P1": (10, False),
-        "P2": (20, False),
-        "P3": (30, True),
-    }
-    assert _count(client, audit, "outcome = 'LOADED'") == 3
-
-
-def test_typed_route_adds_a_column_and_refuses_a_type_change(
-    client: Any, name: str, audit: str
-) -> None:
-    """A new column is added; a changed column type is refused.
-
-    Args:
-        client: The BigQuery client.
-        name: This test's table-name stem.
-        audit: The audit table.
-    """
-    table = f"{name}_signups"
-    keys = ["Participant ID"]
-    warehouse = BigQueryWarehouse(
-        PROJECT, DATASET, table, audit_table_id=audit, key_columns=keys
-    )
-    uploads = Uploads()
-    store = Store()
-
-    def contract(*columns: Column) -> Contract:
-        """Build a keyed Signups contract.
-
-        Args:
-            *columns: Columns after Participant ID.
-
-        Returns:
-            The contract.
-        """
-        return Contract(
-            key_columns=keys,
-            worksheets=[
-                Worksheet(
-                    "Signups", [Column("Participant ID", "string"), *columns]
-                )
-            ],
-        )
-
-    sites = Column("Number of sites", "integer", nullable=True)
-    uploads.upload(
-        _book({"Signups": [["Participant ID", "Number of sites"], ["P1", 1]]}),
-        "1",
-    )
-    assert _outcomes(Pipeline(uploads, store, warehouse, contract(sites))) == [
-        Outcome.LOADED
-    ]
-
-    # A new column: added to the table, NULL on the earlier rows.
-    notes = Column("Notes", "string", nullable=True)
-    uploads.upload(
-        _book(
-            {
-                "Signups": [
-                    ["Participant ID", "Number of sites", "Notes"],
-                    ["P2", 2, "new"],
-                ]
-            }
-        ),
-        "2",
-    )
-    assert _outcomes(
-        Pipeline(uploads, store, warehouse, contract(sites, notes))
-    ) == [Outcome.LOADED]
-    assert {f.name for f in client.get_table(_full(table)).schema} >= {"notes"}
-    assert _count(client, table, "notes IS NULL") == 1
-
-    # A changed type: quarantined, and the table is left as it was.
-    as_text = Column("Number of sites", "string", nullable=True)
-    uploads.upload(
-        _book(
-            {"Signups": [["Participant ID", "Number of sites"], ["P3", "x"]]}
-        ),
-        "3",
-    )
-    assert _outcomes(
-        Pipeline(uploads, store, warehouse, contract(as_text))
-    ) == [Outcome.QUARANTINED]
-    assert _count(client, table) == 2
-
-
-def test_typed_route_refuses_repeated_keys_before_merging(
-    client: Any, name: str, audit: str
-) -> None:
-    """Repeated keys are quarantined before anything is merged.
-
-    Args:
-        client: The BigQuery client.
-        name: This test's table-name stem.
-        audit: The audit table.
-    """
-    table = f"{name}_signups"
-    warehouse = BigQueryWarehouse(
-        PROJECT,
-        DATASET,
-        table,
-        audit_table_id=audit,
-        key_columns=SIGNUPS.key_columns,
-    )
-    # Written directly: the contract would refuse it first.
-    parquet = to_parquet(
-        SheetRows(HEADINGS, [(2, ("P1", 1, None)), (3, ("P1", 2, None))]),
-        SIGNUPS.worksheets[0],
-        key_columns=SIGNUPS.key_columns,
-    )
-    item = SourceItem(FILE, f"was/{FILE}", "1", 1)
-
-    with pytest.raises(ValidationError, match="repeated key"):
-        warehouse.load("k", digest(parquet), parquet, 2, item)
-
-    assert _count(client, table) == 0
-    assert _count(client, audit) == 0
-
-
-# ---------------------------------------------------------- raw route
+# --------------------------------------------------------- raw tables
 
 SHEETS = Contract(
     worksheets=[
@@ -549,9 +325,7 @@ def test_raw_route_loads_each_upload_once_and_a_revert_again(
         PROJECT, DATASET, tables, audit_table_id=audit
     )
     uploads = Uploads()
-    pipeline = Pipeline(
-        uploads, Store(), warehouse, SHEETS, output_format="raw_json"
-    )
+    pipeline = Pipeline(uploads, Store(), warehouse, SHEETS)
     signups = tables["Signups"]
 
     uploads.upload(WORKBOOK, "100")
@@ -573,9 +347,7 @@ def test_raw_route_loads_each_upload_once_and_a_revert_again(
     ) == [{"n": 2}]
 
     # The same upload again, markers lost: nothing is inserted.
-    again = Pipeline(
-        uploads, Store(), warehouse, SHEETS, output_format="raw_json"
-    )
+    again = Pipeline(uploads, Store(), warehouse, SHEETS)
     assert _outcomes(again) == [Outcome.SKIPPED]
     assert _count(client, signups) == 2
 
@@ -605,18 +377,16 @@ def test_raw_route_loads_a_table_added_later_on_its_own(
     signups_only = RawJsonWarehouse(
         PROJECT, DATASET, {"Signups": tables["Signups"]}, audit_table_id=audit
     )
-    assert _outcomes(
-        Pipeline(
-            uploads, Store(), signups_only, first, output_format="raw_json"
-        )
-    ) == [Outcome.LOADED]
+    assert _outcomes(Pipeline(uploads, Store(), signups_only, first)) == [
+        Outcome.LOADED
+    ]
 
     # Same upload, with the Survey sheet now mapped too: only the new
     # table loads.
     both = RawJsonWarehouse(PROJECT, DATASET, tables, audit_table_id=audit)
-    assert _outcomes(
-        Pipeline(uploads, Store(), both, SHEETS, output_format="raw_json")
-    ) == [Outcome.LOADED]
+    assert _outcomes(Pipeline(uploads, Store(), both, SHEETS)) == [
+        Outcome.LOADED
+    ]
     assert _count(client, tables["Signups"]) == 2
     assert _count(client, tables["Survey"]) == 1
     assert _count(client, audit, "outcome = 'LOADED'") == 2
@@ -660,9 +430,9 @@ def test_a_failure_inside_the_commit_rolls_everything_back(
     uploads = Uploads()
     uploads.upload(WORKBOOK, "1")
 
-    assert _outcomes(
-        Pipeline(uploads, Store(), warehouse, SHEETS, output_format="raw_json")
-    ) == [Outcome.FAILED]
+    assert _outcomes(Pipeline(uploads, Store(), warehouse, SHEETS)) == [
+        Outcome.FAILED
+    ]
     assert _count(client, tables["Signups"]) == 0
     assert _count(client, tables["Survey"]) == 0
     assert _count(client, audit) == 0
@@ -685,11 +455,9 @@ def test_a_double_load_is_reported_and_hidden_from_the_latest_query(
     contract = Contract(worksheets=SHEETS.worksheets[:1], file_name=FILE)
     uploads = Uploads()
     uploads.upload(WORKBOOK, "1")
-    assert _outcomes(
-        Pipeline(
-            uploads, Store(), warehouse, contract, output_format="raw_json"
-        )
-    ) == [Outcome.LOADED]
+    assert _outcomes(Pipeline(uploads, Store(), warehouse, contract)) == [
+        Outcome.LOADED
+    ]
 
     # What two commits of one upload racing each other would leave:
     # every row and the audit row twice, a moment apart.

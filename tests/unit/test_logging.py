@@ -43,7 +43,7 @@ def _workbook() -> bytes:
 
 
 def _run() -> None:
-    """One raw-route run of one file against the fake BigQuery."""
+    """One run of one file against the fake BigQuery."""
     with patch("py_common.adapters.bigquery_raw.bigquery.Client") as cls:
         cls.return_value = FakeBigQueryClient()
         warehouse = RawJsonWarehouse("p", "d", {"Events": "raw_events"})
@@ -57,7 +57,7 @@ def _run() -> None:
     contract = Contract(
         worksheets=[Worksheet("Events", columns=[Column("name", "string")])]
     )
-    Pipeline(source, store, warehouse, contract, "raw_json").run()
+    Pipeline(source, store, warehouse, contract).run()
 
 
 def _capture() -> list[dict[str, Any]]:

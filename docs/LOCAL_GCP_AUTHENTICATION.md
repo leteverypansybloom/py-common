@@ -20,7 +20,7 @@ This file contains credentials for the Google account you choose during
 sign-in. Do not create or edit it by hand, commit it to Git, or share
 its contents.
 
-In the current codebase, `GCSObjectStore` and `BigQueryWarehouse` create
+In the current codebase, `GCSObjectStore` and `RawJsonWarehouse` create
 Google Cloud clients directly. Those clients automatically look for ADC;
 they do not call `scripts/gcp_auth.py`, which is not part of the library.
 

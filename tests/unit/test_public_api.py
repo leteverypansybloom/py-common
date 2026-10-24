@@ -45,6 +45,6 @@ def test_config_error_lives_in_errors_and_is_reexported() -> None:
     assert issubclass(errors.ConfigError, errors.IngestionError)
 
 
-def test_version_is_0_2_0() -> None:
+def test_version_is_0_3_0() -> None:
     """The package reports the version in pyproject.toml."""
-    assert py_common.__version__ == "0.2.0"
+    assert py_common.__version__ == "0.3.0"

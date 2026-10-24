@@ -180,7 +180,7 @@ class LocalObjectStore:
         raises rather than silently overwriting.
 
         Args:
-            key: Object path (e.g., "processed/item123.parquet").
+            key: Object path (e.g., "processed/item123.ndjson").
             data: Bytes to store.
 
         Raises:

@@ -5,9 +5,9 @@ Orchestrates:
 2. Download and hash each file
 3. Validate against contract
 4. Store raw file in object store
-5. Convert to Parquet, or to JSON rows for a raw table
+5. Convert every worksheet's rows to newline-delimited JSON
 6. Load into warehouse staging
-7. Merge or insert into the destination table(s)
+7. Insert into the raw table(s)
 8. Record audit entry
 """
 
@@ -18,9 +18,9 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from time import perf_counter
-from typing import Any, Literal
+from typing import Any
 
-from py_common.contract import Contract, SheetRows
+from py_common.contract import Contract
 from py_common.errors import (
     ConfigError,
     IndeterminateCommitError,
@@ -30,7 +30,6 @@ from py_common.errors import (
 )
 from py_common.logging import add_log_fields, context_fields, log_context
 from py_common.model import AuditRecord, Outcome, Result, SourceItem, digest
-from py_common.parquet import to_parquet
 from py_common.ports import ObjectStore, Source, Warehouse
 from py_common.raw import to_ndjson
 
@@ -63,7 +62,7 @@ def _library_version() -> str:
     so importing the package at the top would be circular.
 
     Returns:
-        e.g. "0.2.0".
+        e.g. "0.3.0".
     """
     import py_common
 
@@ -77,77 +76,41 @@ class Pipeline:
     Attributes:
         source: Source to discover and download files.
         store: Object store for raw and processed files.
-        warehouse: Warehouse for staging and final tables.
+        warehouse: Warehouse for the raw tables.
         contract: Workbook validation rules.
-        output_format: What the warehouse is given. "parquet" (the
-            default) is the primary worksheet as Parquet, for
-            BigQueryWarehouse. "raw_json" is every configured
-            worksheet as newline-delimited JSON rows, for
-            RawJsonWarehouse.
     """
 
     source: Source
     store: ObjectStore
     warehouse: Warehouse
     contract: Contract
-    output_format: Literal["parquet", "raw_json"] = "parquet"
 
     def __post_init__(self) -> None:
         """Reject a configuration that can't load correctly.
 
         Checked when the pipeline is built, so a mistake fails the
-        deployment instead of failing (or silently mis-loading) every
-        file at run time.
+        deployment instead of failing every file at run time.
 
         Raises:
-            ValueError: output_format is not "parquet" or "raw_json".
-            ConfigError: The warehouse's merge keys differ from the
-                contract's, or a raw warehouse's sheet-to-table
-                mapping doesn't match the contract's worksheets.
+            ConfigError: The warehouse's sheet-to-table mapping doesn't
+                match the contract's worksheets.
         """
-        if self.output_format not in ("parquet", "raw_json"):
-            raise ValueError(
-                f"output_format must be 'parquet' or 'raw_json', "
-                f"got {self.output_format!r}"
-            )
         if isinstance(self.contract, Contract):
-            self._check_keys_match()
             self._check_tables_match()
 
-    def _check_keys_match(self) -> None:
-        """The typed warehouse merges on the contract's key columns.
-
-        They are configured twice (Contract.key_columns and
-        BigQueryWarehouse(key_columns=...)). A warehouse given none
-        would append every upload again; one given other columns
-        would merge on the wrong ones.
-
-        Raises:
-            ConfigError: The two lists differ.
-        """
-        keys = getattr(self.warehouse, "key_columns", None)
-        if self.output_format != "parquet" or not isinstance(keys, list):
-            return
-        if list(keys) != list(self.contract.key_columns):
-            raise ConfigError(
-                f"Warehouse {self.warehouse.identity} merges on "
-                f"key_columns {keys!r}, but the contract's key_columns "
-                f"are {self.contract.key_columns!r}. Pass "
-                "key_columns=contract.key_columns to the warehouse."
-            )
-
     def _check_tables_match(self) -> None:
-        """A raw warehouse maps exactly the contract's worksheets.
+        """The warehouse maps exactly the contract's worksheets.
 
         A sheet with no table would fail every load; a table with no
         sheet would get an empty audit row on every load and never be
-        created.
+        created. A warehouse without a ``tables`` mapping (a test
+        double, say) is not checked.
 
         Raises:
             ConfigError: The mapping has missing or extra sheets.
         """
         tables = getattr(self.warehouse, "tables", None)
-        if self.output_format != "raw_json" or not isinstance(tables, Mapping):
+        if not isinstance(tables, Mapping):
             return
         sheets = [ws.name for ws in self.contract.worksheets]
         missing = [name for name in sheets if name not in tables]
@@ -292,15 +255,7 @@ class Pipeline:
                 )
 
             self._store_raw(item, data, checksum)
-            try:
-                processed, rows_processed = self._convert(
-                    item, sheets, checksum, warnings
-                )
-            except ValidationError as e:
-                errors = self._quarantine_invalid(item, data, checksum, e)
-                return self._make_result(
-                    item, Outcome.QUARANTINED, checksum, 0, errors, start_time
-                )
+            processed, rows_processed = to_ndjson(sheets, item, checksum)
 
             # Logged at WARNING so an alert can be raised on them: in
             # "warn" mode the file loads, so nothing else would show
@@ -417,8 +372,7 @@ class Pipeline:
         Within a destination it follows the warehouses' own dedup
         rule: the upload (source identity and version), not its
         bytes. Every new upload loads, even one that repeats earlier
-        content: a restore must win again on the typed route, and be
-        the latest generation on the raw route.
+        content, so a restored upload becomes the latest generation.
 
         Args:
             item: SourceItem being processed.
@@ -488,102 +442,14 @@ class Pipeline:
         """
         self.store.put(f"raw/{self._version_key(item, checksum)}", data)
 
-    def _convert(
-        self,
-        item: SourceItem,
-        sheets: dict[str, SheetRows],
-        checksum: str,
-        warnings: list[str] | None = None,
-    ) -> tuple[bytes, int]:
-        """Convert the workbook's rows into what the warehouse loads.
-
-        Args:
-            item: SourceItem being processed.
-            sheets: Rows per worksheet, from Contract.read().
-            checksum: SHA-256 of the source bytes.
-            warnings: Where Parquet conversion reports values loaded
-                as NULL (mutated).
-
-        Returns:
-            (bytes to load, rows the warehouse should find in them).
-            For Parquet that is the primary worksheet's rows; for raw
-            JSON it is the rows of every configured worksheet.
-        """
-        if self.output_format == "raw_json":
-            return to_ndjson(sheets, item, checksum)
-        primary = self.contract.worksheets[0]
-        parquet = self._sheets_to_parquet(sheets, item.name, warnings)
-        return parquet, len(sheets[primary.name].rows)
-
-    def _to_parquet(
-        self,
-        data: bytes,
-        source_name: str = "workbook",
-        warnings: list[str] | None = None,
-    ) -> bytes:
-        """Convert the primary worksheet to Parquet bytes.
-
-        Looks up the primary worksheet by the name the contract
-        validated, not wb.active: the workbook's active sheet has no
-        guaranteed relation to which sheet the contract expects. Only
-        the columns the contract selects are written.
-
-        The output is a pure function of the input bytes (no load
-        timestamp), so a retry after a failed warehouse load writes
-        identical bytes to the same processed/ key. The warehouse
-        stamps _loaded_at when it commits.
-
-        Column types come from the contract (py_common.parquet), not
-        from the values, so mixed values in a "warn" sheet load (bad
-        ones as NULL, with a warning) and an empty column keeps its
-        type.
-
-        Args:
-            data: Raw Excel bytes.
-            source_name: File name, for warnings.
-            warnings: Where values loaded as NULL are reported
-                (mutated).
-
-        Returns:
-            Parquet-encoded bytes of the primary worksheet.
-        """
-        sheets = self.contract.extract(data, source_name)
-        return self._sheets_to_parquet(sheets, source_name, warnings)
-
-    def _sheets_to_parquet(
-        self,
-        sheets: dict[str, SheetRows],
-        source_name: str = "workbook",
-        warnings: list[str] | None = None,
-    ) -> bytes:
-        """Write the primary worksheet's rows as typed Parquet.
-
-        Args:
-            sheets: Rows per worksheet, from Contract.read().
-            source_name: File name, for warnings.
-            warnings: Where values loaded as NULL are reported
-                (mutated).
-
-        Returns:
-            Parquet-encoded bytes of the primary worksheet.
-        """
-        primary = self.contract.worksheets[0]
-        return to_parquet(
-            sheets[primary.name],
-            primary,
-            source_name,
-            warnings,
-            key_columns=self.contract.key_columns,
-        )
-
     def _store_processed(
         self, item: SourceItem, checksum: str, processed: bytes
     ) -> str:
-        """Store the converted bytes (Parquet or NDJSON).
+        """Store the converted NDJSON bytes.
 
         The store is write-once, so the key must change whenever the
         bytes do. It is "processed/{warehouse}/{identity}/{checksum}/
-        {version}/{digest}/{name}.parquet" (or ".ndjson"):
+        {version}/{digest}/{name}.ndjson":
 
         - the warehouse: pipelines reading different sheets of one
           workbook write different bytes;
@@ -603,11 +469,10 @@ class Pipeline:
         Returns:
             The key written.
         """
-        extension = "ndjson" if self.output_format == "raw_json" else "parquet"
         key = (
             f"processed/{self.warehouse.identity}/{item.identity}/"
             f"{checksum}/{item.version}/{digest(processed)[:16]}/"
-            f"{item.name}.{extension}"
+            f"{item.name}.ndjson"
         )
         self.store.put(key, processed)
         return key
@@ -630,7 +495,7 @@ class Pipeline:
                 warehouse rejects the file as invalid.
             warehouse_key: Unique identifier for this load.
             checksum: SHA-256 of the source bytes.
-            processed: Converted Parquet or NDJSON data to load.
+            processed: NDJSON rows to load.
             rows_processed: Expected row count for verification.
             errors: Errors list to append to on failure (mutated).
 

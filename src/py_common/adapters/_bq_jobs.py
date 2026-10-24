@@ -1,8 +1,7 @@
 """Run BigQuery jobs and map their failures to py_common errors.
 
-Shared by BigQueryWarehouse and RawJsonWarehouse. The pipeline acts
-on two error types from a warehouse, and these helpers are where
-they come from:
+Used by RawJsonWarehouse. The pipeline acts on two error types from
+a warehouse, and these helpers are where they come from:
 
 - ServiceError: BigQuery said the job failed, so a script
   transaction in it did not commit. Safe to retry.
@@ -248,7 +247,7 @@ class CommitPart:
             `destination` and the scope of its "already loaded?"
             check.
         writes: DML statements (no trailing semicolon) writing this
-            table's rows, e.g. a MERGE or INSERT ... SELECT.
+            table's rows, e.g. an INSERT ... SELECT.
         rows: Rows this table gets, for its audit row.
     """
 
@@ -265,7 +264,7 @@ DEDUP_COLUMNS = ("filename", "source_version")
 
 
 def commit_script(parts: list[CommitPart], audit_full_id: str) -> str:
-    """Build the idempotent commit script shared by both warehouses.
+    """Build the idempotent commit script for one load.
 
     One transaction. For each destination table: check the audit
     table for a LOADED row for this table and this upload; if there
@@ -344,7 +343,7 @@ def commit_parameters(
         checksum: SHA-256 of the source file.
         parts: The same parts given to commit_script().
         item: Source file loaded (for its version).
-        timestamp: Commit timestamp (audit timestamp, _loaded_at /
+        timestamp: Commit timestamp (audit timestamp and
             ingested_at).
 
     Returns:
@@ -447,7 +446,7 @@ def create_staging_table(
     Args:
         client: BigQuery client.
         full_id: project.dataset.table to create.
-        schema: Columns; None lets the first load set them (Parquet).
+        schema: Columns; None lets the first load set them.
 
     Raises:
         ServiceError: The table could not be created.

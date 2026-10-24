@@ -6,15 +6,12 @@ The unit tests check py-common's BigQuery SQL against a stand-in for
 BigQuery. The live tests (`tests/integration/test_bigquery_live.py`)
 run it in real BigQuery, in a test dataset, and check what lands:
 
-- typed route: merges, deleted-row marking, restores, BigQuery-safe
-  column names, a new column added and a changed type refused,
-  repeated keys refused before merging;
-- raw route: each upload loads once, a revert loads again, a table
-  added later loads on its own;
-- both: a failure inside the commit rolls back everything, the
-  "already loaded?" check refuses a repeat even with the store's
-  markers gone, the documented "latest upload" query reads one load
-  per upload, and `check_duplicate_loads()` finds a double load.
+- each upload loads once, a revert loads again, and a table added
+  later loads on its own;
+- a failure inside the commit rolls back everything, the "already
+  loaded?" check refuses a repeat even with the store's markers
+  gone, the documented "latest upload" query reads one load per
+  upload, and `check_duplicate_loads()` finds a double load.
 
 They run every night at 03:17 UTC and whenever you press **Run
 workflow** (GitHub → Actions → *Live BigQuery tests*). They don't

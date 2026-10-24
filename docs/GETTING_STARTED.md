@@ -48,7 +48,7 @@ recorded metadata is not refreshed otherwise, and the dependency tests
 in `tests/unit/test_packaging.py` read that metadata.
 
 **Why `gcp` is included:** the unit tests for `GCSObjectStore` and
-`BigQueryWarehouse` import `google.cloud` directly (mocking the calls, not the
+`RawJsonWarehouse` import `google.cloud` directly (mocking the calls, not the
 import), so with `.[dev]` alone `pytest` fails to collect them. No GCP
 credentials are needed - only the libraries. The optional groups in
 `pyproject.toml` are `dev`, `gcp` and `sharepoint`; there is no `all`
@@ -102,24 +102,24 @@ what's missing), see
   workbook must satisfy. `Contract.validate()` is deterministic: the
   same bytes always produce the same result, pass or fail.
 - **`ObjectStore`** (`ports.py`) is immutable storage for raw
-  files, processed Parquet, and audit records. `LocalObjectStore`
+  files, processed JSON rows, and audit records. `LocalObjectStore`
   (`adapters/local.py`) implements it against a folder;
   `GCSObjectStore` (`adapters/gcs.py`) implements it against a GCS
   bucket. Both accept a repeated `put()` of identical bytes and raise
   `ObjectStoreConflict` if a key already holds *different* bytes.
 - **`Warehouse`** (`ports.py`) stages, verifies and loads data into
-  a destination table, and records its own audit entry.
-  `BigQueryWarehouse` (`adapters/bigquery.py`) implements it: it loads
-  into a staging table, checks the row count, then `MERGE`s into the
-  final table on the `key_columns` you pass it (normally
-  `contract.key_columns`), or appends if you pass none. **There is no
+  destination tables, and records its own audit entry.
+  `RawJsonWarehouse` (`adapters/bigquery_raw.py`) implements it: it
+  loads each worksheet's rows into a staging table, checks the row
+  count, then inserts them into that worksheet's raw table, one JSON
+  payload per row, in one transaction with the audit row. **There is no
   local, in-memory `Warehouse` in this repository** - you'll write a
   tiny fake yourself in [Section 5](#5-wire-your-first-pipeline),
   which is also the easiest way to learn the protocol.
 
 `Pipeline` (`pipeline.py`) is the one class that ties them together:
 discover → download → hash → validate → land raw → convert to
-Parquet → load → audit, for every file a `Source` reports.
+JSON rows → load → audit, for every file a `Source` reports.
 
 ## 4. Validate one file directly
 
@@ -131,7 +131,6 @@ from pathlib import Path
 from py_common.contract import Column, Contract, Worksheet
 
 contract = Contract(
-    key_columns=["event_id"],
     worksheets=[
         Worksheet(
             name="Events",
@@ -217,7 +216,6 @@ class FakeWarehouse:
 
 
 contract = Contract(
-    key_columns=["event_id"],
     worksheets=[Worksheet(name="Events", columns=[
         Column("event_id", data_type="string", nullable=False,
                unique=True),
@@ -260,7 +258,7 @@ hww_repeated_other.xlsx quarantined 0
 
 - a `raw/` copy of every file, even the quarantined ones;
 - a `quarantine/` copy of the ten rejected ones;
-- `processed/fake-warehouse/events_valid.xlsx/<checksum>/<version>/<digest>/events_valid.xlsx.parquet`;
+- `processed/fake-warehouse/events_valid.xlsx/<checksum>/<version>/<digest>/events_valid.xlsx.ndjson`;
 - one JSON audit record per file under `audit/records/`.
 
 Stored copies are keyed `{identity}/{checksum}/{name}`, so an edited
@@ -270,12 +268,12 @@ pipelines reading different sheets of one workbook don't clash, and
 by the upload's version and a digest of the converted bytes, so
 converting a file again after a contract change writes a new copy.
 
-### The raw JSON route
+### Leaving out personal data
 
-To load rows as JSON for cleaning in Dataform instead, pass
-`output_format="raw_json"`. Here a contract keeps three columns of the
-peer-monitoring layout and excludes the name and email columns. The
-same `FakeWarehouse` shows what would be loaded:
+A contract can exclude columns so they are never loaded. Here a
+contract keeps three columns of the peer-monitoring layout and
+excludes the name and email columns. The same `FakeWarehouse` shows
+what would be loaded:
 
 ```python
 peers = Contract(worksheets=[Worksheet(
@@ -295,7 +293,6 @@ raw = Pipeline(
     store=LocalObjectStore(tmp / "raw-store"),
     warehouse=warehouse,
     contract=peers,
-    output_format="raw_json",
 )
 item = next(i for i in raw.source.items()
             if i.name == "hww_header_mismatch.xlsx")
@@ -373,15 +370,15 @@ README, "SharePoint source").
 
 ## 8. Next steps
 
-- **Define a contract for your real data**, not the `Events` sample - 
+- **Define a contract for your real data**, not the `Events` sample -
   copy the shape in [Section 4](#4-validate-one-file-directly), one
   `Column` per header your source actually produces.
 - **Try it against real GCS and BigQuery**: `scripts/demo.py` runs
-  the fixtures through `GCSObjectStore` and `BigQueryWarehouse` in a
+  the fixtures through `GCSObjectStore` and `RawJsonWarehouse` in a
   development project; read its header for the environment variables
-  it needs first. It writes to real cloud resources. For the raw JSON
-  route, [`GCP_SETUP.md`](GCP_SETUP.md) walks through the buckets,
-  datasets, job and alerts.
+  it needs first. It writes to real cloud resources.
+  [`GCP_SETUP.md`](GCP_SETUP.md) walks through the buckets, datasets,
+  job and alerts.
 - **Decide if `py-common` is the right fit for your new source at
   all**, and how to add one if it needs an adapter that doesn't exist
   yet (a database, an API, a different file share) - see

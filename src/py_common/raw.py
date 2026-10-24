@@ -1,7 +1,7 @@
 """Convert workbook rows to newline-delimited JSON for raw tables.
 
-The raw JSON route loads each worksheet's rows into a raw BigQuery
-table as a JSON payload, plus columns saying where the row came
+The pipeline loads each worksheet's rows into a raw BigQuery table
+as a JSON payload, plus columns saying where the row came
 from. Cleaning and typing happen later, in the transformation layer
 (Dataform), which is why the payload keeps Excel's values as close
 to the original as JSON allows.

@@ -30,7 +30,6 @@ opentelemetry-api==1.45.1
 packaging==26.3
 proto-plus==1.29.0
 protobuf==7.36.2
-pyarrow==26.0.0
 pyasn1==0.6.4
 pyasn1_modules==0.4.2
 pycparser==3.11

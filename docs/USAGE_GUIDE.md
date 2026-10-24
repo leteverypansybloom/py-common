@@ -45,10 +45,8 @@ ingestion" repo, for example - should mostly be a `config.yaml`, a
   `Other_2`), or columns of personal data you must not load
   (`excluded`).
 - You want rows landed **as raw JSON for cleaning in Dataform**, one
-  raw table per worksheet (`output_format="raw_json"` with
-  `RawJsonWarehouse`; see [`RAW_TABLE_LAYOUT.md`](RAW_TABLE_LAYOUT.md)),
-  or merged into a **typed table** on key columns
-  (`BigQueryWarehouse`).
+  raw table per worksheet (`RawJsonWarehouse`; see
+  [`RAW_TABLE_LAYOUT.md`](RAW_TABLE_LAYOUT.md)).
 - You need a **defensible audit trail**: who processed what, when,
   with what checksum and outcome - without extra work
   (`model.py`, written by `pipeline.py`).
@@ -87,7 +85,7 @@ supported**, not as permanently out of scope:
   hard-codes `openpyxl.load_workbook()` (`contract.py`), so
   today's contract only knows how to check an Excel workbook. Reading
   from a database would need either a contract variant that accepts a
-  `pandas.DataFrame` or CSV/Parquet bytes instead of an Excel
+  `pandas.DataFrame` or CSV bytes instead of an Excel
   workbook, or a database source that serialises its query result as
   an in-memory workbook before handing it to the existing contract
   (workable for small extracts, wasteful for large ones).
@@ -138,7 +136,7 @@ The pattern is the same for any new `Source`, `ObjectStore` or
 ## Deciding what belongs in py-common vs. your project
 
 Restated briefly from
-[`INGESTION_FRAMEWORK_GUIDE.md`, Section 3](INGESTION_FRAMEWORK_GUIDE.md#3-framework-vs-solution) - 
+[`INGESTION_FRAMEWORK_GUIDE.md`, Section 3](INGESTION_FRAMEWORK_GUIDE.md#3-framework-vs-solution) -
 read that section for the full reasoning:
 
 - Put it in `py-common` if more than one feed will need it, or it

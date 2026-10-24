@@ -3,8 +3,8 @@
 *For whoever builds the Dataform (cleaning and modelling) layer on top
 of the raw tables that py-common loads.*
 
-py-common's raw JSON route (`Pipeline(output_format="raw_json")` with
-`RawJsonWarehouse`) writes one raw BigQuery table per worksheet. This
+py-common (`Pipeline` with `RawJsonWarehouse`) writes one raw
+BigQuery table per worksheet. This
 page describes what is in those tables and the rules that decide it,
 so the SQL that reads them doesn't have to guess.
 
@@ -81,8 +81,7 @@ Keys are column names as py-common reads them from the heading row
 
 - **Headings are used exactly as written.** Nothing is trimmed, so
   `'Organisation Industry '` keeps its trailing space. Numeric or date
-  headings become text. (Typed tables are different: their column
-  names are made BigQuery-safe, e.g. `organisation_industry`.)
+  headings become text.
 - **Blank heading over data:** named after the column letter, e.g.
   `col_B`. A blank heading over an empty column is ignored.
 - **Repeated heading:** the first keeps its name, later ones get `_2`,

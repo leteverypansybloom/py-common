@@ -3,7 +3,7 @@
 Each adapter implements one of the ports (protocols):
 - Source: LocalSource, SharePointSource (Microsoft Graph), GCSSource
 - ObjectStore: LocalObjectStore, GCSObjectStore
-- Warehouse: BigQueryWarehouse (typed MERGE), RawJsonWarehouse (raw JSON)
+- Warehouse: RawJsonWarehouse (raw JSON tables in BigQuery)
 - SecretStore: no implementation yet
 
 Only the local adapters are exported here, because the cloud adapters
