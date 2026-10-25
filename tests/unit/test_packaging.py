@@ -1,8 +1,11 @@
 """Tests of packaging and test-suite hygiene."""
 
+import importlib
+import re
 import subprocess
 import sys
 from importlib.metadata import requires
+from pathlib import Path
 
 import pytest
 from packaging.requirements import Requirement
@@ -43,6 +46,45 @@ class TestDependencyFloors:
         spec = _requirement("requests", extra).specifier
         assert not spec.contains("2.32.4")
         assert spec.contains("2.33.0")
+
+
+#: The repository root, holding the Dockerfiles.
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def _image_imports(dockerfile: str) -> list[str]:
+    """List the py-common modules a Dockerfile's build check imports.
+
+    Args:
+        dockerfile: The Dockerfile's text.
+
+    Returns:
+        Each module named after ``import`` in a ``python -c`` line.
+    """
+    modules = []
+    for command in re.findall(r'python -c "([^"]*)"', dockerfile):
+        for statement in command.split(";"):
+            statement = statement.strip()
+            if statement.startswith("import "):
+                modules += [
+                    name.strip()
+                    for name in statement.removeprefix("import ").split(",")
+                ]
+    return [name for name in modules if name.split(".")[0] == "py_common"]
+
+
+@pytest.mark.parametrize("name", ["Dockerfile"])
+def test_image_build_check_imports_existing_modules(name: str) -> None:
+    """The image's build-time import check names modules that exist.
+
+    Args:
+        name: The Dockerfile to read.
+    """
+    modules = _image_imports((ROOT / name).read_text(encoding="utf-8"))
+
+    assert modules, f"{name} has no py-common import check"
+    for module in modules:
+        importlib.import_module(module)
 
 
 def test_live_tests_are_all_marked_integration() -> None:

@@ -8,7 +8,7 @@
 #   python -m venv /tmp/c && /tmp/c/bin/pip install ".[gcp,sharepoint]"
 #   /tmp/c/bin/pip freeze | grep -v -i "^py-common" > constraints.txt
 #   (and put this header back)
-certifi==2026.7.22
+certifi==2026.10.19
 cffi==2.1.1
 charset-normalizer==3.5.2
 cryptography==50.0.2

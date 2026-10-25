@@ -28,6 +28,11 @@ The raw JSON route is the only load route.
 
 ### Fixed
 
+- The Docker image's build check imports
+  `py_common.adapters.bigquery_raw`; a test checks every module it
+  names exists.
+- `constraints.txt` pins certifi 2026.10.19, which fixes
+  PYSEC-2026-4320.
 - `scripts/gcp_auth.py` looked for the gcloud credentials file
   directly under `%APPDATA%` on Windows; gcloud keeps it in
   `%APPDATA%\gcloud`.

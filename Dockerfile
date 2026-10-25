@@ -53,7 +53,7 @@ USER app
 WORKDIR /home/app
 
 # Verify installation
-RUN python -c "import py_common, py_common.adapters.bigquery; print(f'py-common {py_common.__version__} installed')"
+RUN python -c "import py_common, py_common.adapters.bigquery_raw; print(f'py-common {py_common.__version__} installed')"
 
 # Default command (override in child images)
 CMD ["python", "-c", "import py_common; print('py-common library ready')"]
