@@ -71,8 +71,9 @@ file is quarantined) unless its contract sets `allow_empty=True`.
 Without this, an upload that came out empty would insert nothing,
 and the "latest upload" query below would keep returning the
 previous upload's rows. Only set `allow_empty=True` for a sheet where
-"nothing this time" is a real answer, and bear in mind the query
-below still returns the last upload that had rows.
+"nothing this time" is a real answer, and read such a table with the
+audit-table query below ("Latest upload, empty uploads included"):
+the shorter query returns the last upload that had rows.
 
 ## Payload keys
 
@@ -158,6 +159,35 @@ of one load has the same `ingested_at`, so if an upload were ever
 loaded twice (see "Each generation loads exactly once" above), only
 the later load's rows are read.
 
+**Latest upload, empty uploads included.** An upload with no rows
+inserts nothing into the raw table, so the query above can't see it.
+The audit table records every load, empty ones too, so choose the load
+there and read its rows. The audit row's `filename` is the load key,
+the file's path in the landing folder, `_` and the first 8 hex digits
+of its checksum; `destination` is the raw table's full id:
+
+```sql
+WITH selected AS (
+  SELECT source_version, timestamp
+  FROM `project.raw_hww.audit`
+  WHERE outcome = 'LOADED'
+    AND ENDS_WITH(destination, '.hww_was_database')
+    AND REGEXP_EXTRACT(filename, r'([^/]+)_[0-9a-f]{8}$') = 'dummy_was_database.xlsx'
+  ORDER BY timestamp DESC
+  LIMIT 1
+)
+SELECT raw.*
+FROM `project.raw_hww.hww_was_database` AS raw
+JOIN selected
+  ON raw.source_generation = selected.source_version
+  AND raw.ingested_at = selected.timestamp
+```
+
+It returns no rows when the newest upload was empty, which is the
+right answer for a cumulative file. It also reads one file name only,
+so an old name's last upload can't come back. Comparing the number of
+rows with the audit row's `row_count` catches an incomplete read.
+
 **One file name per workbook.** "Latest" is per `source_file`, the
 file's name. If a cumulative file were uploaded under a new name each
 time (a date in the name, say), every name would have its own latest
@@ -229,6 +259,8 @@ FROM latest
 
 ## See also
 
+- [`DATAFORM.md`](DATAFORM.md): how to lay out, run and check a
+  Dataform project on these tables in GCP.
 - [`RAW_JSON_VS_CONTRACT_VALIDATION.md`](RAW_JSON_VS_CONTRACT_VALIDATION.md):
   why raw JSON plus Dataform.
 - [`GCP_SETUP.md`](GCP_SETUP.md): the buckets, datasets and

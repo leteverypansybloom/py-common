@@ -6,6 +6,18 @@ All notable changes to py-common. The supported API is what
 [semantic versioning](https://semver.org/): while the major version
 is 0, a minor release (0.x.0) may break that API, and says how below.
 
+## Unreleased
+
+### Documentation
+
+- `docs/DATAFORM.md`: how to build and run a Dataform project on the
+  raw tables in GCP: bronze, silver and gold datasets, reading the
+  selected load, stops and output checks, the repository-root rule,
+  the service account's roles and the schedule.
+- `docs/RAW_TABLE_LAYOUT.md`: a "latest upload" query that chooses
+  the load from the audit table, so an upload with no rows counts as
+  the newest.
+
 ## 0.3.0 - 2026-10-24
 
 The raw JSON route is the only load route.

@@ -39,7 +39,9 @@ Every configured worksheet is inserted into its own raw table
 generation, sheet and row number it came from. Rows are only ever
 inserted; Dataform picks the latest upload and does the cleaning and
 typing. See [`docs/RAW_TABLE_LAYOUT.md`](docs/RAW_TABLE_LAYOUT.md)
-and [`docs/GCP_SETUP.md`](docs/GCP_SETUP.md). Why raw JSON:
+and [`docs/GCP_SETUP.md`](docs/GCP_SETUP.md); for the Dataform layer
+(bronze, silver and gold datasets),
+[`docs/DATAFORM.md`](docs/DATAFORM.md). Why raw JSON:
 [`docs/RAW_JSON_VS_CONTRACT_VALIDATION.md`](docs/RAW_JSON_VS_CONTRACT_VALIDATION.md).
 
 ## Quick Start
