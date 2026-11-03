@@ -2,16 +2,21 @@
 
 A contract specifies required worksheets, columns, data types,
 and business rules. Validation is deterministic and repeatable.
+The file can be an Excel workbook, or a CSV, JSON or JSON Lines file
+holding one table (Contract.file_format).
 """
 
+import csv
 import json
+import math
 import posixpath
+import re
 import zipfile
 import zlib
 from dataclasses import asdict, dataclass, field
-from datetime import date
+from datetime import date, datetime
 from hashlib import sha256
-from io import BytesIO
+from io import BytesIO, StringIO
 from typing import IO, Any, Literal
 from xml.etree import ElementTree
 
@@ -57,6 +62,34 @@ _TYPE_CHECKS: dict[str, tuple[type | tuple[type, ...], str]] = {
     "date": (date, "date"),
 }
 
+#: The file types a Contract reads, and the extensions (lower case)
+#: each is uploaded with. Pipeline checks a source picks up only
+#: extensions its contract's file_format reads.
+FILE_EXTENSIONS: dict[str, tuple[str, ...]] = {
+    "xlsx": (".xlsx", ".xlsm"),
+    "csv": (".csv",),
+    "json": (".json",),
+    "jsonl": (".jsonl", ".ndjson"),
+}
+
+#: The error for a whole number BigQuery's INT64 can't hold (it would
+#: otherwise load as NULL). Such a value isn't checked for uniqueness.
+_OUT_OF_RANGE = "is outside the INT64 range"
+
+# Text a CSV field must match to fit an "integer", "float" or "date"
+# column. ASCII digits only: \d would also accept other scripts'
+# digits, which BigQuery won't cast.
+_INTEGER_TEXT = re.compile(r"[+-]?[0-9]+")
+_NUMBER_TEXT = re.compile(r"[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?")
+_ISO_DATE_TEXT = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}([T ].+)?")
+
+# What a CSV field must read as, for error messages.
+_TEXT_LABELS = {
+    "integer": "a whole number",
+    "float": "a number",
+    "date": "a date (YYYY-MM-DD)",
+}
+
 
 @dataclass
 class Column:
@@ -79,13 +112,21 @@ class Column:
 class Worksheet:
     """Worksheet definition within a workbook.
 
+    A CSV or JSON file holds one table, which its contract's one
+    Worksheet describes.
+
     Attributes:
-        name: Worksheet name (must match Excel sheet name).
-        columns: List of required columns.
+        name: Worksheet name (must match Excel sheet name). For a
+            CSV or JSON file, any name for its table, e.g. "items":
+            it is the raw rows' sheet_name and the key of the
+            warehouse's table mapping.
+        columns: List of required columns. In a JSON file a column
+            is a key of the records' objects.
         header_row: Row holding the column headings (1 = first row).
             Data starts on the row after it. Sheets laid out for
             people often put a title or "Last updated" line above
-            the headings.
+            the headings. Excel and CSV only: a JSON file has no
+            heading row, so it must be 1.
         column_selection: Which columns are loaded. "listed" (the
             default) loads only `columns`, and any other column in
             the sheet is a mismatch unless it is in `excluded`.
@@ -185,20 +226,35 @@ class Contract:
             works per name, so a copy under another name would become
             a second "latest" upload. None (the default) accepts any name.
             The match is exact, capitals included.
+        file_format: The kind of file: "xlsx" (the default, an Excel
+            workbook), "csv", "json" (an array of objects) or "jsonl"
+            (JSON Lines: one object per line). A CSV or JSON file
+            holds one table, so its contract has one Worksheet.
+            read_csv(), read_json() and read_jsonl() say how each is
+            read. max_uncompressed_bytes applies to workbooks only.
     """
 
     worksheets: list[Worksheet] = field(default_factory=list)
     max_file_bytes: int = DEFAULT_MAX_FILE_BYTES
     max_uncompressed_bytes: int = DEFAULT_MAX_UNCOMPRESSED_BYTES
     file_name: str | None = None
+    file_format: Literal["xlsx", "csv", "json", "jsonl"] = "xlsx"
 
     def __post_init__(self) -> None:
         """Check settings that would otherwise fail confusingly later.
 
         Raises:
-            ValueError: A size limit isn't positive, or file_name is
-                blank or a path.
+            ValueError: A size limit isn't positive, file_name is
+                blank, a path or has the wrong extension for
+                file_format, file_format is unknown, or a CSV or JSON
+                contract has more than one Worksheet or a JSON one
+                sets header_row.
         """
+        if self.file_format not in FILE_EXTENSIONS:
+            raise ValueError(
+                "Contract file_format must be one of "
+                f"{', '.join(FILE_EXTENSIONS)}; got {self.file_format!r}"
+            )
         if self.file_name is not None and (
             not self.file_name.strip()
             or "/" in self.file_name
@@ -208,12 +264,35 @@ class Contract:
                 "Contract file_name must be a file's name, without a "
                 f"folder, e.g. 'WAS export.xlsx'; got {self.file_name!r}"
             )
+        extensions = FILE_EXTENSIONS[self.file_format]
+        if self.file_name is not None and not self.file_name.lower().endswith(
+            extensions
+        ):
+            raise ValueError(
+                f"Contract file_name {self.file_name!r} must end in "
+                f"{' or '.join(extensions)} for file_format "
+                f"{self.file_format!r}"
+            )
         for name in ("max_file_bytes", "max_uncompressed_bytes"):
             if getattr(self, name) <= 0:
                 raise ValueError(
                     f"Contract {name} must be positive, got "
                     f"{getattr(self, name)}"
                 )
+        if self.file_format == "xlsx":
+            return
+        if len(self.worksheets) > 1:
+            raise ValueError(
+                f"A {self.file_format} file holds one table, so its "
+                f"Contract has one Worksheet; got {len(self.worksheets)}"
+            )
+        if self.file_format != "csv" and any(
+            ws.header_row != 1 for ws in self.worksheets
+        ):
+            raise ValueError(
+                f"A {self.file_format} file has no heading row, so its "
+                "Worksheet's header_row must be 1"
+            )
 
     def fingerprint(self) -> str:
         """A short ID for this contract's settings.
@@ -227,10 +306,13 @@ class Contract:
             The first 16 hex digits of the SHA-256 of the contract's
             settings, written as canonical JSON.
         """
-        settings = json.dumps(
-            asdict(self), sort_keys=True, separators=(",", ":")
-        )
-        return sha256(settings.encode()).hexdigest()[:16]
+        settings = asdict(self)
+        # Left out at its default, so a workbook contract keeps the
+        # fingerprint its audit records had before file_format existed.
+        if settings["file_format"] == "xlsx":
+            del settings["file_format"]
+        text = json.dumps(settings, sort_keys=True, separators=(",", ":"))
+        return sha256(text.encode()).hexdigest()[:16]
 
     def read(
         self,
@@ -238,7 +320,7 @@ class Contract:
         source_name: str,
         warnings: list[str] | None = None,
     ) -> dict[str, SheetRows]:
-        """Validate the workbook and read its rows, in one parse.
+        """Validate the file and read its rows, in one parse.
 
         The workbook is opened once, read-only (openpyxl streams the
         sheet XML rather than building cell objects for formatting),
@@ -247,10 +329,12 @@ class Contract:
         in memory, which is why Contract has size limits.
         Every worksheet in `self.worksheets` is looked up by name,
         never the workbook's active sheet, which has no relation to
-        what the contract expects.
+        what the contract expects. A CSV or JSON file is read whole,
+        and its one table checked and selected the same way.
 
         Args:
-            excel_bytes: Raw Excel file bytes.
+            excel_bytes: Raw file bytes, of the contract's
+                file_format.
             source_name: The file's name: checked against file_name
                 if the contract sets one, and used in error messages.
             warnings: List to append problems to for worksheets whose
@@ -275,13 +359,13 @@ class Contract:
         source_name: str,
         warnings: list[str] | None = None,
     ) -> int:
-        """Validate workbook against this contract.
+        """Validate a file against this contract.
 
         A thin wrapper over read(), kept for callers that only want
         the check.
 
         Args:
-            excel_bytes: Raw Excel file bytes.
+            excel_bytes: Raw file bytes, as read().
             source_name: As read().
             warnings: As read().
 
@@ -306,7 +390,7 @@ class Contract:
         selection. Does not validate: use read() to do both at once.
 
         Args:
-            excel_bytes: Raw Excel file bytes.
+            excel_bytes: Raw file bytes, as read().
             source_name: Filename for error messages.
 
         Returns:
@@ -329,7 +413,7 @@ class Contract:
         """Body of read() and extract().
 
         Args:
-            excel_bytes: Raw Excel file bytes.
+            excel_bytes: Raw file bytes, as read().
             source_name: Filename for error messages.
             warnings: As read().
             check: Validate as well as extract.
@@ -339,9 +423,13 @@ class Contract:
         """
         if check:
             self._check_file_name(source_name)
-        wb = self._open(excel_bytes, source_name)
         if warnings is None:
             warnings = []
+        if self.file_format != "xlsx":
+            return self._read_table_file(
+                excel_bytes, source_name, warnings, check
+            )
+        wb = self._open(excel_bytes, source_name)
         try:
             uncached = (
                 formulas_without_values(
@@ -379,22 +467,107 @@ class Contract:
                         source_name,
                         warnings,
                     )
-                    self._validate_worksheet(
-                        names, rows, ws_def, source_name, warnings
-                    )
-                    # After the column checks, so a wrong header_row or
-                    # missing columns are reported as such first.
-                    if not rows and not ws_def.allow_empty:
-                        raise ContractError(
-                            f"{source_name} [{ws_def.name}]: no data rows "
-                            "below the headings. If an empty sheet is "
-                            "valid for this source, set allow_empty=True "
-                            "on its Worksheet."
-                        )
-                sheets[ws_def.name] = _select(names, rows, ws_def)
+                sheets[ws_def.name] = self._checked(
+                    names, rows, ws_def, source_name, warnings, check
+                )
             return sheets
         finally:
             wb.close()
+
+    def _read_table_file(
+        self,
+        data: bytes,
+        source_name: str,
+        warnings: list[str],
+        check: bool,
+    ) -> dict[str, SheetRows]:
+        """Read a CSV or JSON file's one table (file_format isn't xlsx).
+
+        Args:
+            data: Raw file bytes.
+            source_name: Filename for error messages.
+            warnings: As read() (mutated).
+            check: Validate as well as extract.
+
+        Returns:
+            SheetRows for the contract's one worksheet.
+
+        Raises:
+            ContractError: Contract has no worksheets, the file is too
+                big or can't be read as its file_format, or (checking)
+                its columns don't match the contract.
+            ValidationError: (checking) Data violates contract rules.
+        """
+        if not self.worksheets:
+            raise ContractError(
+                f"{source_name}: Contract has no worksheets configured"
+            )
+        self._check_size(data, source_name)
+        ws_def = self.worksheets[0]
+        try:
+            if self.file_format == "csv":
+                names, rows = read_csv(data, ws_def.header_row)
+            elif self.file_format == "json":
+                names, rows = read_json(data)
+            else:
+                names, rows = read_jsonl(data)
+        except ValueError as e:
+            # The readers' messages give positions, never values.
+            raise ContractError(
+                f"{source_name}: Cannot read {self.file_format.upper()}: "
+                f"{e}"
+            ) from None
+        return {
+            ws_def.name: self._checked(
+                names, rows, ws_def, source_name, warnings, check
+            )
+        }
+
+    def _checked(
+        self,
+        names: list[str],
+        rows: list[tuple[int, tuple[Any, ...]]],
+        ws_def: Worksheet,
+        source_name: str,
+        warnings: list[str],
+        check: bool,
+    ) -> SheetRows:
+        """Validate one table's rows if asked, then select its columns.
+
+        Args:
+            names: Column names, from the file's reader.
+            rows: Data rows, from the file's reader.
+            ws_def: The table's contract.
+            source_name: Filename for error messages.
+            warnings: As read() (mutated).
+            check: Validate as well as select.
+
+        Returns:
+            The rows to load.
+
+        Raises:
+            ContractError: (checking) The columns don't match ws_def,
+                or there are no rows and ws_def.allow_empty is False.
+            ValidationError: (checking) Data violates ws_def's rules.
+        """
+        if check:
+            self._validate_worksheet(
+                names, rows, ws_def, source_name, warnings
+            )
+            # After the column checks, so a wrong header_row or
+            # missing columns are reported as such first.
+            if not rows and not ws_def.allow_empty:
+                found = (
+                    "no data rows below the headings"
+                    if self.file_format in ("xlsx", "csv")
+                    else "no records"
+                )
+                raise ContractError(
+                    f"{source_name} [{ws_def.name}]: {found}. If that is "
+                    "valid for this source, set allow_empty=True on its "
+                    "Worksheet."
+                )
+        return _select(names, rows, ws_def)
 
     @staticmethod
     def _check_formulas(
@@ -503,21 +676,23 @@ class Contract:
         return wb
 
     def _check_size(self, excel_bytes: bytes, source_name: str) -> None:
-        """Refuse a workbook too big to parse safely.
+        """Refuse a file too big to parse safely.
 
         Args:
-            excel_bytes: Raw Excel file bytes.
+            excel_bytes: Raw file bytes.
             source_name: Filename for error messages.
 
         Raises:
-            ContractError: The file, or its unzipped parts, exceed the
-                contract's limits.
+            ContractError: The file, or a workbook's unzipped parts,
+                exceed the contract's limits.
         """
         if len(excel_bytes) > self.max_file_bytes:
             raise ContractError(
                 f"{source_name}: file is {len(excel_bytes):,} bytes, over "
                 f"the contract's max_file_bytes ({self.max_file_bytes:,})"
             )
+        if self.file_format != "xlsx":
+            return  # only a workbook is a zip
         try:
             with zipfile.ZipFile(BytesIO(excel_bytes)) as archive:
                 unpacked = sum(info.file_size for info in archive.infolist())
@@ -610,38 +785,24 @@ class Contract:
                         )
                     continue
 
-                if value is not None:
-                    expected_type, label = _TYPE_CHECKS[col_def.data_type]
-                    valid = isinstance(
-                        value, expected_type
-                    ) and not isinstance(value, bool)
-                    if (
-                        valid
-                        and col_def.data_type == "integer"
-                        and not _INT64_MIN <= value <= _INT64_MAX
-                    ):
-                        # BigQuery's INT64 can't hold it; it would
-                        # otherwise load as NULL.
-                        row_errors.append(
-                            f"Row {row_idx}: '{col_def.name}' is outside "
-                            "the INT64 range"
-                        )
+                problem = _type_problem(
+                    value, col_def.data_type, self.file_format
+                )
+                if problem is not None:
+                    row_errors.append(
+                        f"Row {row_idx}: '{col_def.name}' {problem}"
+                    )
+                    if problem == _OUT_OF_RANGE:
                         continue
-                    if not valid:
-                        row_errors.append(
-                            f"Row {row_idx}: '{col_def.name}' "
-                            f"is {type(value).__name__}, "
-                            f"expected {label}"
-                        )
 
-                    # Check uniqueness
-                    if col_def.unique:
-                        if value in seen_values[col_def.name]:
-                            row_errors.append(
-                                f"Row {row_idx}: Duplicate value "
-                                f"in unique column '{col_def.name}'"
-                            )
-                        seen_values[col_def.name].add(value)
+                if col_def.unique:
+                    key = _hashable(value)
+                    if key in seen_values[col_def.name]:
+                        row_errors.append(
+                            f"Row {row_idx}: Duplicate value "
+                            f"in unique column '{col_def.name}'"
+                        )
+                    seen_values[col_def.name].add(key)
 
         if row_errors:
             message = f"{header}: {'; '.join(row_errors[:5])}" + (
@@ -687,6 +848,21 @@ def read_sheet(
         the sheet.
     """
     grid = list(ws.iter_rows(min_row=header_row, values_only=True))
+    return _name_columns(grid, header_row)
+
+
+def _name_columns(
+    grid: list[tuple[Any, ...]], header_row: int
+) -> tuple[list[str], list[tuple[int, tuple[Any, ...]]]]:
+    """Name a grid's columns and pick its data rows, as read_sheet().
+
+    Args:
+        grid: The heading row's values, then each row below it.
+        header_row: The heading row's number, to number the rows.
+
+    Returns:
+        As read_sheet().
+    """
     if not grid:
         return [], []
     # Read-only worksheets give each row only up to its last stored
@@ -749,6 +925,355 @@ def _is_blank(value: Any) -> bool:
         True for None or a whitespace-only string.
     """
     return value is None or (isinstance(value, str) and not value.strip())
+
+
+def read_csv(
+    data: bytes, header_row: int = 1
+) -> tuple[list[str], list[tuple[int, tuple[Any, ...]]]]:
+    """Read a CSV file's column names and the data rows below them.
+
+    The file must be UTF-8 (with or without the byte order mark
+    Excel's "CSV UTF-8" writes) and comma-separated, with double
+    quotes around any field that holds a comma, a quote or a line
+    break. Headings are named as read_sheet() names them, and rows
+    with no values are skipped. An empty field reads as None, like an
+    empty cell; every other field is text exactly as written, for
+    Dataform to type.
+
+    Args:
+        data: The file's bytes.
+        header_row: Row holding the headings (1 = first row).
+
+    Returns:
+        As read_sheet(). Row numbers count records, as a spreadsheet
+        shows them, so a quoted field's line breaks don't shift them.
+
+    Raises:
+        ValueError: The file isn't UTF-8 text or isn't valid CSV.
+    """
+    reader = csv.reader(StringIO(_decode(data), newline=""), strict=True)
+    try:
+        records = list(reader)
+    except csv.Error as e:
+        raise ValueError(
+            f"invalid CSV at line {reader.line_num} ({e})"
+        ) from None
+    grid = [
+        tuple(value if value != "" else None for value in record)
+        for record in records[header_row - 1 :]
+    ]
+    return _name_columns(grid, header_row)
+
+
+def read_json(
+    data: bytes,
+) -> tuple[list[str], list[tuple[int, tuple[Any, ...]]]]:
+    """Read a JSON file: an array of objects, one per row.
+
+    The columns are every key the objects use, exactly as written, in
+    the order they first appear; a key an object leaves out reads as
+    None. Values keep their JSON types: text, numbers, true and
+    false, null, and nested objects and arrays (a SharePoint person
+    or multiple-choice field, say), which load into the payload
+    unchanged. An object whose values are all null or blank is
+    skipped, as a blank row is.
+
+    Args:
+        data: The file's bytes, UTF-8.
+
+    Returns:
+        As read_sheet(). Row numbers are positions in the array, the
+        first object being row 1.
+
+    Raises:
+        ValueError: The file isn't UTF-8 JSON or isn't an array of
+            objects, an object repeats a key, or a number is NaN,
+            Infinity or too large for a float.
+    """
+    document = _parse_json(_decode(data))
+    if not isinstance(document, list):
+        raise ValueError(
+            f"expected an array of objects, got {_json_type(document)}"
+        )
+    return _records(list(enumerate(document, start=1)), "item")
+
+
+def read_jsonl(
+    data: bytes,
+) -> tuple[list[str], list[tuple[int, tuple[Any, ...]]]]:
+    """Read a JSON Lines file: one JSON object per line.
+
+    Read as read_json() reads an array's objects. Blank lines are
+    skipped.
+
+    Args:
+        data: The file's bytes, UTF-8.
+
+    Returns:
+        As read_sheet(). Row numbers are line numbers, the first line
+        being row 1.
+
+    Raises:
+        ValueError: As read_json(), for any line.
+    """
+    numbered: list[tuple[int, Any]] = []
+    # Split on "\n" only: str.splitlines() also splits on characters
+    # such as U+2028, which JSON text may hold unescaped.
+    for line_number, line in enumerate(_decode(data).split("\n"), start=1):
+        if not line.strip():
+            continue
+        try:
+            numbered.append((line_number, _parse_json(line)))
+        except ValueError as e:
+            raise ValueError(f"line {line_number}: {e}") from None
+    return _records(numbered, "line")
+
+
+def _decode(data: bytes) -> str:
+    """Decode a text file as UTF-8, dropping any byte order mark.
+
+    Args:
+        data: The file's bytes.
+
+    Returns:
+        The text.
+
+    Raises:
+        ValueError: The bytes aren't UTF-8.
+    """
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError as e:
+        raise ValueError(
+            f"not UTF-8 text (byte {e.start} is invalid); save or export "
+            "it as UTF-8"
+        ) from None
+
+
+def _parse_json(text: str) -> Any:
+    """Parse JSON text strictly.
+
+    Args:
+        text: One JSON document.
+
+    Returns:
+        The parsed value.
+
+    Raises:
+        ValueError: Invalid JSON, a repeated key in an object, NaN or
+            Infinity, a number too large for a float, or nesting too
+            deep to parse.
+    """
+    try:
+        return json.loads(
+            text,
+            object_pairs_hook=_unique_keys,
+            parse_constant=_no_constant,
+            parse_float=_finite_float,
+        )
+    except RecursionError:
+        raise ValueError("nested too deeply") from None
+
+
+def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Build a JSON object, refusing a repeated key.
+
+    json.loads() would keep the last value silently, losing data.
+
+    Args:
+        pairs: The object's (key, value) pairs, in order.
+
+    Returns:
+        The object.
+
+    Raises:
+        ValueError: A key appears twice.
+    """
+    record: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in record:
+            raise ValueError(f"an object repeats the key {key!r}")
+        record[key] = value
+    return record
+
+
+def _no_constant(name: str) -> Any:
+    """Refuse NaN, Infinity and -Infinity, which JSON doesn't allow.
+
+    Args:
+        name: The constant as written.
+
+    Raises:
+        ValueError: Always.
+    """
+    raise ValueError(f"{name} is not a JSON number")
+
+
+def _finite_float(text: str) -> float:
+    """Parse a JSON number with a fraction or exponent.
+
+    Args:
+        text: The number as written.
+
+    Returns:
+        The number.
+
+    Raises:
+        ValueError: It is too large for a float (e.g. 1e400).
+    """
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError("a number is too large for a float")
+    return value
+
+
+def _records(
+    numbered: list[tuple[int, Any]], unit: str
+) -> tuple[list[str], list[tuple[int, tuple[Any, ...]]]]:
+    """Turn numbered JSON objects into column names and rows.
+
+    Args:
+        numbered: (row number, parsed value) for each record.
+        unit: What a row number counts, for messages: "item" or
+            "line".
+
+    Returns:
+        As read_sheet().
+
+    Raises:
+        ValueError: A record isn't an object.
+    """
+    names: dict[str, None] = {}
+    for number, record in numbered:
+        if not isinstance(record, dict):
+            raise ValueError(
+                f"{unit} {number} is {_json_type(record)}, expected an "
+                "object"
+            )
+        names.update(dict.fromkeys(record))
+    columns = list(names)
+    rows = [
+        (number, tuple(record.get(name) for name in columns))
+        for number, record in numbered
+        if not all(_is_blank(value) for value in record.values())
+    ]
+    return columns, rows
+
+
+def _json_type(value: Any) -> str:
+    """Name a parsed JSON value's type, for messages.
+
+    Args:
+        value: A value from json.loads().
+
+    Returns:
+        e.g. "text", "an object".
+    """
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true/false"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, str):
+        return "text"
+    if isinstance(value, list):
+        return "an array"
+    return "an object"
+
+
+def _type_problem(value: Any, data_type: str, file_format: str) -> str | None:
+    """Why a non-empty value doesn't fit its column's data_type.
+
+    - An Excel cell has a type of its own, which must match.
+    - A CSV field is always text, so it fits if the text reads as the
+      type ("12", "-3.5", "2026-10-01"). It still loads as written;
+      Dataform types it.
+    - A JSON value's own type must match, except a date: JSON has no
+      date type, so a date is text in ISO 8601 form, with or without
+      a time ("2026-10-01", "2026-10-01T09:30:00Z").
+
+    Args:
+        value: A non-empty value.
+        data_type: The column's data_type.
+        file_format: The contract's file_format.
+
+    Returns:
+        The problem, e.g. "is str, expected integer", or None.
+    """
+    if file_format == "csv":
+        if data_type == "string":
+            return None
+        text = str(value).strip()
+        fits = {
+            "integer": _INTEGER_TEXT.fullmatch(text) is not None,
+            "float": _NUMBER_TEXT.fullmatch(text) is not None,
+            "date": _is_iso_date(text),
+        }[data_type]
+        if not fits:
+            return f"doesn't read as {_TEXT_LABELS[data_type]}"
+        if data_type == "integer" and not (
+            _INT64_MIN <= int(text) <= _INT64_MAX
+        ):
+            return _OUT_OF_RANGE
+        return None
+    is_json = file_format in ("json", "jsonl")
+    if is_json and data_type == "date":
+        if isinstance(value, str) and _is_iso_date(value):
+            return None
+        return f"is {_json_type(value)}, expected a date as text (YYYY-MM-DD)"
+    expected_type, label = _TYPE_CHECKS[data_type]
+    if not isinstance(value, expected_type) or isinstance(value, bool):
+        found = _json_type(value) if is_json else type(value).__name__
+        return f"is {found}, expected {label}"
+    if (
+        data_type == "integer"
+        and isinstance(value, int)
+        and not _INT64_MIN <= value <= _INT64_MAX
+    ):
+        # BigQuery's INT64 can't hold it; it would otherwise load as
+        # NULL.
+        return _OUT_OF_RANGE
+    return None
+
+
+def _is_iso_date(text: str) -> bool:
+    """Whether text is an ISO 8601 date, or date and time.
+
+    Args:
+        text: The text, trimmed.
+
+    Returns:
+        True for e.g. "2026-10-01" or "2026-10-01T09:30:00+01:00",
+        if it names a real date (and time).
+    """
+    if _ISO_DATE_TEXT.fullmatch(text) is None:
+        return False
+    try:
+        if len(text) == 10:
+            date.fromisoformat(text)
+        else:
+            datetime.fromisoformat(text)
+    except ValueError:
+        return False
+    return True
+
+
+def _hashable(value: Any) -> Any:
+    """A value the uniqueness check can keep in a set.
+
+    Args:
+        value: A non-empty value.
+
+    Returns:
+        The value, or for a JSON object or array its canonical JSON
+        text.
+    """
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, sort_keys=True, separators=(",", ":"))
+    return value
 
 
 def _select(

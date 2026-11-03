@@ -47,28 +47,48 @@ class LocalSource:
     Use for testing or when source is a shared network folder.
     """
 
-    def __init__(self, folder: Path | str):
+    def __init__(
+        self, folder: Path | str, extensions: tuple[str, ...] = (".xlsx",)
+    ):
         """Initialize with folder path.
 
         Args:
-            folder: Path to folder containing Excel files.
+            folder: Path to folder containing the files.
+            extensions: File extensions to pick up, with the dot,
+                e.g. (".jsonl",); matched ignoring case. Defaults to
+                .xlsx only: old-style .xls workbooks can't be read
+                (openpyxl), so they would only ever be quarantined.
+
+        Raises:
+            ValueError: An extension doesn't start with a dot.
         """
+        if not extensions or not all(
+            e.startswith(".") and len(e) > 1 for e in extensions
+        ):
+            raise ValueError(
+                f"LocalSource extensions must look like '.xlsx', "
+                f"got {extensions!r}"
+            )
         self.folder = Path(folder)
+        self.extensions = tuple(e.lower() for e in extensions)
 
     def items(self) -> Iterable[SourceItem]:
-        """List all .xlsx files in folder.
+        """List the folder's files with one of the extensions.
 
-        Old-style .xls workbooks are not listed: openpyxl cannot read
-        them, so they would only ever be quarantined as unreadable.
+        Sub-folders are not read.
 
         Yields:
-            SourceItem for each Excel file.
+            SourceItem for each matching file, sorted by name.
         """
         if not self.folder.exists():
             logger.warning("Source folder does not exist: %s", self.folder)
             return
 
-        for path in sorted(self.folder.glob("*.xlsx")):
+        for path in sorted(self.folder.iterdir()):
+            if not (
+                path.is_file() and path.name.lower().endswith(self.extensions)
+            ):
+                continue
             stat = path.stat()
             yield SourceItem(
                 name=path.name,

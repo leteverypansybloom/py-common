@@ -220,6 +220,7 @@ import os
 
 from py_common.adapters.bigquery_raw import RawJsonWarehouse
 from py_common.adapters.gcs import GCSObjectStore, GCSSource
+from py_common.contract import FILE_EXTENSIONS
 from py_common.pipeline import Pipeline
 
 from hww.contracts import PIPELINES  # (prefix, contract, tables) each
@@ -235,7 +236,12 @@ def build_pipelines() -> dict[str, Pipeline]:
     store = GCSObjectStore(project, os.environ["STORE_BUCKET"])
     return {
         prefix: Pipeline(
-            source=GCSSource(project, os.environ["LANDING_BUCKET"], prefix),
+            source=GCSSource(
+                project,
+                os.environ["LANDING_BUCKET"],
+                prefix,
+                extensions=FILE_EXTENSIONS[contract.file_format],
+            ),
             store=store,
             warehouse=RawJsonWarehouse(
                 project, os.environ["RAW_DATASET"], tables
@@ -358,9 +364,11 @@ adds its own code and, for the service, `functions-framework`, which
 loads `main.py` from the working directory.
 
 `Pipeline` checks its configuration when it is built: a
-`RawJsonWarehouse` must map exactly the contract's worksheets. A
-mismatch raises `ConfigError` at start-up instead of failing every
-file.
+`RawJsonWarehouse` must map exactly the contract's worksheets, and the
+source's `extensions` must be ones the contract's `file_format` reads.
+A mismatch raises `ConfigError` at start-up instead of failing every
+file. CSV, JSON and JSON Lines sources (a SharePoint list export, say)
+are set up the same way: [`FILE_FORMATS.md`](FILE_FORMATS.md).
 
 ## 5. Cloud Run job and schedule
 

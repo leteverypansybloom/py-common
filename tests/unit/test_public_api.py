@@ -47,4 +47,4 @@ def test_config_error_lives_in_errors_and_is_reexported() -> None:
 
 def test_version_is_0_3_0() -> None:
     """The package reports the version in pyproject.toml."""
-    assert py_common.__version__ == "0.3.0"
+    assert py_common.__version__ == "0.4.0"

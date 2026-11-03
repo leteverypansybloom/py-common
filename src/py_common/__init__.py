@@ -1,8 +1,9 @@
-"""Shared ingestion library for Excel to cloud workflows.
+"""Shared ingestion library for Excel, CSV and JSON files to the cloud.
 
 Core concepts:
 - Sources discover files (e.g., SharePoint, local folders)
-- Contracts validate workbooks against business rules
+- Contracts validate files (workbooks, CSV, JSON) against business
+  rules
 - ObjectStores preserve raw and processed files
 - Warehouses manage staging and audit tables
 - Pipelines orchestrate the flow end-to-end
@@ -16,7 +17,7 @@ py_common.logging. Anything else (e.g. AuditRecord, SecretStore,
 names starting with "_") may change in any release.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 from py_common.contract import Column, Contract, Worksheet
 from py_common.errors import (

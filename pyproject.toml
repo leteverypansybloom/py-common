@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "py-common"
-version = "0.3.0"
-description = "Shared ingestion library for Excel to cloud workflows"
+version = "0.4.0"
+description = "Shared ingestion library for Excel, CSV and JSON files to cloud workflows"
 readme = "README.md"
 license = {text = "MIT"}
 authors = [{name = "Public Health Wales", email = "eoinvondy@gmail.com"}]

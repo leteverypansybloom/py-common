@@ -422,7 +422,9 @@ class GCSSource:
             prefix (str): Landing folder, e.g. "landing/hww". Leading
                 and trailing slashes are optional.
             extensions (tuple[str, ...]): File extensions to pick up.
-                Defaults to .xlsx only: openpyxl can't read .xls.
+                Defaults to .xlsx only: openpyxl can't read .xls. For
+                another file_format, pass
+                py_common.contract.FILE_EXTENSIONS[file_format].
 
         Raises:
             ValueError: An extension doesn't start with a dot.
@@ -443,7 +445,7 @@ class GCSSource:
         self.bucket = self.client.bucket(self.bucket_name)
 
     def items(self) -> list[SourceItem]:
-        """List workbooks directly inside the landing folder.
+        """List the files directly inside the landing folder.
 
         Returns:
             list[SourceItem]: One per matching object, sorted by

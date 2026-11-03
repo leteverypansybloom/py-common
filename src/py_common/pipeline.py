@@ -20,7 +20,7 @@ from datetime import UTC, datetime
 from time import perf_counter
 from typing import Any
 
-from py_common.contract import Contract
+from py_common.contract import FILE_EXTENSIONS, Contract
 from py_common.errors import (
     ConfigError,
     IndeterminateCommitError,
@@ -62,7 +62,7 @@ def _library_version() -> str:
     so importing the package at the top would be circular.
 
     Returns:
-        e.g. "0.3.0".
+        e.g. "0.4.0".
     """
     import py_common
 
@@ -93,10 +93,36 @@ class Pipeline:
 
         Raises:
             ConfigError: The warehouse's sheet-to-table mapping doesn't
-                match the contract's worksheets.
+                match the contract's worksheets, or the source picks up
+                files the contract can't read.
         """
         if isinstance(self.contract, Contract):
             self._check_tables_match()
+            self._check_extensions()
+
+    def _check_extensions(self) -> None:
+        """The source picks up only files the contract can read.
+
+        A .csv file listed for a workbook contract, say, would be
+        quarantined as unreadable on every run. A source without an
+        ``extensions`` tuple (a test double, say) is not checked.
+
+        Raises:
+            ConfigError: A source extension isn't one the contract's
+                file_format reads.
+        """
+        extensions = getattr(self.source, "extensions", None)
+        if not isinstance(extensions, tuple):
+            return
+        readable = FILE_EXTENSIONS[self.contract.file_format]
+        unreadable = [e for e in extensions if e.lower() not in readable]
+        if unreadable:
+            raise ConfigError(
+                f"Source extension(s) {unreadable!r} can't be read with "
+                f"file_format {self.contract.file_format!r}, which reads "
+                f"{', '.join(readable)}. Give each file type its own "
+                "landing folder and pipeline."
+            )
 
     def _check_tables_match(self) -> None:
         """The warehouse maps exactly the contract's worksheets.

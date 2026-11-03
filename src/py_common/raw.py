@@ -1,10 +1,11 @@
-"""Convert workbook rows to newline-delimited JSON for raw tables.
+"""Convert source rows to newline-delimited JSON for raw tables.
 
 The pipeline loads each worksheet's rows into a raw BigQuery table
 as a JSON payload, plus columns saying where the row came
 from. Cleaning and typing happen later, in the transformation layer
-(Dataform), which is why the payload keeps Excel's values as close
-to the original as JSON allows.
+(Dataform), which is why the payload keeps the file's values (Excel
+cells, CSV text, JSON values) as close to the original as JSON
+allows.
 
 Pure functions only: no cloud SDK imports, so the conversion is
 testable offline and the output is a function of its inputs alone.
@@ -32,9 +33,11 @@ ROW_FIELDS = (
 
 
 def json_value(value: Any) -> Any:
-    """Turn one Excel cell value into a JSON-safe value.
+    """Turn one cell or field value into a JSON-safe value.
 
     - None, text, booleans and finite numbers are kept as they are.
+    - A JSON object or array (from a JSON source file) keeps its
+      shape, each value inside it converted the same way.
     - A date and time becomes "YYYY-MM-DDTHH:MM:SS", a date
       "YYYY-MM-DD" and a time "HH:MM:SS" (ISO 8601). Excel stores
       no time zone, so none is added; a date and time that does
@@ -47,7 +50,8 @@ def json_value(value: Any) -> Any:
     - Anything else becomes text.
 
     Args:
-        value: Cell value from openpyxl.
+        value: Cell value from openpyxl, or a value read from a CSV
+            or JSON file.
 
     Returns:
         A value json.dumps() can write.
@@ -56,6 +60,10 @@ def json_value(value: Any) -> Any:
         return None
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
+    if isinstance(value, dict):
+        return {str(key): json_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [json_value(item) for item in value]
     if isinstance(value, Decimal):
         if not value.is_finite():
             return None

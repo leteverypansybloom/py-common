@@ -14,8 +14,8 @@ so the SQL that reads them doesn't have to guess.
 |---|---|---|
 | `source_file` | STRING | File name at the source, e.g. `dummy_was_database.xlsx`. |
 | `source_generation` | STRING | The source's version marker. For `GCSSource` this is the GCS object generation: a number that increases on every upload of the same file name. Other sources' versions aren't numbers (`LocalSource`: `<mtime_ns>-<size>`; SharePoint: an eTag like `"{GUID},3"`), so the "latest upload" query below works for `GCSSource` only. |
-| `sheet_name` | STRING | Worksheet the row came from. |
-| `row_number` | INT64 | The row number Excel shows for this row. Use it to point a file owner at a bad row. |
+| `sheet_name` | STRING | Worksheet the row came from. For a CSV or JSON file, the name of the contract's one `Worksheet`. |
+| `row_number` | INT64 | The row number Excel shows for this row. Use it to point a file owner at a bad row. For a CSV file, the record's number as a spreadsheet shows it; for JSON, the object's position in the array; for JSON Lines, its line number ([`FILE_FORMATS.md`](FILE_FORMATS.md)). |
 | `checksum` | STRING | SHA-256 of the file's bytes. Joins to the audit table and to the copies kept in the bucket (`raw/<identity>/<checksum>/...`). |
 | `payload` | JSON | The row's values, one key per loaded column. |
 | `ingested_at` | TIMESTAMP | The load's timestamp: the pipeline's clock just before the commit job starts, written in the commit transaction. All rows of one upload share it, and it equals the audit record's `timestamp`. |
@@ -78,7 +78,10 @@ the shorter query returns the last upload that had rows.
 ## Payload keys
 
 Keys are column names as py-common reads them from the heading row
-(`Worksheet.header_row`, row 1 unless the contract says otherwise):
+(`Worksheet.header_row`, row 1 unless the contract says otherwise).
+A CSV file's headings are named the same way. In a JSON or JSON Lines
+file the keys are the objects' own keys, exactly as written, in the
+order they first appear ([`FILE_FORMATS.md`](FILE_FORMATS.md)).
 
 - **Headings are used exactly as written.** Nothing is trimmed, so
   `'Organisation Industry '` keeps its trailing space. Numeric or date
@@ -126,6 +129,11 @@ Keys are column names as py-common reads them from the heading row
 Values are not cleaned. A number typed as text in Excel stays a
 string, and text like `"NA"` in a number column stays text. Use
 `SAFE_CAST` and send failures to a quarantine table.
+
+A CSV file's values are all strings, exactly as written, and an empty
+field is `null`. A JSON or JSON Lines file's values keep their JSON
+types, nested objects and arrays included. See
+[`FILE_FORMATS.md`](FILE_FORMATS.md), "In Dataform", for reading them.
 
 ## Warnings and quarantined files
 
@@ -261,6 +269,8 @@ FROM latest
 
 - [`DATAFORM.md`](DATAFORM.md): how to lay out, run and check a
   Dataform project on these tables in GCP.
+- [`FILE_FORMATS.md`](FILE_FORMATS.md): how CSV, JSON and JSON Lines
+  files are read.
 - [`RAW_JSON_VS_CONTRACT_VALIDATION.md`](RAW_JSON_VS_CONTRACT_VALIDATION.md):
   why raw JSON plus Dataform.
 - [`GCP_SETUP.md`](GCP_SETUP.md): the buckets, datasets and

@@ -81,17 +81,15 @@ supported**, not as permanently out of scope:
   "changed since last run" query results and returns each batch as
   bytes would satisfy it structurally, the same way `LocalSource` and
   `SharePointSource` do.
-- The actual blocker is one layer up: `Contract.validate()`
-  hard-codes `openpyxl.load_workbook()` (`contract.py`), so
-  today's contract only knows how to check an Excel workbook. Reading
-  from a database would need either a contract variant that accepts a
-  `pandas.DataFrame` or CSV bytes instead of an Excel
-  workbook, or a database source that serialises its query result as
-  an in-memory workbook before handing it to the existing contract
-  (workable for small extracts, wasteful for large ones).
+- The contract reads files: Excel workbooks, CSV, JSON and JSON
+  Lines (`Contract.file_format`, [`FILE_FORMATS.md`](FILE_FORMATS.md)).
+  A database source could return each query result as JSON Lines
+  bytes and use a `"jsonl"` contract, with no change to the
+  contract. The whole result is held in memory, so this suits
+  extracts, not large tables.
 - **If this becomes a real requirement**, it's an additive piece of
-  work - a new `Source` implementation plus a contract-input
-  extension - not a redesign of `py-common`. Raise it as a proposed
+  work - a new `Source` implementation - not a redesign of
+  `py-common`. Raise it as a proposed
   adapter (see [Adding a new adapter](#adding-a-new-adapter)) rather
   than writing a one-off database script outside the framework; that
   one-off script is exactly the kind of duplicated, unaudited logic

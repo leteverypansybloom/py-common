@@ -8,6 +8,42 @@ Entries are not rewritten once made. When a decision changes, add a
 new dated entry saying which earlier entry it replaces, and mark the
 earlier entry as superseded.
 
+## 2026-11-03 - CSV, JSON and JSON Lines files
+
+### One contract per file, with a file_format
+
+SharePoint lists are to reach the landing bucket as files written by
+a separate transfer, JSON Lines being the recommended format, and
+other sources may send CSV or JSON. `Contract.file_format` says which
+kind of file a contract reads: `"xlsx"` (the default), `"csv"`,
+`"json"` or `"jsonl"`. A CSV or JSON file holds one table, which the
+contract's one `Worksheet` describes; its name labels the rows and
+the warehouse table, as a sheet name does.
+
+Why: everything after reading the file (the column checks,
+quarantine, raw and processed copies, the raw tables, the audit
+record) stays one code path, so a list export is loaded, checked and
+traced exactly as a workbook is. The format is stated, not guessed
+from the file name, and `Pipeline` refuses a source that would list
+files its contract can't read, so a mistake fails at start-up.
+
+### Values stay as the file has them
+
+CSV values load as text and JSON values with their JSON types,
+nested objects and arrays included, in line with the raw JSON route:
+typing belongs in Dataform. A typed column still checks the value
+before anything loads: CSV text must read as its type, a JSON value
+must have it, and a `"date"` column in either takes ISO 8601 text,
+JSON having no date type.
+
+**Trade-off**: a CSV column checked as `"integer"` still lands as a
+string, so Dataform casts it, as it does a number typed as text in
+Excel. Benefit: the payload is what the file said, and one rule
+(Dataform types everything) covers every format.
+
+**Fingerprint**: `file_format` is left out of a workbook contract's
+fingerprint, so audit records from before this change still match.
+
 ## 2026-10-24 - Raw JSON is the only load route
 
 ### Raw JSON is the only load route

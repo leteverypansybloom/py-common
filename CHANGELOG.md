@@ -6,7 +6,47 @@ All notable changes to py-common. The supported API is what
 [semantic versioning](https://semver.org/): while the major version
 is 0, a minor release (0.x.0) may break that API, and says how below.
 
-## Unreleased
+## 0.4.0 - 2026-11-03
+
+CSV, JSON and JSON Lines files load the same way as workbooks.
+
+### Added
+
+- **`Contract.file_format`**: `"xlsx"` (the default), `"csv"`,
+  `"json"` (an array of objects) or `"jsonl"` (one object per line).
+  A CSV or JSON file holds one table, described by the contract's one
+  `Worksheet`. The column checks, quarantine, raw table layout and
+  audit work as for workbooks. CSV values load as text; JSON values
+  keep their JSON types, nested objects and arrays included. A typed
+  column checks that CSV text reads as its type, or a JSON value's
+  type; a `"date"` column in either takes ISO 8601 text.
+- `read_csv()`, `read_json()` and `read_jsonl()` in
+  `py_common.contract`, and `FILE_EXTENSIONS`, the extensions each
+  format reads.
+- **`LocalSource(folder, extensions=...)`**, as `GCSSource` has.
+- `docs/FILE_FORMATS.md`: how each format is read and checked, what a
+  SharePoint list export to the landing bucket should write, and
+  reading the values in Dataform.
+
+### Changed
+
+- **`Pipeline` refuses a source whose `extensions` its contract can't
+  read** (`ConfigError` when the pipeline is built), e.g. `.csv` files
+  for a workbook contract, which would otherwise be quarantined on
+  every run.
+- `Contract` refuses a `file_name` without one of its format's
+  extensions (`.xlsx` or `.xlsm` for a workbook), so a contract
+  expecting `events.xls` now fails when it is built instead of
+  quarantining every upload.
+- `LocalSource` matches extensions ignoring case on every platform,
+  so `REPORT.XLSX` is listed on Linux too, and no longer lists a
+  folder whose name ends in `.xlsx`.
+- A workbook contract's fingerprint is unchanged: `file_format` is
+  left out of it at its default.
+- `json_value()` keeps a nested object or array as JSON instead of
+  turning it into text.
+- The empty-file message ends "If that is valid for this source, set
+  allow_empty=True on its Worksheet." A JSON file says "no records".
 
 ### Documentation
 

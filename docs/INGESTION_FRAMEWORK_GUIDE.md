@@ -455,7 +455,7 @@ behaviour doesn't match the promise), **Missing** (nothing exists).
 | Connection testing | Missing | No pre-flight credential/permission check anywhere. |
 | Source discovery | Missing | No "list what's available at this source" helper. `GCSSource` lists a landing folder, but only for loading, not for browsing. |
 | Raw landing storage | **Have** | `pipeline.py`, immutable `raw/{identity}/{checksum}/{name}` key per file version; edited files keep every version. |
-| Standardisation layer | Partial | Excel → JSON rows (`raw.py`) exists, through one heading reader (`read_sheet()`, `contract.py`) that names blank and repeated headings. No CSV or other input format yet. |
+| Standardisation layer | **Have** | Excel, CSV, JSON and JSON Lines files → JSON rows (`raw.py`), set by `Contract.file_format`. Workbooks and CSV files share one heading reader (`_name_columns()`, `contract.py`) that names blank and repeated headings ([`FILE_FORMATS.md`](FILE_FORMATS.md)). |
 | Schema registry | Partial | `Contract` dataclasses exist (`contract.py`); no external, diffable file format (e.g. YAML) yet. |
 | Schema-drift detection | **Have** | Missing and extra columns are detected per worksheet (`contract.py`). `on_mismatch="quarantine"` rejects the file; `on_mismatch="warn"` loads it and records a warning. `column_selection="all_except"` accepts new columns. |
 | Data profiling | Missing | No profiling tool or script. |

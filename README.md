@@ -1,11 +1,11 @@
 # py-common: Shared Ingestion Library
 
-Reusable Python library for Excel-to-cloud workflows. Handles file discovery, validation, storage, and warehouse loading.
+Reusable Python library for loading Excel workbooks, CSV, JSON and JSON Lines files into the cloud. Handles file discovery, validation, storage, and warehouse loading.
 
 **Status**: Early development. The core pipeline, local adapters, and
 the GCS, BigQuery and SharePoint adapters are built and unit-tested
-against mocks. Workbooks load into raw JSON tables in BigQuery, for
-cleaning and typing in Dataform. The SharePoint
+against mocks. Workbooks, CSV and JSON files load into raw JSON
+tables in BigQuery, for cleaning and typing in Dataform. The SharePoint
 adapter has not yet been run against a real site: it waits on IT's
 decision on authentication. See [Adapter status](#adapter-status).
 
@@ -25,7 +25,7 @@ Validate (against contract; quarantine or warn)
     |
 Store Raw (immutable copy)
     |
-Convert (one JSON row per worksheet row)
+Convert (one JSON row per worksheet row or record)
     |
 Store Processed (immutable copy)
     |
@@ -33,6 +33,10 @@ Load Warehouse (staging, then insert into raw tables)
     |
 Audit (record every attempt)
 ```
+
+A contract reads one kind of file (`Contract.file_format`): an
+Excel workbook (the default), a CSV file, a JSON array of objects or
+a JSON Lines file. See [`docs/FILE_FORMATS.md`](docs/FILE_FORMATS.md).
 
 Every configured worksheet is inserted into its own raw table
 (`RawJsonWarehouse`), one JSON payload per row, with the file,
@@ -230,7 +234,8 @@ See [`CONTRIBUTING.md`, Checks](CONTRIBUTING.md#checks).
 | `SharePointSource` | Source | Built, unit-tested against mocked Graph; not yet run live (auth pending IT) |
 | Secret Manager | SecretStore | Not started |
 
-Also built: contract validation, the raw JSON conversion (`raw.py`),
+Also built: contract validation for workbooks, CSV, JSON and JSON
+Lines files, the raw JSON conversion (`raw.py`),
 configuration with interpolation, fixture generation, structured
 JSON logging (`py_common.logging.configure_json_logging()`) and the
 error hierarchy.

@@ -1,6 +1,6 @@
 # py-common Documentation
 
-Nine documents, each answering a different question. Start at the
+Ten documents, each answering a different question. Start at the
 top; go deeper only as your question demands it.
 
 | Doc | Answers | Read this if... |
@@ -9,6 +9,7 @@ top; go deeper only as your question demands it.
 | [`USAGE_GUIDE.md`](USAGE_GUIDE.md) | Is py-common the right tool for my new source? How do I add an adapter? | You're about to build a new ingestion feed. |
 | [`INGESTION_FRAMEWORK_GUIDE.md`](INGESTION_FRAMEWORK_GUIDE.md) | What, precisely, works today versus what's stubbed or missing - with the file behind every claim? Also: the ingestion vocabulary, A–Z. | You need to know exactly what you can rely on, or you're deciding what to build next. |
 | [`RAW_JSON_VS_CONTRACT_VALIDATION.md`](RAW_JSON_VS_CONTRACT_VALIDATION.md) | Why do rows land in BigQuery as raw JSON, and what does the contract still check first? | You want to know why py-common has one load route, or where cleaning and typing happen. |
+| [`FILE_FORMATS.md`](FILE_FORMATS.md) | How are CSV, JSON and JSON Lines files read and checked, and what should a SharePoint list export write? | Your source isn't an Excel workbook. |
 | [`RAW_TABLE_LAYOUT.md`](RAW_TABLE_LAYOUT.md) | What exactly is in a raw JSON table: columns, payload key names, value formats? How do I read the latest upload in SQL? | You're writing the Dataform layer on top of the raw tables. |
 | [`DATAFORM.md`](DATAFORM.md) | How do I lay out a Dataform project on the raw tables (bronze, silver, gold), connect it to GCP, schedule it and check it? | You're setting up the cleaning and modelling layer in GCP Dataform. |
 | [`GCP_SETUP.md`](GCP_SETUP.md) | Which buckets, datasets, permissions, jobs and alerts does a pipeline need, and how do I create them? | You're deploying a pipeline to Google Cloud. |

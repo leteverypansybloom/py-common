@@ -37,6 +37,9 @@ Report readers get access to gold only.
 - **Read payload values by their exact key**: `payload['Organisation
   Industry ']` keeps the heading's trailing space. A blank heading is
   `col_B`, a repeated one `Other_2`.
+- **CSV and JSON sources**: a CSV file's values are all strings; a
+  JSON file's keep their JSON types, nested objects and arrays
+  included ([`FILE_FORMATS.md`](FILE_FORMATS.md), "In Dataform").
 - **Tidy and type in silver**: `JSON_VALUE` for text, then trim and
   turn blanks into `NULL`; `SAFE.PARSE_DATE('%Y-%m-%d', ...)` on the
   first ten characters for a column the contract types as a date. Keep
