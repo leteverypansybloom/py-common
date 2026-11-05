@@ -211,7 +211,11 @@ def _count(client: Any, table: str, where: str = "TRUE") -> int:
 
 
 def _outcomes(pipeline: Pipeline) -> list[Outcome]:
-    """Run once; each result is printed, which pytest shows on failure."""
+    """Run once; each result is printed, which pytest shows on failure.
+
+    Args:
+        pipeline: Pipeline configured with fake services.
+    """
     results = pipeline.run()
     for result in results:
         print(result.item.name, result.outcome.value, result.errors)
@@ -219,7 +223,11 @@ def _outcomes(pipeline: Pipeline) -> list[Outcome]:
 
 
 def _documented_latest_query(table: str) -> str:
-    """The "latest upload" query from RAW_TABLE_LAYOUT.md, for table."""
+    """The "latest upload" query from RAW_TABLE_LAYOUT.md, for table.
+
+    Args:
+        table: Raw or reporting table under test.
+    """
     text = (DOCS / "RAW_TABLE_LAYOUT.md").read_text(encoding="utf-8")
     section = text.split("**Latest upload of each file.**", 1)[1]
     sql = section.split("```sql", 1)[1].split("```", 1)[0]
@@ -255,7 +263,12 @@ def name() -> str:
 
 @pytest.fixture
 def audit(client: Any, name: str) -> str:
-    """A fresh audit table, created as docs/GCP_SETUP.md section 2 does."""
+    """A fresh audit table, created as docs/GCP_SETUP.md section 2 does.
+
+    Args:
+        client: Fake service client.
+        name: Source or object name.
+    """
     table = f"{name}_audit"
     client.query(
         f"CREATE TABLE IF NOT EXISTS `{_full(table)}` (\n"
@@ -310,167 +323,178 @@ def _raw_tables(name: str) -> dict[str, str]:
     return {"Signups": f"{name}_signups_raw", "Survey": f"{name}_survey_raw"}
 
 
-def test_raw_route_loads_each_upload_once_and_a_revert_again(
-    client: Any, name: str, audit: str
-) -> None:
-    """Each upload loads once, and a reverted file loads again.
+class TestRawJsonWarehouseLoadLive:
+    """Live raw warehouse loads."""
 
-    Args:
-        client: The BigQuery client.
-        name: This test's table-name stem.
-        audit: The audit table.
-    """
-    tables = _raw_tables(name)
-    warehouse = RawJsonWarehouse(
-        PROJECT, DATASET, tables, audit_table_id=audit
-    )
-    uploads = Uploads()
-    pipeline = Pipeline(uploads, Store(), warehouse, SHEETS)
-    signups = tables["Signups"]
-
-    uploads.upload(WORKBOOK, "100")
-    assert _outcomes(pipeline) == [Outcome.LOADED]
-    assert _count(client, signups) == 2
-    assert _count(client, tables["Survey"]) == 1
-    # Payload keys are the headings as written, trailing space and all.
-    assert _rows(
-        client,
-        "SELECT JSON_VALUE(payload, '$.\"Organisation Industry \"') AS v "
-        f"FROM `{_full(signups)}` WHERE row_number = 2",
-    ) == [{"v": "Retail"}]
-    # ingested_at is the audit record's timestamp.
-    assert _rows(
-        client,
-        f"SELECT COUNT(*) AS n FROM `{_full(signups)}` AS r "
-        f"JOIN `{_full(audit)}` AS a ON a.timestamp = r.ingested_at "
-        f"AND a.destination = '{_full(signups)}'",
-    ) == [{"n": 2}]
-
-    # The same upload again, markers lost: nothing is inserted.
-    again = Pipeline(uploads, Store(), warehouse, SHEETS)
-    assert _outcomes(again) == [Outcome.SKIPPED]
-    assert _count(client, signups) == 2
-
-    # The same bytes as a new upload (a revert) load again, and the
-    # documented query reads only that upload.
-    uploads.upload(WORKBOOK, "200")
-    assert _outcomes(pipeline) == [Outcome.LOADED]
-    assert _count(client, signups) == 4
-    latest = _rows(client, _documented_latest_query(signups))
-    assert sorted(row["source_generation"] for row in latest) == ["200", "200"]
-
-
-def test_raw_route_loads_a_table_added_later_on_its_own(
-    client: Any, name: str, audit: str
-) -> None:
-    """A table added to the pipeline later loads without the others.
-
-    Args:
-        client: The BigQuery client.
-        name: This test's table-name stem.
-        audit: The audit table.
-    """
-    tables = _raw_tables(name)
-    uploads = Uploads()
-    uploads.upload(WORKBOOK, "1")
-    first = Contract(worksheets=SHEETS.worksheets[:1], file_name=FILE)
-    signups_only = RawJsonWarehouse(
-        PROJECT, DATASET, {"Signups": tables["Signups"]}, audit_table_id=audit
-    )
-    assert _outcomes(Pipeline(uploads, Store(), signups_only, first)) == [
-        Outcome.LOADED
-    ]
-
-    # Same upload, with the Survey sheet now mapped too: only the new
-    # table loads.
-    both = RawJsonWarehouse(PROJECT, DATASET, tables, audit_table_id=audit)
-    assert _outcomes(Pipeline(uploads, Store(), both, SHEETS)) == [
-        Outcome.LOADED
-    ]
-    assert _count(client, tables["Signups"]) == 2
-    assert _count(client, tables["Survey"]) == 1
-    assert _count(client, audit, "outcome = 'LOADED'") == 2
-
-
-def test_a_failure_inside_the_commit_rolls_everything_back(
-    client: Any, name: str, audit: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An error just before COMMIT leaves no rows and no audit record.
-
-    Args:
-        client: The BigQuery client.
-        name: This test's table-name stem.
-        audit: The audit table.
-        monkeypatch: Injects the failure into the commit script.
-    """
-    tables = _raw_tables(name)
-    warehouse = RawJsonWarehouse(
-        PROJECT, DATASET, tables, audit_table_id=audit
-    )
-    real = bigquery_raw.commit_script
-
-    def failing(parts: Any, audit_full_id: str) -> str:
-        """Build the real commit script with an error before COMMIT.
+    def test_raw_route_loads_each_upload_once_and_a_revert_again(
+        self, client: Any, name: str, audit: str
+    ) -> None:
+        """Each upload loads once, and a reverted file loads again.
 
         Args:
-            parts: The tables' parts of the script.
-            audit_full_id: The audit table.
-
-        Returns:
-            The script.
+            client: The BigQuery client.
+            name: This test's table-name stem.
+            audit: The audit table.
         """
-        # Fail after every table's insert and audit row, just before
-        # COMMIT.
-        return real(parts, audit_full_id).replace(
-            "  COMMIT TRANSACTION;",
-            "  SELECT ERROR('injected failure');\n  COMMIT TRANSACTION;",
+        tables = _raw_tables(name)
+        warehouse = RawJsonWarehouse(
+            PROJECT, DATASET, tables, audit_table_id=audit
         )
+        uploads = Uploads()
+        pipeline = Pipeline(uploads, Store(), warehouse, SHEETS)
+        signups = tables["Signups"]
 
-    monkeypatch.setattr(bigquery_raw, "commit_script", failing)
-    uploads = Uploads()
-    uploads.upload(WORKBOOK, "1")
+        uploads.upload(WORKBOOK, "100")
+        assert _outcomes(pipeline) == [Outcome.LOADED]
+        assert _count(client, signups) == 2
+        assert _count(client, tables["Survey"]) == 1
+        # Payload keys are the headings as written, trailing space and all.
+        assert _rows(
+            client,
+            "SELECT JSON_VALUE(payload, '$.\"Organisation Industry \"') AS v "
+            f"FROM `{_full(signups)}` WHERE row_number = 2",
+        ) == [{"v": "Retail"}]
+        # ingested_at is the audit record's timestamp.
+        assert _rows(
+            client,
+            f"SELECT COUNT(*) AS n FROM `{_full(signups)}` AS r "
+            f"JOIN `{_full(audit)}` AS a ON a.timestamp = r.ingested_at "
+            f"AND a.destination = '{_full(signups)}'",
+        ) == [{"n": 2}]
 
-    assert _outcomes(Pipeline(uploads, Store(), warehouse, SHEETS)) == [
-        Outcome.FAILED
-    ]
-    assert _count(client, tables["Signups"]) == 0
-    assert _count(client, tables["Survey"]) == 0
-    assert _count(client, audit) == 0
+        # The same upload again, markers lost: nothing is inserted.
+        again = Pipeline(uploads, Store(), warehouse, SHEETS)
+        assert _outcomes(again) == [Outcome.SKIPPED]
+        assert _count(client, signups) == 2
 
+        # The same bytes as a new upload (a revert) load again, and the
+        # documented query reads only that upload.
+        uploads.upload(WORKBOOK, "200")
+        assert _outcomes(pipeline) == [Outcome.LOADED]
+        assert _count(client, signups) == 4
+        latest = _rows(client, _documented_latest_query(signups))
+        assert sorted(row["source_generation"] for row in latest) == [
+            "200",
+            "200",
+        ]
 
-def test_a_double_load_is_reported_and_hidden_from_the_latest_query(
-    client: Any, name: str, audit: str
-) -> None:
-    """A double load is reported, and the latest query shows it once.
+    def test_raw_route_loads_a_table_added_later_on_its_own(
+        self, client: Any, name: str, audit: str
+    ) -> None:
+        """A table added to the pipeline later loads without the others.
 
-    Args:
-        client: The BigQuery client.
-        name: This test's table-name stem.
-        audit: The audit table.
-    """
-    table = f"{name}_signups_raw"
-    warehouse = RawJsonWarehouse(
-        PROJECT, DATASET, {"Signups": table}, audit_table_id=audit
-    )
-    contract = Contract(worksheets=SHEETS.worksheets[:1], file_name=FILE)
-    uploads = Uploads()
-    uploads.upload(WORKBOOK, "1")
-    assert _outcomes(Pipeline(uploads, Store(), warehouse, contract)) == [
-        Outcome.LOADED
-    ]
+        Args:
+            client: The BigQuery client.
+            name: This test's table-name stem.
+            audit: The audit table.
+        """
+        tables = _raw_tables(name)
+        uploads = Uploads()
+        uploads.upload(WORKBOOK, "1")
+        first = Contract(worksheets=SHEETS.worksheets[:1], file_name=FILE)
+        signups_only = RawJsonWarehouse(
+            PROJECT,
+            DATASET,
+            {"Signups": tables["Signups"]},
+            audit_table_id=audit,
+        )
+        assert _outcomes(Pipeline(uploads, Store(), signups_only, first)) == [
+            Outcome.LOADED
+        ]
 
-    # What two commits of one upload racing each other would leave:
-    # every row and the audit row twice, a moment apart.
-    for target, column in ((table, "ingested_at"), (audit, "timestamp")):
-        client.query(
-            f"INSERT INTO `{_full(target)}` SELECT * REPLACE "
-            f"(TIMESTAMP_ADD(`{column}`, INTERVAL 1 SECOND) AS `{column}`) "
-            f"FROM `{_full(target)}`"
-        ).result()
+        # Same upload, with the Survey sheet now mapped too: only the new
+        # table loads.
+        both = RawJsonWarehouse(PROJECT, DATASET, tables, audit_table_id=audit)
+        assert _outcomes(Pipeline(uploads, Store(), both, SHEETS)) == [
+            Outcome.LOADED
+        ]
+        assert _count(client, tables["Signups"]) == 2
+        assert _count(client, tables["Survey"]) == 1
+        assert _count(client, audit, "outcome = 'LOADED'") == 2
 
-    latest = _rows(client, _documented_latest_query(table))
-    assert len(latest) == 2
-    assert len({row["ingested_at"] for row in latest}) == 1
+    def test_a_failure_inside_the_commit_rolls_everything_back(
+        self,
+        client: Any,
+        name: str,
+        audit: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An error just before COMMIT leaves no rows and no audit record.
 
-    found = check_duplicate_loads(client, _full(audit))
-    assert found == [f"{_full(table)} was/{FILE}_{digest(WORKBOOK)[:8]} 1"]
+        Args:
+            client: The BigQuery client.
+            name: This test's table-name stem.
+            audit: The audit table.
+            monkeypatch: Injects the failure into the commit script.
+        """
+        tables = _raw_tables(name)
+        warehouse = RawJsonWarehouse(
+            PROJECT, DATASET, tables, audit_table_id=audit
+        )
+        real = bigquery_raw.commit_script
+
+        def failing(parts: Any, audit_full_id: str) -> str:
+            """Build the real commit script with an error before COMMIT.
+
+            Args:
+                parts: The tables' parts of the script.
+                audit_full_id: The audit table.
+
+            Returns:
+                The script.
+            """
+            # Fail after every table's insert and audit row, just before
+            # COMMIT.
+            return real(parts, audit_full_id).replace(
+                "  COMMIT TRANSACTION;",
+                "  SELECT ERROR('injected failure');\n  COMMIT TRANSACTION;",
+            )
+
+        monkeypatch.setattr(bigquery_raw, "commit_script", failing)
+        uploads = Uploads()
+        uploads.upload(WORKBOOK, "1")
+
+        assert _outcomes(Pipeline(uploads, Store(), warehouse, SHEETS)) == [
+            Outcome.FAILED
+        ]
+        assert _count(client, tables["Signups"]) == 0
+        assert _count(client, tables["Survey"]) == 0
+        assert _count(client, audit) == 0
+
+    def test_a_double_load_is_reported_and_hidden_from_the_latest_query(
+        self, client: Any, name: str, audit: str
+    ) -> None:
+        """A double load is reported, and the latest query shows it once.
+
+        Args:
+            client: The BigQuery client.
+            name: This test's table-name stem.
+            audit: The audit table.
+        """
+        table = f"{name}_signups_raw"
+        warehouse = RawJsonWarehouse(
+            PROJECT, DATASET, {"Signups": table}, audit_table_id=audit
+        )
+        contract = Contract(worksheets=SHEETS.worksheets[:1], file_name=FILE)
+        uploads = Uploads()
+        uploads.upload(WORKBOOK, "1")
+        assert _outcomes(Pipeline(uploads, Store(), warehouse, contract)) == [
+            Outcome.LOADED
+        ]
+
+        # What two commits of one upload racing each other would leave:
+        # every row and the audit row twice, a moment apart.
+        for target, column in ((table, "ingested_at"), (audit, "timestamp")):
+            client.query(
+                f"INSERT INTO `{_full(target)}` SELECT * REPLACE "
+                f"(TIMESTAMP_ADD(`{column}`, INTERVAL 1 SECOND) "
+                f"AS `{column}`) "
+                f"FROM `{_full(target)}`"
+            ).result()
+
+        latest = _rows(client, _documented_latest_query(table))
+        assert len(latest) == 2
+        assert len({row["ingested_at"] for row in latest}) == 1
+
+        found = check_duplicate_loads(client, _full(audit))
+        assert found == [f"{_full(table)} was/{FILE}_{digest(WORKBOOK)[:8]} 1"]

@@ -6,6 +6,51 @@ All notable changes to py-common. The supported API is what
 [semantic versioning](https://semver.org/): while the major version
 is 0, a minor release (0.x.0) may break that API, and says how below.
 
+## 0.5.0 - 2026-11-04
+
+SharePoint list exports from Microsoft Graph load through an explicit
+field mapping, and logs and errors no longer repeat file contents.
+
+### Added
+
+- **`GraphJsonLinesContract`**: reads one Graph list item per line and
+  maps internal field names and envelope properties to the contract's
+  columns. Any field that is neither mapped nor excluded stops the
+  file. `site_time_zone` converts date columns from UTC to the site's
+  local time, and `multi_value_separators` joins a multi-choice list
+  into one text value.
+- `Column` type `"any"`, for mixed or nested values.
+- `SheetRows`, `ROW_FIELDS` and `digest` in `py_common.__all__`, and a
+  `py.typed` marker, so other projects' type checkers follow py-common.
+- `tzdata`, for time zones on Windows and slim images.
+
+### Changed
+
+- **Payload object keys are written in alphabetical order**, at every
+  level. A processed copy of the same file has different bytes from
+  0.4.0, though the same values.
+- Values a raw JSON payload can't hold are refused in every format:
+  unpaired surrogates, numbers that aren't finite, integers outside
+  BigQuery JSON's range, and more than 128 nested levels.
+- `RawJsonWarehouse` creates every configured table on each load, so a
+  worksheet with no rows has an empty table, and refuses identifiers
+  with characters BigQuery doesn't allow.
+- `GCSSource` and `LocalSource` log a warning for each file they skip
+  for its extension. A `schema.json` beside an export is not reported.
+- The loaded marker holds the attempt's audit record, so a retry after
+  an audit failure can still write it.
+- Over 240 characters on Windows, `LocalObjectStore` keeps an object
+  under `.objects/`, named by a hash of its key.
+
+### Fixed
+
+- Unexpected-column, parser, configuration and BigQuery errors no
+  longer repeat cell values, headings or remote messages. A lost
+  heading row could put names and email addresses in the logs and audit
+  records.
+- A CSV integer too long for Python to convert is reported as out of
+  range, not as a crash.
+
 ## 0.4.0 - 2026-11-03
 
 CSV, JSON and JSON Lines files load the same way as workbooks.

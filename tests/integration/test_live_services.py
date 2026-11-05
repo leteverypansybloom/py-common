@@ -27,38 +27,41 @@ import os
 import pytest
 
 
-@pytest.mark.integration
-def test_sharepoint_connectivity() -> None:
-    """List the test folder and download one file from SharePoint.
+class TestSharePointSourceItems:
+    """Live SharePoint source discovery."""
 
-    Read-only. Skips unless the SHAREPOINT_* variables in the module
-    docstring are set.
-    """
-    names = [
-        "SHAREPOINT_HOSTNAME",
-        "SHAREPOINT_SITE_PATH",
-        "SHAREPOINT_LIBRARY",
-        "SHAREPOINT_TEST_ACCESS_TOKEN",
-    ]
-    missing = [n for n in names if not os.environ.get(n)]
-    if missing:
-        pytest.skip(f"Set {', '.join(missing)} to run")
+    @pytest.mark.integration
+    def test_sharepoint_connectivity(self) -> None:
+        """List the test folder and download one file from SharePoint.
 
-    from py_common.adapters.sharepoint import (
-        SharePointConfig,
-        SharePointSource,
-    )
+        Read-only. Skips unless the SHAREPOINT_* variables in the module
+        docstring are set.
+        """
+        names = [
+            "SHAREPOINT_HOSTNAME",
+            "SHAREPOINT_SITE_PATH",
+            "SHAREPOINT_LIBRARY",
+            "SHAREPOINT_TEST_ACCESS_TOKEN",
+        ]
+        missing = [n for n in names if not os.environ.get(n)]
+        if missing:
+            pytest.skip(f"Set {', '.join(missing)} to run")
 
-    config = SharePointConfig(
-        hostname=os.environ["SHAREPOINT_HOSTNAME"],
-        site_path=os.environ["SHAREPOINT_SITE_PATH"],
-        library=os.environ["SHAREPOINT_LIBRARY"],
-        folder=os.environ.get("SHAREPOINT_FOLDER", ""),
-    )
-    token = os.environ["SHAREPOINT_TEST_ACCESS_TOKEN"]
-    source = SharePointSource(config, token_provider=lambda: token)
+        from py_common.adapters.sharepoint import (
+            SharePointConfig,
+            SharePointSource,
+        )
 
-    items = source.items()
-    assert items, f"No Excel files found in {config.describe()}"
-    data = source.download(items[0])
-    assert len(data) == items[0].size_bytes
+        config = SharePointConfig(
+            hostname=os.environ["SHAREPOINT_HOSTNAME"],
+            site_path=os.environ["SHAREPOINT_SITE_PATH"],
+            library=os.environ["SHAREPOINT_LIBRARY"],
+            folder=os.environ.get("SHAREPOINT_FOLDER", ""),
+        )
+        token = os.environ["SHAREPOINT_TEST_ACCESS_TOKEN"]
+        source = SharePointSource(config, token_provider=lambda: token)
+
+        items = source.items()
+        assert items, f"No Excel files found in {config.describe()}"
+        data = source.download(items[0])
+        assert len(data) == items[0].size_bytes

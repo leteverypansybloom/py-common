@@ -19,7 +19,11 @@ def temp_dir():
 
 @pytest.fixture
 def source_folder(temp_dir):
-    """Folder with test fixtures."""
+    """Folder with test fixtures.
+
+    Args:
+        temp_dir: Isolated temporary folder.
+    """
     fixtures_dir = temp_dir / "fixtures"
     make_fixtures(fixtures_dir)
     return fixtures_dir
@@ -27,13 +31,21 @@ def source_folder(temp_dir):
 
 @pytest.fixture
 def local_source(source_folder):
-    """LocalSource reading from test fixtures."""
+    """LocalSource reading from test fixtures.
+
+    Args:
+        source_folder: Synthetic source fixture folder.
+    """
     return LocalSource(source_folder)
 
 
 @pytest.fixture
 def local_store(temp_dir):
-    """LocalObjectStore for testing."""
+    """LocalObjectStore for testing.
+
+    Args:
+        temp_dir: Isolated temporary folder.
+    """
     store_dir = temp_dir / "store"
     return LocalObjectStore(store_dir)
 

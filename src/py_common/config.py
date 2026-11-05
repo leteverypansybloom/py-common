@@ -89,7 +89,9 @@ def load_config(path: Path | str) -> dict[str, Any]:
         with open(path, encoding="utf-8") as f:
             config = yaml.safe_load(f)
     except yaml.YAMLError as e:
-        raise ConfigError(f"YAML parse error in {path}: {e}") from e
+        mark = getattr(e, "problem_mark", None)
+        position = f" at line {mark.line + 1}" if mark is not None else ""
+        raise ConfigError(f"YAML parse error in {path}{position}") from None
     except (OSError, UnicodeDecodeError) as e:
         raise ConfigError(f"Cannot read {path}: {e}") from e
     if config is None:

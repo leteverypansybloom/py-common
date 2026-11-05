@@ -312,9 +312,28 @@ class Pipeline:
                     extra=_fields(),
                 )
             if outcome in (Outcome.LOADED, Outcome.SKIPPED):
-                # The warehouse has the file either way: record that
-                # in the marker cache before anything else can fail.
-                self.store.put(self._loaded_marker_key(item), b"processed")
+                receipt_result = self._make_result(
+                    item,
+                    outcome,
+                    checksum,
+                    rows_processed,
+                    errors,
+                    start_time,
+                    warehouse_key,
+                    warnings,
+                    processed_key,
+                )
+                audit_key, audit_data = self._audit_payload(receipt_result)
+                receipt = json.dumps(
+                    {
+                        "audit_key": audit_key,
+                        "audit_data": audit_data.decode(),
+                    },
+                    sort_keys=True,
+                ).encode()
+                marker_key = self._loaded_marker_key(item)
+                if not self.store.get(marker_key):
+                    self.store.put(marker_key, receipt)
             if outcome == Outcome.SKIPPED:
                 rows_processed = 0
 
@@ -649,6 +668,26 @@ class Pipeline:
         Args:
             result: Processing result to record.
         """
+        marker = self.store.get(self._loaded_marker_key(result.item))
+        if isinstance(marker, bytes) and marker.startswith(b"{"):
+            receipt = json.loads(marker)
+            self.store.put(
+                receipt["audit_key"], receipt["audit_data"].encode()
+            )
+            if result.outcome == Outcome.LOADED:
+                return
+        key, data = self._audit_payload(result)
+        self.store.put(key, data)
+
+    def _audit_payload(self, result: Result) -> tuple[str, bytes]:
+        """Prepare a recoverable audit record for one attempt.
+
+        Args:
+            result: Processing result to record.
+
+        Returns:
+            The object key and serialised audit record.
+        """
         record = AuditRecord(
             timestamp=datetime.now(UTC),
             item_identity=result.item.identity,
@@ -688,4 +727,4 @@ class Pipeline:
             f"audit/records/{timestamp_key}_{uuid.uuid4().hex[:8]}_"
             f"{result.item.identity}.json"
         )
-        self.store.put(audit_key, audit_json.encode())
+        return audit_key, audit_json.encode()

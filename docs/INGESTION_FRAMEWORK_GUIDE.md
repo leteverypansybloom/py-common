@@ -115,7 +115,7 @@ exact; where nothing exists, that's stated plainly rather than implied.
   configured folder and downloads one file.
 - GCP authentication uses Application Default Credentials: the GCS
   and BigQuery adapters construct their own `storage.Client()` /
-  `bigquery.Client()` (`adapters/gcs.py`, `adapters/bigquery.py`),
+  `bigquery.Client()` (`adapters/gcs.py`, `adapters/bigquery_raw.py`),
   which find credentials through `google.auth.default()` (the
   `GOOGLE_APPLICATION_CREDENTIALS` variable, gcloud's ADC file, or
   the Cloud Run metadata server). The older `gcp_auth.py` helper, a
@@ -466,7 +466,8 @@ behaviour doesn't match the promise), **Missing** (nothing exists).
 | Incremental-load support | Missing | No cursor/watermark; see [2.2](#22-capture--getting-the-bytes-in-once-safely). |
 | CDC support | N/A | No database sources exist; correctly out of scope for now. |
 | File change detection | Partial | Each upload (identity + version) is loaded once (`pipeline.py`, plus the warehouse audit check); no delta/change-token query against the source itself. |
-| Scheduling and orchestration | Missing | No scheduler, no orchestrator config; `deploy/` is empty. |
+| SharePoint list exports | Partial | `GraphJsonLinesContract` (`graph.py`) reads Graph exports through an explicit field mapping; not yet run on a real export. |
+| Scheduling and orchestration | Missing | No scheduler, no orchestrator config; no deployment directory is maintained here. |
 | Event triggering | Partial | `runner.handle_upload()` runs the pipeline for an upload's landing folder from a Cloud Run service behind Eventarc; the trigger itself is set up by hand (`GCP_SETUP.md`, section 6). |
 | Queueing / buffering | N/A | Not needed at current file volumes. |
 | Rate limiting / throttling | Partial | `SharePointSource` honours Graph `Retry-After` on 429; nothing else does. |
@@ -483,7 +484,7 @@ behaviour doesn't match the promise), **Missing** (nothing exists).
 | Secrets and identity management | Partial | GCP identity comes from Application Default Credentials (the job's service account on Cloud Run); the `SecretStore` protocol (`ports.py`) has **no implementation** for application secrets (e.g. a SharePoint client secret). |
 | Data classification / policy controls | Partial | Contracts can exclude columns (`Worksheet.excluded`) so personal data isn't loaded; no classification tags. The audit trail's "store checksum, not content" design (`pipeline.py`) is a reasonable privacy default to build on. |
 | Environment management | Partial | `config.py` supports named sections (e.g. `dev`/`prod`) with `${VAR}` interpolation; no enforced separation beyond that convention. |
-| Infrastructure as code | Missing | No Terraform; `deploy/` is an empty folder. |
+| Infrastructure as code | Missing | No Terraform; no deployment directory is maintained here. |
 | Testing and release controls | **Have** | `pytest`, `pre-commit` (black/ruff/mypy/detect-secrets), GitHub Actions CI (`.github/workflows/tests.yml`), and nightly live BigQuery tests in a test dataset (`.github/workflows/bigquery-live.yml`, `docs/CI_SETUP.md`). |
 | Cost and capacity controls | Missing | Not applicable yet - no deployment exists to size or budget. |
 
@@ -498,7 +499,7 @@ not a redesign.
 
 | Need | Recommended implementation | Maps to |
 |---|---|---|
-| Source (SharePoint) | A Microsoft Graph-based adapter: site/drive IDs, file metadata, and - once volumes justify it - delta queries for change tracking [reference 4](#11-references) | Implement `SharePointSource` against the existing `Source` protocol (`ports.py`); it currently raises `NotImplementedError` (`adapters/sharepoint.py`). |
+| Source (SharePoint) | A Microsoft Graph-based adapter: site/drive IDs, file metadata, and - once volumes justify it - delta queries for change tracking [reference 4](#11-references) | Implement `SharePointSource` against the existing `Source` protocol (`ports.py`); it implements listing and download; live-site acceptance is still required (`adapters/sharepoint.py`). |
 | Raw landing | Cloud Storage, immutable per-run/per-object paths | Already the shape of `GCSObjectStore` (`adapters/gcs.py`) via `pipeline.py`. |
 | Processing | Python, run as a Cloud Run job (batch-to-completion, not a long-lived service) | `Pipeline.run()` (`pipeline.py`) is already written as a single batch pass suitable for this. |
 | Scheduling | Cloud Scheduler triggering the Cloud Run job directly, or via a Workflows definition if more than one step needs coordinating | Not yet built; belongs in the *solution* repo's `deploy/`, using Terraform, not in `py-common`. |
@@ -507,7 +508,7 @@ not a redesign.
 | Secrets | Secret Manager, referenced (never inlined) from configuration | Needs a new adapter implementing `SecretStore` (`ports.py`); none exists today. |
 | Quality | Reusable checks: schema, required fields, uniqueness, valid codes, record counts, freshness | `Contract.validate()` covers the first four; freshness is a per-source view read by `runner.check_freshness()` (`GCP_SETUP.md`); row-count checks are not built (see [Section 5](#5-feature-by-feature-status)). |
 | Monitoring | Cloud Logging (already reachable via Python `logging`) plus named Cloud Monitoring alerts on failure and on staleness | Not built; needs both a structured-logging change and alert policies defined as IaC. |
-| Deployment | Terraform modules, run through the existing CI/CD pattern | `deploy/` exists as a placeholder folder only. |
+| Deployment | Terraform modules, run through the existing CI/CD pattern | deployment configuration belongs in the consuming project. |
 
 **Why SharePoint should be built as a Graph-based adapter, not a
 synced-folder read:** a document library synced to a local/network path

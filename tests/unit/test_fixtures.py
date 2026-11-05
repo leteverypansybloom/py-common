@@ -19,7 +19,11 @@ class TestFixturesReadme:
 
     @pytest.fixture
     def output_dir(self, tmp_path):
-        """Fixture: folder with freshly generated fixtures."""
+        """Fixture: folder with freshly generated fixtures.
+
+        Args:
+            tmp_path: Isolated test folder.
+        """
         make_fixtures(tmp_path)
         return tmp_path
 

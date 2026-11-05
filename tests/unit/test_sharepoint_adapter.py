@@ -249,7 +249,13 @@ def sleeps() -> list[float]:
 def source(
     config: SharePointConfig, graph: FakeGraph, sleeps: list[float]
 ) -> SharePointSource:
-    """SharePointSource wired to the fake Graph and a fake token."""
+    """SharePointSource wired to the fake Graph and a fake token.
+
+    Args:
+        config: Synthetic pipeline configuration.
+        graph: Compiled dependency graph.
+        sleeps: Recorded backoff delays.
+    """
     return SharePointSource(
         config,
         token_provider=lambda: TOKEN,

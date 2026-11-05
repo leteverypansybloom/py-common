@@ -17,9 +17,9 @@ py_common.logging. Anything else (e.g. AuditRecord, SecretStore,
 names starting with "_") may change in any release.
 """
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
-from py_common.contract import Column, Contract, Worksheet
+from py_common.contract import Column, Contract, SheetRows, Worksheet
 from py_common.errors import (
     ConfigError,
     ContractError,
@@ -33,15 +33,21 @@ from py_common.errors import (
     ValidationError,
     VersionMismatch,
 )
-from py_common.model import Outcome, Result, SourceItem
+from py_common.graph import GraphJsonLinesContract
+from py_common.model import Outcome, Result, SourceItem, digest
 from py_common.pipeline import Pipeline
 from py_common.ports import ObjectStore, Source, Warehouse
+from py_common.raw import ROW_FIELDS
 
 __all__ = [
     "Pipeline",
     "Contract",
     "Worksheet",
     "Column",
+    "SheetRows",
+    "GraphJsonLinesContract",
+    "ROW_FIELDS",
+    "digest",
     "Outcome",
     "Result",
     "SourceItem",

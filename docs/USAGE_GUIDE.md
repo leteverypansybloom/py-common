@@ -23,8 +23,8 @@ planned in 2026-09.
 `py-common` is a small **framework** (see
 [`INGESTION_FRAMEWORK_GUIDE.md`, Section 3](INGESTION_FRAMEWORK_GUIDE.md#3-framework-vs-solution)
 for the framework-vs-solution distinction) for one specific shape of
-work: discover Excel workbooks at a source, validate them against a
-declared schema, land the raw and processed copies immutably, load
+work: discover XLSX, CSV, JSON or JSON Lines files at a source,
+validate them against a declared schema, land the raw and processed copies immutably, load
 them into a warehouse table, and keep an audit trail of every attempt.
 A project that depends on it - a "Healthy Working Wales SharePoint
 ingestion" repo, for example - should mostly be a `config.yaml`, a
@@ -32,9 +32,9 @@ ingestion" repo, for example - should mostly be a `config.yaml`, a
 
 ## Use py-common when
 
-- Your source produces **discrete files**: Excel workbooks today,
-  specifically, since `Contract.validate()` calls
-  `openpyxl.load_workbook()` directly (`contract.py`).
+- Your source produces **discrete files**: XLSX, CSV, JSON or JSON Lines.
+  Contract.file_format selects the parser. GraphJsonLinesContract maps
+  nested Microsoft Graph fields using explicit internal field names.
 - You need the file's **structure and data checked** before it's
   trusted anywhere downstream - required worksheets, required and
   unexpected columns, nullability, basic types, uniqueness
@@ -61,8 +61,8 @@ ingestion" repo, for example - should mostly be a `config.yaml`, a
 
 **Streaming or near-real-time ingestion.** `py-common` is batch-only
 by design: `Source.items()` lists everything present at call time,
-there is no event/webhook entry point, and nothing in `Pipeline` is
-written for long-lived processing. If you have a genuine low-latency
+`runner.handle_upload` handles GCS upload notifications, and nothing
+in `Pipeline` is written for long-lived processing. If you have a genuine low-latency
 requirement, this isn't the tool, full stop - building streaming
 support into a framework designed around "list, then download" would
 be a rewrite, not an extension.
@@ -125,7 +125,7 @@ The pattern is the same for any new `Source`, `ObjectStore` or
    adapter exists" means "the pipeline works," per the database
    example above.
 5. Add unit tests with the external service mocked (see
-   `tests/unit/test_bigquery_adapter.py` for the pattern using
+   `tests/unit/test_bigquery_raw_adapter.py` for the pattern using
    `unittest.mock.patch`), and an `integration`-marked test that only
    runs against the real service when credentials are present.
 6. Update `INGESTION_FRAMEWORK_GUIDE.md`'s Section 5 status table and

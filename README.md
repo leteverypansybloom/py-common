@@ -38,6 +38,33 @@ A contract reads one kind of file (`Contract.file_format`): an
 Excel workbook (the default), a CSV file, a JSON array of objects or
 a JSON Lines file. See [`docs/FILE_FORMATS.md`](docs/FILE_FORMATS.md).
 
+A SharePoint list exported from Microsoft Graph, one item per line, uses
+`GraphJsonLinesContract`, which says where each column comes from:
+
+```python
+contract = GraphJsonLinesContract(
+    worksheets=[
+        Worksheet(
+            "requests",
+            [
+                Column("Organisation", "string"),
+                Column("Requested", "date", nullable=True),
+                Column("Topics", "string", nullable=True),
+            ],
+        )
+    ],
+    file_format="jsonl",
+    field_map={
+        "Organisation": "Title",
+        "Requested": "RequestDate",
+        "Topics": "TopicChoices",
+    },
+    excluded_fields=["ContactEmail"],
+    site_time_zone="Europe/London",
+    multi_value_separators={"Topics": ";#"},
+)
+```
+
 Every configured worksheet is inserted into its own raw table
 (`RawJsonWarehouse`), one JSON payload per row, with the file,
 generation, sheet and row number it came from. Rows are only ever
@@ -232,6 +259,7 @@ See [`CONTRIBUTING.md`, Checks](CONTRIBUTING.md#checks).
 | `GCSObjectStore` | ObjectStore | Built, unit-tested against mocks; real `lock()` |
 | `RawJsonWarehouse` | Warehouse | Built, unit-tested against mocks; one raw JSON table per sheet, not yet run live |
 | `SharePointSource` | Source | Built, unit-tested against mocked Graph; not yet run live (auth pending IT) |
+| `GraphJsonLinesContract` | Contract | Built, unit-tested on synthetic exports; not yet run on a real list export |
 | Secret Manager | SecretStore | Not started |
 
 Also built: contract validation for workbooks, CSV, JSON and JSON
@@ -297,7 +325,8 @@ header of each file.
 PEP 8 with 79-character lines (Black and Ruff), type hints checked
 by mypy in strict mode, Google-style docstrings, and tests written
 before the code. The project follows the Reproducible Analytical
-Pipelines (RAP) approach: reproducible, auditable and peer-reviewed.
+Pipelines (RAP) approach: reproducible and auditable. Independent
+review is required before production use.
 Details are in [`CONTRIBUTING.md`](CONTRIBUTING.md#code-standards).
 
 ## License

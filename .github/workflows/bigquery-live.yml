@@ -24,9 +24,6 @@ jobs:
   bigquery:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # Skipped, rather than failing every night, until the repository
-    # variables are set (docs/CI_SETUP.md).
-    if: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER != '' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -41,6 +38,16 @@ jobs:
           python -m pip install --upgrade pip
           # The runtime versions deployments use.
           pip install -e ".[dev,gcp]" --constraint constraints.txt
+
+      - name: Check live-test configuration
+        env:
+          PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT }}
+          PROJECT: ${{ vars.GCP_PROJECT_ID }}
+          DATASET: ${{ vars.BQ_TEST_DATASET }}
+        run: |
+          test -n "$PROVIDER" && test -n "$ACCOUNT"
+          test -n "$PROJECT" && test -n "$DATASET"
 
       - name: Sign in to Google Cloud
         uses: google-github-actions/auth@v3

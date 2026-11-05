@@ -42,7 +42,11 @@ class TestDependencyFloors:
 
     @pytest.mark.parametrize("extra", ["sharepoint", "dev"])
     def test_requests_floor_excludes_advisories(self, extra: str) -> None:
-        """Requests 2.32.4, which has advisories, can't be installed."""
+        """Requests 2.32.4, which has advisories, can't be installed.
+
+        Args:
+            extra: Additional configuration fields.
+        """
         spec = _requirement("requests", extra).specifier
         assert not spec.contains("2.32.4")
         assert spec.contains("2.33.0")
@@ -73,38 +77,44 @@ def _image_imports(dockerfile: str) -> list[str]:
     return [name for name in modules if name.split(".")[0] == "py_common"]
 
 
-@pytest.mark.parametrize("name", ["Dockerfile"])
-def test_image_build_check_imports_existing_modules(name: str) -> None:
-    """The image's build-time import check names modules that exist.
+class TestPackageBuild:
+    """Package and test entry points."""
 
-    Args:
-        name: The Dockerfile to read.
-    """
-    modules = _image_imports((ROOT / name).read_text(encoding="utf-8"))
+    @pytest.mark.parametrize("name", ["Dockerfile"])
+    def test_image_build_check_imports_existing_modules(
+        self, name: str
+    ) -> None:
+        """The image's build-time import check names modules that exist.
 
-    assert modules, f"{name} has no py-common import check"
-    for module in modules:
-        importlib.import_module(module)
+        Args:
+            name: The Dockerfile to read.
+        """
+        modules = _image_imports((ROOT / name).read_text(encoding="utf-8"))
 
+        assert modules, f"{name} has no py-common import check"
+        for module in modules:
+            importlib.import_module(module)
 
-def test_live_tests_are_all_marked_integration() -> None:
-    """The unit selection never collects a test that calls GCP."""
-    done = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "--collect-only",
-            "-q",
-            "-p",
-            "no:cacheprovider",
-            "-m",
-            "not integration",
-            "tests/integration",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    def test_live_tests_are_all_marked_integration(self) -> None:
+        """The unit selection never collects a test that calls GCP."""
+        done = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "--collect-only",
+                "-q",
+                "-p",
+                "no:cacheprovider",
+                "-m",
+                "not integration",
+                "tests/integration",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
 
-    assert done.returncode == 5, done.stdout + done.stderr  # none collected
+        assert done.returncode == 5, (
+            done.stdout + done.stderr
+        )  # none collected

@@ -147,7 +147,7 @@ class TestReadJson:
         [
             ('{"a": 1}', "expected an array of objects, got an object"),
             ("[1]", "item 1 is integer, expected an object"),
-            ('[{"a": 1, "a": 2}]', "repeats the key 'a'"),
+            ('[{"a": 1, "a": 2}]', "repeats a key"),
             ('[{"a": NaN}]', "NaN is not a JSON number"),
             ('[{"a": 1e400}]', "too large for a float"),
             ("[{", "Expecting property name"),
@@ -333,7 +333,7 @@ class TestCsvContract:
         sheets = contract.read(b"id,extra\nx,1\n", "items.csv", warnings)
 
         assert sheets["items"].rows == [(2, ("x",))]
-        assert "Unexpected columns: extra" in warnings[0]
+        assert "Unexpected columns: 1" in warnings[0]
         assert "doesn't read as a whole number" in warnings[1]
 
     def test_empty_file_is_refused(self) -> None:

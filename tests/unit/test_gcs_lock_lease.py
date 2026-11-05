@@ -72,6 +72,10 @@ def _leave_lock(bucket: FakeBucket, store: GCSObjectStore) -> None:
     Written directly, as the store writes it, rather than by entering
     lock() and never leaving: an abandoned generator would release
     the lock when it is garbage-collected.
+
+    Args:
+        bucket: In-memory storage bucket.
+        store: Object store fixture.
     """
     expires = T0 + timedelta(seconds=store.lease_seconds)
     bucket.blob(KEY).upload_from_string(
@@ -84,129 +88,6 @@ def _leave_lock(bucket: FakeBucket, store: GCSObjectStore) -> None:
         ),
         if_generation_match=0,
     )
-
-
-def test_lock_records_its_expiry(
-    bucket: FakeBucket, clock: list[datetime]
-) -> None:
-    """The lock records when it was taken and when it expires.
-
-    Args:
-        bucket: The fake bucket.
-        clock: The store's clock.
-    """
-    with _store(bucket, lease_seconds=900).lock(KEY):
-        holder = _holder(bucket)
-
-    assert holder["acquired_at"] == T0.isoformat()
-    assert holder["expires_at"] == (T0 + timedelta(seconds=900)).isoformat()
-
-
-def test_unexpired_lock_is_never_taken(
-    bucket: FakeBucket, clock: list[datetime]
-) -> None:
-    """A lock a second short of expiry is still refused.
-
-    Args:
-        bucket: The fake bucket.
-        clock: The store's clock.
-    """
-    _leave_lock(bucket, _store(bucket))
-    clock[0] = T0 + timedelta(seconds=3599)
-
-    with pytest.raises(RuntimeError, match="held by another run"):
-        with _store(bucket).lock(KEY):
-            pass
-    assert _holder(bucket)["acquired_at"] == T0.isoformat()
-
-
-def test_expired_lock_is_taken_over_and_logged(
-    bucket: FakeBucket, clock: list[datetime]
-) -> None:
-    """An expired lock is taken over, with a warning naming its run.
-
-    Args:
-        bucket: The fake bucket.
-        clock: The store's clock.
-    """
-    _leave_lock(bucket, _store(bucket))
-    dead = _holder(bucket)
-    clock[0] = T0 + timedelta(seconds=3601)
-
-    with patch("py_common.adapters.gcs.logger") as logger:
-        with _store(bucket).lock(KEY):
-            assert _holder(bucket)["run_id"] != dead["run_id"]
-
-    assert KEY not in bucket.objects  # released normally afterwards
-    [warning] = logger.warning.call_args_list
-    assert "Took over expired lock" in warning.args[0]
-    assert dead["run_id"] in str(warning.args)
-
-
-def test_takeover_race_has_one_winner(
-    bucket: FakeBucket, clock: list[datetime]
-) -> None:
-    """Two runs find the same expired lock; only one takes it."""
-    _leave_lock(bucket, _store(bucket))
-    clock[0] = T0 + timedelta(hours=2)
-    winner = _store(bucket)
-    loser = _store(bucket)
-    held = winner.lock(KEY)
-    # The winner's takeover lands between the loser reading the
-    # expired lock and writing its own.
-    bucket.before_takeover = held.__enter__
-
-    with pytest.raises(RuntimeError, match="took it over first"):
-        with loser.lock(KEY):
-            pass
-
-    winner_id = _holder(bucket)["run_id"]
-    held.__exit__(None, None, None)
-    assert KEY not in bucket.objects
-    assert winner_id
-
-
-def test_lock_without_expiry_uses_acquired_at_plus_lease(
-    bucket: FakeBucket, clock: list[datetime]
-) -> None:
-    """Locks written by 0.1.x have no expires_at."""
-    bucket.blob(KEY).upload_from_string(
-        json.dumps({"run_id": "old", "acquired_at": T0.isoformat()}),
-        if_generation_match=0,
-    )
-    store = _store(bucket)
-
-    clock[0] = T0 + timedelta(minutes=30)
-    with pytest.raises(RuntimeError):
-        with store.lock(KEY):
-            pass
-
-    clock[0] = T0 + timedelta(hours=2)
-    with store.lock(KEY):
-        assert _holder(bucket)["run_id"] != "old"
-
-
-def test_unreadable_lock_is_never_taken(
-    bucket: FakeBucket, clock: list[datetime]
-) -> None:
-    """A lock that isn't valid JSON is never taken over.
-
-    Args:
-        bucket: The fake bucket.
-        clock: The store's clock.
-    """
-    bucket.blob(KEY).upload_from_string(b"not json", if_generation_match=0)
-    clock[0] = T0 + timedelta(days=30)
-
-    with pytest.raises(RuntimeError, match="held by another run"):
-        with _store(bucket).lock(KEY):
-            pass
-
-
-def test_lease_must_be_positive() -> None:
-    """A zero lease is refused."""
-    with pytest.raises(ValueError, match="lease_seconds"):
-        _store(FakeBucket(), lease_seconds=0)
 
 
 class TestNaiveLeaseTimes:
@@ -238,3 +119,135 @@ class TestNaiveLeaseTimes:
                 pass
 
         assert bucket.objects["locks/k"][0].decode() == holder
+
+
+class TestGcsObjectStoreLock:
+    """Lease acquisition and takeover."""
+
+    def test_lock_records_its_expiry(
+        self, bucket: FakeBucket, clock: list[datetime]
+    ) -> None:
+        """The lock records when it was taken and when it expires.
+
+        Args:
+            bucket: The fake bucket.
+            clock: The store's clock.
+        """
+        with _store(bucket, lease_seconds=900).lock(KEY):
+            holder = _holder(bucket)
+
+        assert holder["acquired_at"] == T0.isoformat()
+        assert (
+            holder["expires_at"] == (T0 + timedelta(seconds=900)).isoformat()
+        )
+
+    def test_unexpired_lock_is_never_taken(
+        self, bucket: FakeBucket, clock: list[datetime]
+    ) -> None:
+        """A lock a second short of expiry is still refused.
+
+        Args:
+            bucket: The fake bucket.
+            clock: The store's clock.
+        """
+        _leave_lock(bucket, _store(bucket))
+        clock[0] = T0 + timedelta(seconds=3599)
+
+        with pytest.raises(RuntimeError, match="held by another run"):
+            with _store(bucket).lock(KEY):
+                pass
+        assert _holder(bucket)["acquired_at"] == T0.isoformat()
+
+    def test_expired_lock_is_taken_over_and_logged(
+        self, bucket: FakeBucket, clock: list[datetime]
+    ) -> None:
+        """An expired lock is taken over, with a warning naming its run.
+
+        Args:
+            bucket: The fake bucket.
+            clock: The store's clock.
+        """
+        _leave_lock(bucket, _store(bucket))
+        dead = _holder(bucket)
+        clock[0] = T0 + timedelta(seconds=3601)
+
+        with patch("py_common.adapters.gcs.logger") as logger:
+            with _store(bucket).lock(KEY):
+                assert _holder(bucket)["run_id"] != dead["run_id"]
+
+        assert KEY not in bucket.objects  # released normally afterwards
+        [warning] = logger.warning.call_args_list
+        assert "Took over expired lock" in warning.args[0]
+        assert dead["run_id"] in str(warning.args)
+
+    def test_takeover_race_has_one_winner(
+        self, bucket: FakeBucket, clock: list[datetime]
+    ) -> None:
+        """Two runs find the same expired lock; only one takes it.
+
+        Args:
+            bucket: In-memory storage bucket.
+            clock: Controllable lease clock.
+        """
+        _leave_lock(bucket, _store(bucket))
+        clock[0] = T0 + timedelta(hours=2)
+        winner = _store(bucket)
+        loser = _store(bucket)
+        held = winner.lock(KEY)
+        # The winner's takeover lands between the loser reading the
+        # expired lock and writing its own.
+        bucket.before_takeover = held.__enter__
+
+        with pytest.raises(RuntimeError, match="took it over first"):
+            with loser.lock(KEY):
+                pass
+
+        winner_id = _holder(bucket)["run_id"]
+        held.__exit__(None, None, None)
+        assert KEY not in bucket.objects
+        assert winner_id
+
+    def test_lock_without_expiry_uses_acquired_at_plus_lease(
+        self, bucket: FakeBucket, clock: list[datetime]
+    ) -> None:
+        """Locks written by 0.1.x have no expires_at.
+
+        Args:
+            bucket: In-memory storage bucket.
+            clock: Controllable lease clock.
+        """
+        bucket.blob(KEY).upload_from_string(
+            json.dumps({"run_id": "old", "acquired_at": T0.isoformat()}),
+            if_generation_match=0,
+        )
+        store = _store(bucket)
+
+        clock[0] = T0 + timedelta(minutes=30)
+        with pytest.raises(RuntimeError):
+            with store.lock(KEY):
+                pass
+
+        clock[0] = T0 + timedelta(hours=2)
+        with store.lock(KEY):
+            assert _holder(bucket)["run_id"] != "old"
+
+    def test_unreadable_lock_is_never_taken(
+        self, bucket: FakeBucket, clock: list[datetime]
+    ) -> None:
+        """A lock that isn't valid JSON is never taken over.
+
+        Args:
+            bucket: The fake bucket.
+            clock: The store's clock.
+        """
+        bucket.blob(KEY).upload_from_string(b"not json", if_generation_match=0)
+        clock[0] = T0 + timedelta(days=30)
+
+        with pytest.raises(RuntimeError, match="held by another run"):
+            with _store(bucket).lock(KEY):
+                pass
+
+    def test_lease_must_be_positive(self) -> None:
+        """A zero lease is refused."""
+        with pytest.raises(ValueError, match="lease_seconds"):
+            _store(FakeBucket(), lease_seconds=0)

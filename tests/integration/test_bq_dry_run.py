@@ -209,39 +209,43 @@ def _create_tables(client: Any, dataset: str, sql: list[str]) -> None:
         )
 
 
-def test_every_generated_statement_passes_a_dry_run(
-    client: Any, dataset: str
-) -> None:
-    """BigQuery accepts every statement the adapter generates.
+class TestGeneratedSql:
+    """Generated warehouse SQL."""
 
-    Args:
-        client: The BigQuery client.
-        dataset: The scratch dataset.
-    """
-    statements = _statements(dataset)
-    assert any("BEGIN TRANSACTION" in s for s, _ in statements)
-    _create_tables(client, dataset, [s for s, _ in statements])
+    def test_every_generated_statement_passes_a_dry_run(
+        self, client: Any, dataset: str
+    ) -> None:
+        """BigQuery accepts every statement the adapter generates.
 
-    failures = []
-    for sql, config in statements:
-        params = getattr(config, "query_parameters", None) or []
-        dry = bigquery.QueryJobConfig(
-            dry_run=True, use_query_cache=False, query_parameters=params
-        )
-        try:
-            client.query(sql, job_config=dry)
-        except Exception as e:  # report every failure, not just one
-            failures.append(f"{e}\n---\n{sql}")
+        Args:
+            client: The BigQuery client.
+            dataset: The scratch dataset.
+        """
+        statements = _statements(dataset)
+        assert any("BEGIN TRANSACTION" in s for s, _ in statements)
+        _create_tables(client, dataset, [s for s, _ in statements])
 
-    assert not failures, "\n\n".join(failures)
+        failures = []
+        for sql, config in statements:
+            params = getattr(config, "query_parameters", None) or []
+            dry = bigquery.QueryJobConfig(
+                dry_run=True, use_query_cache=False, query_parameters=params
+            )
+            try:
+                client.query(sql, job_config=dry)
+            except Exception as e:  # report every failure, not just one
+                failures.append(f"{e}\n---\n{sql}")
 
+        assert not failures, "\n\n".join(failures)
 
-def test_recorder_sees_the_insert_into_the_raw_table(dataset: str) -> None:
-    """Guard: the statements really include the insert we ship.
+    def test_recorder_sees_the_insert_into_the_raw_table(
+        self, dataset: str
+    ) -> None:
+        """Guard: the statements really include the insert we ship.
 
-    Args:
-        dataset: The scratch dataset.
-    """
-    sql = "\n".join(s for s, _ in _statements(dataset))
+        Args:
+            dataset: The scratch dataset.
+        """
+        sql = "\n".join(s for s, _ in _statements(dataset))
 
-    assert f"INSERT INTO `{PROJECT}.{dataset}.raw_s`" in sql
+        assert f"INSERT INTO `{PROJECT}.{dataset}.raw_s`" in sql

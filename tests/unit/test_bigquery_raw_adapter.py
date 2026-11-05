@@ -132,7 +132,11 @@ class TestRawJsonWarehouseLoad:
 
     @pytest.fixture
     def warehouse(self, mock_bq_client):
-        """Fixture: RawJsonWarehouse with mocked client."""
+        """Fixture: RawJsonWarehouse with mocked client.
+
+        Args:
+            mock_bq_client: Mock BigQuery client.
+        """
         with patch(
             "py_common.adapters.bigquery_raw.bigquery.Client"
         ) as mock_client_class:
@@ -208,7 +212,7 @@ class TestRawJsonWarehouseLoad:
         [table] = [
             c.args[0]
             for c in mock_bq_client.create_table.call_args_list
-            if "_stg_" not in c.args[0].table_id
+            if c.args[0].table_id == "hww_survey_info"
         ]
         assert table.table_id == "hww_survey_info"
         assert table.schema == RAW_SCHEMA
@@ -233,8 +237,10 @@ class TestRawJsonWarehouseLoad:
             c.args[0].table_id
             for c in mock_bq_client.create_table.call_args_list
         ]
-        # Only this load's own staging table is created.
-        assert [t.split("_stg_")[0] for t in created] == ["hww_survey_info"]
+        # Each configured sheet has a typed staging table, even when empty.
+        assert sorted(t.split("_stg_")[0] for t in created) == sorted(
+            TABLES.values()
+        )
 
     def test_unknown_sheet_is_refused_before_loading(
         self, warehouse, mock_bq_client

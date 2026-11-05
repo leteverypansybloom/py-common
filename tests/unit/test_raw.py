@@ -164,8 +164,8 @@ class TestToNdjson:
 
         assert _lines(data)[0]["payload"] == {"a": 1, "b": None}
 
-    def test_payload_keeps_column_order(self, item):
-        """Payload keys are in SheetRows' column order.
+    def test_payload_keys_are_canonical(self, item):
+        """Payload keys use canonical alphabetical order.
 
         Args:
             item: SourceItem fixture.
@@ -176,7 +176,7 @@ class TestToNdjson:
 
         data, _ = to_ndjson(sheets, item, "abc123")
 
-        assert list(_lines(data)[0]["payload"]) == ["z", "a", "m"]
+        assert list(_lines(data)[0]["payload"]) == ["a", "m", "z"]
 
     def test_non_ascii_text_is_kept_readable(self, item):
         """Welsh text is written as UTF-8, not as escaped code points.

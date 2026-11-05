@@ -107,7 +107,9 @@ def run_query(
     try:
         job = client.query(sql, job_config=job_config)
     except GoogleAPICallError as e:
-        raise ServiceError(f"Cannot start BigQuery job for {what}: {e}") from e
+        raise ServiceError(
+            f"Cannot start BigQuery job for {what}: {describe_error(e)}"
+        ) from None
     logger.info(
         "Started BigQuery job %s for %s",
         job.job_id,
@@ -457,8 +459,8 @@ def create_staging_table(
         client.create_table(table)
     except GoogleAPICallError as e:
         raise ServiceError(
-            f"Cannot create staging table {full_id}: {e}"
-        ) from e
+            f"Cannot create staging table {full_id}: {describe_error(e)}"
+        ) from None
 
 
 def drop_staging_table(client: bigquery.Client, full_id: str) -> None:
@@ -477,5 +479,5 @@ def drop_staging_table(client: bigquery.Client, full_id: str) -> None:
         logger.warning(
             "Could not drop staging table %s (it expires by itself): %s",
             full_id,
-            e,
+            describe_error(e),
         )

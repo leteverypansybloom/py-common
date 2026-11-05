@@ -21,7 +21,11 @@ class TestLocalObjectStorePut:
 
     @pytest.fixture
     def store(self, tmp_path):
-        """Fixture: LocalObjectStore rooted at a temp folder."""
+        """Fixture: LocalObjectStore rooted at a temp folder.
+
+        Args:
+            tmp_path: Isolated test folder.
+        """
         return LocalObjectStore(tmp_path / "store")
 
     def test_put_new_key_writes_normally(self, store):
@@ -82,7 +86,11 @@ class TestLocalObjectStoreKeyResolution:
 
     @pytest.fixture
     def store(self, tmp_path):
-        """Fixture: LocalObjectStore rooted at a temp folder."""
+        """Fixture: LocalObjectStore rooted at a temp folder.
+
+        Args:
+            tmp_path: Isolated test folder.
+        """
         return LocalObjectStore(tmp_path / "store")
 
     def test_relative_key_resolves_under_folder(self, store, tmp_path):

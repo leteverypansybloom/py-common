@@ -17,6 +17,7 @@ sees exactly what BigQuery's audit table would let through, and a
 change to the adapter's SQL or parameters changes what it sees.
 """
 
+import copy
 import json
 import re
 from io import BytesIO
@@ -93,6 +94,7 @@ class FakeBigQueryClient:
         self.created: list[str] = []
         self.expires: dict[str, Any] = {}
         self.delete_error: Exception | None = None
+        self.fail_after_insert: Exception | None = None
         self._jobs = 0
 
     def _job_id(self) -> str:
@@ -199,7 +201,19 @@ class FakeBigQueryClient:
             return _Job(self._job_id(), rows=[])
 
         self.scripts.append(sql)
-        status = self._run_commit_script(sql, params)
+        assert "ROLLBACK TRANSACTION;" in sql
+        assert "RAISE USING MESSAGE" in sql
+        for parameter in job_config.query_parameters:
+            if parameter.name == "timestamp":
+                assert parameter.type_ == "TIMESTAMP"
+        before_rows, before_audit = copy.deepcopy((self.rows, self.audit))
+        try:
+            status = self._run_commit_script(sql, params)
+        except Exception as error:
+            self.rows, self.audit = before_rows, before_audit
+            job = _Job(self._job_id(), error=error)
+            job._wait_error = error
+            return job
         job = _Job(self._job_id(), rows=[(status,)])
         if self.lose_next_commit_wait is not None:
             # Committed, but the client can't confirm it: waiting
@@ -217,6 +231,10 @@ class FakeBigQueryClient:
         that table's writes and audit row. Blocks are evaluated in
         order, as BigQuery would, so a later block sees audit rows an
         earlier block added.
+
+        Args:
+            sql: Generated SQL text.
+            params: Bound query parameters.
         """
         blocks = re.findall(
             r"SET (already_loaded_\d+) = \(\s*SELECT COUNT\(\*\) > 0"
@@ -261,6 +279,12 @@ class FakeBigQueryClient:
                 self.rows[target] = self.rows.get(target, 0) + self.staged.get(
                     staging, 0
                 )
+                if self.fail_after_insert is not None:
+                    error, self.fail_after_insert = (
+                        self.fail_after_insert,
+                        None,
+                    )
+                    raise error
 
             audit_insert = re.search(
                 r"INSERT INTO `[^`]+audit` \(([^)]*)\)\s*VALUES \(([^)]*)\)",
@@ -280,5 +304,9 @@ class FakeBigQueryClient:
 
 
 def _full_id(table: Any) -> str:
-    """project.dataset.table of a bigquery.Table."""
+    """project.dataset.table of a bigquery.Table.
+
+    Args:
+        table: Raw or reporting table under test.
+    """
     return f"{table.project}.{table.dataset_id}.{table.table_id}"

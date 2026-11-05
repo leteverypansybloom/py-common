@@ -218,32 +218,6 @@ class TestWhitespaceIsEmpty:
         assert _contract().validate(data, "f.xlsx") == 1
 
 
-def test_pipeline_parses_each_workbook_once() -> None:
-    """process() validates and converts from a single parse."""
-    from unittest.mock import Mock
-
-    from py_common.model import Outcome, SourceItem
-    from py_common.pipeline import Pipeline
-
-    source = Mock()
-    source.download.return_value = _book([["name", "count"], ["a", 1]])
-    store = Mock()
-    store.get.return_value = None
-    warehouse = Mock()
-    warehouse.identity = "p.d.events"
-    warehouse.load.return_value = True
-    pipeline = Pipeline(
-        source, store, warehouse, _contract()
-    )  # type: ignore[arg-type]
-    real = openpyxl.load_workbook
-
-    with patch("py_common.contract.load_workbook", side_effect=real) as opened:
-        result = pipeline.process(SourceItem("f.xlsx", "f.xlsx", "1", 1))
-
-    assert result.outcome == Outcome.LOADED, result.errors
-    opened.assert_called_once()
-
-
 SECRET = "jo.bloggs@example.org"
 
 
@@ -439,7 +413,12 @@ class TestSynthesisedNames:
 
 
 def _with_sheet_target(data: bytes, target: str) -> bytes:
-    """Rewrite the workbook's relationship target for sheet1."""
+    """Rewrite the workbook's relationship target for sheet1.
+
+    Args:
+        data: Synthetic source bytes.
+        target: Destination identifier.
+    """
     out = BytesIO()
     with (
         zipfile.ZipFile(BytesIO(data)) as src,
@@ -488,3 +467,34 @@ class TestFormulaPaths:
 
         with pytest.raises(ContractError, match="Events"):
             formulas_without_values(data, ["Events"])
+
+
+class TestPipelineProcess:
+    """Workbook parsing during processing."""
+
+    def test_pipeline_parses_each_workbook_once(self) -> None:
+        """process() validates and converts from a single parse."""
+        from unittest.mock import Mock
+
+        from py_common.model import Outcome, SourceItem
+        from py_common.pipeline import Pipeline
+
+        source = Mock()
+        source.download.return_value = _book([["name", "count"], ["a", 1]])
+        store = Mock()
+        store.get.return_value = None
+        warehouse = Mock()
+        warehouse.identity = "p.d.events"
+        warehouse.load.return_value = True
+        pipeline = Pipeline(
+            source, store, warehouse, _contract()
+        )  # type: ignore[arg-type]
+        real = openpyxl.load_workbook
+
+        with patch(
+            "py_common.contract.load_workbook", side_effect=real
+        ) as opened:
+            result = pipeline.process(SourceItem("f.xlsx", "f.xlsx", "1", 1))
+
+        assert result.outcome == Outcome.LOADED, result.errors
+        opened.assert_called_once()

@@ -60,18 +60,21 @@ def _pipeline(store: MemoryStore) -> Pipeline:
     return Pipeline(source, store, warehouse, contract)
 
 
-def test_two_records_in_one_clock_tick_both_land() -> None:
-    """Two runs in the same instant keep both audit records."""
-    store = MemoryStore()
-    pipeline = _pipeline(store)
+class TestPipelineAudit:
+    """Audit object identity."""
 
-    with patch("py_common.pipeline.datetime") as clock:
-        clock.now.return_value = TICK
-        outcomes = [r.outcome for r in pipeline.run() + pipeline.run()]
+    def test_two_records_in_one_clock_tick_both_land(self) -> None:
+        """Two runs in the same instant keep both audit records."""
+        store = MemoryStore()
+        pipeline = _pipeline(store)
 
-    assert outcomes == [Outcome.LOADED, Outcome.SKIPPED]
-    records = sorted(k for k in store.objects if k.startswith("audit/rec"))
-    assert len(records) == 2
-    for key in records:
-        assert key.startswith("audit/records/2026-10-16T12-00-00+00-00_")
-        assert key.endswith("_landing/events.xlsx.json")
+        with patch("py_common.pipeline.datetime") as clock:
+            clock.now.return_value = TICK
+            outcomes = [r.outcome for r in pipeline.run() + pipeline.run()]
+
+        assert outcomes == [Outcome.LOADED, Outcome.SKIPPED]
+        records = sorted(k for k in store.objects if k.startswith("audit/rec"))
+        assert len(records) == 2
+        for key in records:
+            assert key.startswith("audit/records/2026-10-16T12-00-00+00-00_")
+            assert key.endswith("_landing/events.xlsx.json")

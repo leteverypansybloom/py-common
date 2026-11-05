@@ -8,6 +8,46 @@ Entries are not rewritten once made. When a decision changes, add a
 new dated entry saying which earlier entry it replaces, and mark the
 earlier entry as superseded.
 
+## 2026-11-04 - SharePoint list exports
+
+### Graph exports need an explicit field mapping
+
+`GraphJsonLinesContract` maps each loaded column to an internal
+SharePoint field name, and every other field in the export must be
+listed as excluded.
+
+Why: a new list column can hold personal data, and internal names
+such as `field_3` don't say what they hold. Stopping on an unknown
+field makes someone decide; loading it would decide for them.
+
+### Graph values are converted to what a workbook export holds
+
+Date columns are converted from UTC to the configured `site_time_zone`,
+and a multi-choice list can be joined into one text value. The original
+export stays in the raw copy unchanged.
+
+Why: SharePoint stores a date-only value as local midnight in UTC, so
+during UK summer time 1 June arrives as 31 May 23:00. Correcting it
+once, on the way in, means nothing downstream has to know the value
+came from Graph.
+
+### Errors say how many, not what
+
+Column, parser and service errors give counts, positions and error
+types. They never repeat a cell, a heading or a remote message.
+
+**Trade-off**: finding the bad value takes a look at the file itself.
+Benefit: when a heading row is lost, the first data row is what would
+be reported as unexpected headings, and logs and audit records
+outlive the file's retention.
+
+### The loaded marker holds the audit record
+
+The marker is written as soon as the warehouse has the file, and holds
+that attempt's audit record. The audit step writes the record from it,
+so a failed audit write can be repaired by the next run. Markers from
+earlier versions hold no record and are read as before.
+
 ## 2026-11-03 - CSV, JSON and JSON Lines files
 
 ### One contract per file, with a file_format

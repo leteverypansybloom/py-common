@@ -145,7 +145,11 @@ class TestRunOrRaise:
             run_or_raise(pipeline)
 
     def test_summary_is_logged(self, caplog: pytest.LogCaptureFixture) -> None:
-        """One INFO line counts each outcome for the pipeline."""
+        """One INFO line counts each outcome for the pipeline.
+
+        Args:
+            caplog: Captured log records.
+        """
         pipeline = _pipeline(Outcome.LOADED, Outcome.QUARANTINED)
 
         with caplog.at_level(logging.INFO, logger="py_common.runner"):
@@ -188,7 +192,11 @@ class TestRunJob:
     def test_failure_names_the_pipeline(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """The error line says which pipeline didn't finish."""
+        """The error line says which pipeline didn't finish.
+
+        Args:
+            caplog: Captured log records.
+        """
         pipeline = _pipeline(identity="p.raw.was")
         pipeline.run.side_effect = RuntimeError("lock held")
 
@@ -298,7 +306,11 @@ class TestHandleUpload:
     def test_unknown_folder_is_ignored(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """No pipeline for the folder: warn and acknowledge."""
+        """No pipeline for the folder: warn and acknowledge.
+
+        Args:
+            caplog: Captured log records.
+        """
         was = _pipeline()
 
         with caplog.at_level(logging.WARNING, logger="py_common.runner"):
@@ -362,7 +374,11 @@ class TestHandleUpload:
     def test_unreadable_event_is_logged_not_raised(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """Retrying a malformed event wouldn't help: log and ack."""
+        """Retrying a malformed event wouldn't help: log and ack.
+
+        Args:
+            caplog: Captured log records.
+        """
         was = _pipeline()
 
         with caplog.at_level(logging.ERROR, logger="py_common.runner"):
@@ -379,7 +395,11 @@ class TestCheckFreshness:
     def test_overdue_source_is_logged_and_returned(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """The alert's text names the source and its last load."""
+        """The alert's text names the source and its last load.
+
+        Args:
+            caplog: Captured log records.
+        """
         last = datetime(2026, 9, 4, 6, 0, tzinfo=UTC)
         client = _client({"source": "was", "last_loaded_at": last})
 
@@ -394,7 +414,11 @@ class TestCheckFreshness:
     def test_never_loaded_source_says_never(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """A source with no load yet is reported as never loaded."""
+        """A source with no load yet is reported as never loaded.
+
+        Args:
+            caplog: Captured log records.
+        """
         client = _client({"source": "badges", "last_loaded_at": None})
 
         with caplog.at_level(logging.ERROR, logger="py_common.runner"):
@@ -407,7 +431,11 @@ class TestCheckFreshness:
     def test_nothing_overdue_logs_no_error(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """No overdue rows: no ERROR line, so no alert."""
+        """No overdue rows: no ERROR line, so no alert.
+
+        Args:
+            caplog: Captured log records.
+        """
         client = _client()
 
         with caplog.at_level(logging.ERROR, logger="py_common.runner"):
@@ -438,7 +466,11 @@ class TestCheckFreshness:
         ],
     )
     def test_view_must_be_project_dataset_view(self, view: str) -> None:
-        """Only project.dataset.view, of word characters and hyphens."""
+        """Only project.dataset.view, of word characters and hyphens.
+
+        Args:
+            view: Fully qualified monitoring view.
+        """
         client = _client()
 
         with pytest.raises(ValueError, match="project.dataset.view"):

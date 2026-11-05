@@ -58,7 +58,13 @@ def store(
     tmp_path: Path,
     gcs_store: tuple[GCSObjectStore, FakeBucket],
 ) -> ObjectStore:
-    """Each ObjectStore implementation in turn."""
+    """Each ObjectStore implementation in turn.
+
+    Args:
+        request: Pytest fixture request.
+        tmp_path: Isolated test folder.
+        gcs_store: Object store on a fake bucket.
+    """
     if request.param == "local":
         return LocalObjectStore(tmp_path)
     return gcs_store[0]
@@ -68,7 +74,11 @@ class TestObjectStoreContract:
     """Behaviour every ObjectStore must share."""
 
     def test_identical_put_is_idempotent(self, store: ObjectStore) -> None:
-        """Putting the same bytes twice succeeds and keeps them."""
+        """Putting the same bytes twice succeeds and keeps them.
+
+        Args:
+            store: Object store fixture.
+        """
         store.put("raw/a", b"data")
         store.put("raw/a", b"data")
 
@@ -77,7 +87,11 @@ class TestObjectStoreContract:
     def test_conflicting_put_raises_object_store_conflict(
         self, store: ObjectStore
     ) -> None:
-        """Different bytes under an existing key are refused."""
+        """Different bytes under an existing key are refused.
+
+        Args:
+            store: Object store fixture.
+        """
         store.put("raw/a", b"data")
 
         with pytest.raises(ObjectStoreConflict, match="raw/a"):
@@ -85,13 +99,21 @@ class TestObjectStoreContract:
         assert store.get("raw/a") == b"data"
 
     def test_missing_get_returns_none(self, store: ObjectStore) -> None:
-        """A key that was never written reads as None."""
+        """A key that was never written reads as None.
+
+        Args:
+            store: Object store fixture.
+        """
         assert store.get("audit/never-written") is None
 
     def test_erroring_get_raises_service_error(
         self, store: ObjectStore
     ) -> None:
-        """A failed read is an error, never "not found"."""
+        """A failed read is an error, never "not found".
+
+        Args:
+            store: Object store fixture.
+        """
         _break(store, "audit/marker")
 
         with pytest.raises(ServiceError):
@@ -107,7 +129,12 @@ class TestGCSObjectStoreFailClosed:
     def test_get_raises_service_error_naming_the_object(
         self, gcs_store: tuple[GCSObjectStore, FakeBucket], error: Exception
     ) -> None:
-        """5xx and 403 on the marker read must not look like "missing"."""
+        """5xx and 403 on the marker read must not look like "missing".
+
+        Args:
+            gcs_store: Object store on a fake bucket.
+            error: Service error injected by the test.
+        """
         store, bucket = gcs_store
         bucket.failures["download"] = error
 
@@ -117,7 +144,11 @@ class TestGCSObjectStoreFailClosed:
     def test_put_wraps_api_errors_in_service_error(
         self, gcs_store: tuple[GCSObjectStore, FakeBucket]
     ) -> None:
-        """A GCS failure on write is a ServiceError."""
+        """A GCS failure on write is a ServiceError.
+
+        Args:
+            gcs_store: Object store on a fake bucket.
+        """
         store, bucket = gcs_store
         bucket.failures["upload"] = Forbidden("no access")
 
@@ -127,7 +158,11 @@ class TestGCSObjectStoreFailClosed:
     def test_put_compares_by_hash_without_downloading(
         self, gcs_store: tuple[GCSObjectStore, FakeBucket]
     ) -> None:
-        """An existing object is compared by md5_hash, not re-read."""
+        """An existing object is compared by md5_hash, not re-read.
+
+        Args:
+            gcs_store: Object store on a fake bucket.
+        """
         store, bucket = gcs_store
         store.put("k", b"data")
         bucket.downloads = 0
