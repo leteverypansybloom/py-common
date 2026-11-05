@@ -14,6 +14,7 @@ with the audit record, in a single BigQuery script transaction
 
 import json
 import logging
+import re
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from io import BytesIO
@@ -27,6 +28,7 @@ from py_common.adapters._bq_jobs import (
     commit_script,
     committed,
     create_staging_table,
+    describe_error,
     drop_staging_table,
     run_query,
     staging_table_id,
@@ -107,6 +109,17 @@ class RawJsonWarehouse:
                 "Each worksheet needs its own raw table, got "
                 f"{dict(tables)!r}"
             )
+        identifiers = [
+            (project_id, r"[A-Za-z0-9_-]+"),
+            (dataset_id, r"[A-Za-z0-9_]+"),
+            (audit_table_id, r"[A-Za-z0-9_]+"),
+            *((table, r"[A-Za-z0-9_]+") for table in tables.values()),
+        ]
+        if any(
+            re.fullmatch(pattern, value) is None
+            for value, pattern in identifiers
+        ):
+            raise ValueError("BigQuery identifiers contain invalid characters")
         self.project_id = project_id
         self.dataset_id = dataset_id
         self.tables = dict(tables)
@@ -180,7 +193,9 @@ class RawJsonWarehouse:
         try:
             return self._load(key, checksum, data, rows, item)
         except GoogleAPICallError as e:
-            raise ServiceError(f"BigQuery failed for {key}: {e}") from e
+            raise ServiceError(
+                f"BigQuery failed for {key}: {describe_error(e)}"
+            ) from None
 
     def _load(
         self, key: str, checksum: str, data: bytes, rows: int, item: SourceItem
@@ -239,13 +254,17 @@ class RawJsonWarehouse:
             bool: As load().
         """
         staged: dict[str, int] = {}
-        for sheet, lines in by_sheet.items():
+        for sheet in self.tables:
+            lines = by_sheet.get(sheet, [])
             table_id = self.tables[sheet]
             self._ensure_raw_table(table_id)
             staging[sheet] = self._full_id(
                 staging_table_id(table_id, checksum)
             )
             create_staging_table(self.client, staging[sheet], STAGING_SCHEMA)
+            if not lines:
+                staged[sheet] = 0
+                continue
             job_config = bigquery.LoadJobConfig(
                 source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
                 schema=STAGING_SCHEMA,

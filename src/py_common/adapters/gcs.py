@@ -465,6 +465,16 @@ class GCSSource:
                 f"Cannot list gs://{self.bucket_name}/{self.prefix}: {e}"
             ) from e
 
+        for blob in blobs:
+            if (
+                not blob.name.lower().endswith(self.extensions)
+                and not blob.name.endswith("/")
+                and blob.name.rsplit("/", 1)[-1] != "schema.json"
+            ):
+                logger.warning(
+                    "Ignoring object with unsupported file extension: %s",
+                    blob.name,
+                )
         items = [
             SourceItem(
                 name=blob.name.rsplit("/", 1)[-1],

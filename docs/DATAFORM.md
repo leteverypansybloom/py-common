@@ -124,3 +124,8 @@ on failed ingestion runs ([`GCP_SETUP.md`](GCP_SETUP.md), section 7).
 
 **Location.** Create the Dataform repository and the datasets in the
 same location as the raw dataset.
+
+**Execution account.** A custom Dataform execution account needs the
+Service Account User and Service Account Token Creator roles granted to
+the Dataform service agent on that account
+([access control](https://docs.cloud.google.com/dataform/docs/access-control)).

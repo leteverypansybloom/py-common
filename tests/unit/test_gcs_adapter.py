@@ -84,7 +84,11 @@ class TestGCSObjectStoreGet:
 
     @pytest.fixture
     def store(self, mock_bucket):
-        """Fixture: GCSObjectStore with mocked bucket."""
+        """Fixture: GCSObjectStore with mocked bucket.
+
+        Args:
+            mock_bucket: Mock storage bucket.
+        """
         with patch("py_common.adapters.gcs.storage.Client"):
             store = GCSObjectStore(
                 project_id="test-project", bucket_name="test-bucket"
@@ -155,7 +159,11 @@ class TestGCSObjectStorePut:
 
     @pytest.fixture
     def store(self, mock_bucket):
-        """Fixture: GCSObjectStore with mocked bucket."""
+        """Fixture: GCSObjectStore with mocked bucket.
+
+        Args:
+            mock_bucket: Mock storage bucket.
+        """
         with patch("py_common.adapters.gcs.storage.Client"):
             store = GCSObjectStore(
                 project_id="test-project", bucket_name="test-bucket"
@@ -275,7 +283,11 @@ class TestGCSObjectStoreLock:
 
     @pytest.fixture
     def store(self, bucket):
-        """Fixture: GCSObjectStore backed by the fake bucket."""
+        """Fixture: GCSObjectStore backed by the fake bucket.
+
+        Args:
+            bucket: In-memory storage bucket.
+        """
         with patch("py_common.adapters.gcs.storage.Client"):
             store = GCSObjectStore(
                 project_id="test-project", bucket_name="test-bucket"
@@ -630,7 +642,11 @@ class TestGCSSourceDownload:
 
     @pytest.fixture
     def source(self, mock_bucket):
-        """Fixture: GCSSource with mocked bucket."""
+        """Fixture: GCSSource with mocked bucket.
+
+        Args:
+            mock_bucket: Mock storage bucket.
+        """
         with patch("py_common.adapters.gcs.storage.Client"):
             source = GCSSource(project_id="p", bucket_name="landing")
             source.bucket = mock_bucket

@@ -61,7 +61,12 @@ def json_value(value: Any) -> Any:
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
     if isinstance(value, dict):
-        return {str(key): json_value(item) for key, item in value.items()}
+        return {
+            str(key): json_value(item)
+            for key, item in sorted(
+                value.items(), key=lambda pair: str(pair[0])
+            )
+        }
     if isinstance(value, list):
         return [json_value(item) for item in value]
     if isinstance(value, Decimal):
@@ -104,8 +109,8 @@ def to_ndjson(
     """Write every sheet's rows as newline-delimited JSON.
 
     One line per row, with the fields in ROW_FIELDS. The payload
-    holds every selected column (null when the cell is empty), in
-    the order SheetRows gives them.
+    holds every selected column (null when the cell is empty), with
+    alphabetically ordered keys, including nested objects.
 
     No load timestamp is written: the same workbook always gives the
     same bytes, so a retry after a failed load writes an identical
@@ -130,8 +135,8 @@ def to_ndjson(
                 "checksum": checksum,
                 "payload": {
                     column: json_value(value)
-                    for column, value in zip(
-                        sheet.columns, values, strict=True
+                    for column, value in sorted(
+                        zip(sheet.columns, values, strict=True)
                     )
                 },
             }

@@ -19,7 +19,7 @@ from py_common.errors import (
     ServiceError,
     VersionMismatch,
 )
-from py_common.model import SourceItem
+from py_common.model import SourceItem, digest
 
 logger = logging.getLogger("py_common.adapters.local")
 
@@ -85,9 +85,14 @@ class LocalSource:
             return
 
         for path in sorted(self.folder.iterdir()):
-            if not (
-                path.is_file() and path.name.lower().endswith(self.extensions)
-            ):
+            if not path.is_file():
+                continue
+            if not path.name.lower().endswith(self.extensions):
+                if path.name != "schema.json":
+                    logger.warning(
+                        "Ignoring file with unsupported extension: %s",
+                        path.name,
+                    )
                 continue
             stat = path.stat()
             yield SourceItem(
@@ -166,7 +171,10 @@ class LocalObjectStore:
             path.resolve().relative_to(self.folder.resolve())
         except ValueError:
             raise ValueError(f"Key escapes object store root: {key}") from None
-        return path
+        resolved = path.resolve()
+        if os.name == "nt" and len(str(resolved)) >= 240:
+            return self.folder.resolve() / ".objects" / digest(key.encode())
+        return resolved
 
     def get(self, key: str) -> bytes | None:
         """Read file by key path.

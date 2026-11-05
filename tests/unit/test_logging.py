@@ -73,85 +73,6 @@ def _capture() -> list[dict[str, Any]]:
     return [json.loads(line) for line in stream.getvalue().splitlines()]
 
 
-def test_every_line_has_severity_message_run_id_and_warehouse() -> None:
-    """Every line has a severity, a message, the run ID and warehouse."""
-    logged = _capture()
-
-    assert logged
-    assert len({line.get("run_id") for line in logged} - {None}) == 1
-    for line in logged:
-        assert line["severity"] in {"DEBUG", "INFO", "WARNING", "ERROR"}
-        assert isinstance(line["message"], str)
-        assert line["run_id"]
-        assert line["warehouse"] == "p.d.raw_events"
-
-
-def test_file_lines_carry_identity_version_and_checksum() -> None:
-    """Lines about the file carry its identity, version and checksum."""
-    logged = _capture()
-
-    about_file = [line for line in logged if "item_identity" in line]
-    assert about_file
-    for line in about_file:
-        assert line["item_identity"] == "landing/e.xlsx"
-        assert line["version"] == "17"
-    assert any(len(line.get("checksum", "")) == 64 for line in about_file)
-
-
-def test_bigquery_job_ids_are_logged_at_info() -> None:
-    """BigQuery job IDs are logged at INFO, against the file."""
-    logged = _capture()
-
-    jobs = [line for line in logged if "bq_job_id" in line]
-    assert jobs
-    assert all(line["severity"] == "INFO" for line in jobs)
-    assert all(line["item_identity"] == "landing/e.xlsx" for line in jobs)
-
-
-def test_one_summary_line_per_file() -> None:
-    """Each file ends with one summary line giving outcome and rows."""
-    logged = _capture()
-
-    summaries = [line for line in logged if "outcome" in line]
-    assert len(summaries) == 1
-    [summary] = summaries
-    assert summary["outcome"] == "loaded"
-    assert summary["rows"] == 1
-    assert summary["item_identity"] == "landing/e.xlsx"
-    assert summary["seconds"] >= 0
-
-
-def test_exceptions_are_included() -> None:
-    """A logged exception's traceback is in the JSON line."""
-    try:
-        raise ValueError("boom")
-    except ValueError:
-        record = logging.getLogger("x").makeRecord(
-            "x", logging.ERROR, "f", 1, "failed", None, sys.exc_info()
-        )
-
-    line = json.loads(JsonFormatter().format(record))
-
-    assert line["severity"] == "ERROR"
-    assert line["message"] == "failed"
-    assert "ValueError: boom" in line["exception"]
-
-
-def test_configure_twice_installs_one_handler() -> None:
-    """Configuring twice still writes each line once."""
-    root = logging.getLogger()
-    before = list(root.handlers), root.level
-    try:
-        configure_json_logging(stream=io.StringIO())
-        configure_json_logging(stream=io.StringIO())
-        ours = [
-            h for h in root.handlers if isinstance(h.formatter, JsonFormatter)
-        ]
-        assert len(ours) == 1
-    finally:
-        root.handlers[:], root.level = before
-
-
 class TestJsonLoggingReplacesHandlers:
     """Each line is written once, as JSON, unless asked otherwise."""
 
@@ -247,12 +168,92 @@ class TestFailureSeverity:
         assert line["outcome"] == outcome.value
 
 
-def test_smoke_script_enables_json_logging() -> None:
-    """The alert test recipe needs JSON log lines."""
-    tree = ast.parse(Path("scripts/demo.py").read_text(encoding="utf-8"))
-    calls = {
-        node.func.id
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-    }
-    assert "configure_json_logging" in calls
+class TestConfigureJsonLogging:
+    """Structured pipeline logging."""
+
+    def test_every_line_has_severity_message_run_id_and_warehouse(
+        self,
+    ) -> None:
+        """Every line has a severity, a message, the run ID and warehouse."""
+        logged = _capture()
+
+        assert logged
+        assert len({line.get("run_id") for line in logged} - {None}) == 1
+        for line in logged:
+            assert line["severity"] in {"DEBUG", "INFO", "WARNING", "ERROR"}
+            assert isinstance(line["message"], str)
+            assert line["run_id"]
+            assert line["warehouse"] == "p.d.raw_events"
+
+    def test_file_lines_carry_identity_version_and_checksum(self) -> None:
+        """Lines about the file carry its identity, version and checksum."""
+        logged = _capture()
+
+        about_file = [line for line in logged if "item_identity" in line]
+        assert about_file
+        for line in about_file:
+            assert line["item_identity"] == "landing/e.xlsx"
+            assert line["version"] == "17"
+        assert any(len(line.get("checksum", "")) == 64 for line in about_file)
+
+    def test_bigquery_job_ids_are_logged_at_info(self) -> None:
+        """BigQuery job IDs are logged at INFO, against the file."""
+        logged = _capture()
+
+        jobs = [line for line in logged if "bq_job_id" in line]
+        assert jobs
+        assert all(line["severity"] == "INFO" for line in jobs)
+        assert all(line["item_identity"] == "landing/e.xlsx" for line in jobs)
+
+    def test_one_summary_line_per_file(self) -> None:
+        """Each file ends with one summary line giving outcome and rows."""
+        logged = _capture()
+
+        summaries = [line for line in logged if "outcome" in line]
+        assert len(summaries) == 1
+        [summary] = summaries
+        assert summary["outcome"] == "loaded"
+        assert summary["rows"] == 1
+        assert summary["item_identity"] == "landing/e.xlsx"
+        assert summary["seconds"] >= 0
+
+    def test_exceptions_are_included(self) -> None:
+        """A logged exception's traceback is in the JSON line."""
+        try:
+            raise ValueError("boom")
+        except ValueError:
+            record = logging.getLogger("x").makeRecord(
+                "x", logging.ERROR, "f", 1, "failed", None, sys.exc_info()
+            )
+
+        line = json.loads(JsonFormatter().format(record))
+
+        assert line["severity"] == "ERROR"
+        assert line["message"] == "failed"
+        assert "ValueError: boom" in line["exception"]
+
+    def test_configure_twice_installs_one_handler(self) -> None:
+        """Configuring twice still writes each line once."""
+        root = logging.getLogger()
+        before = list(root.handlers), root.level
+        try:
+            configure_json_logging(stream=io.StringIO())
+            configure_json_logging(stream=io.StringIO())
+            ours = [
+                h
+                for h in root.handlers
+                if isinstance(h.formatter, JsonFormatter)
+            ]
+            assert len(ours) == 1
+        finally:
+            root.handlers[:], root.level = before
+
+    def test_smoke_script_enables_json_logging(self) -> None:
+        """The alert test recipe needs JSON log lines."""
+        tree = ast.parse(Path("scripts/demo.py").read_text(encoding="utf-8"))
+        calls = {
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        assert "configure_json_logging" in calls

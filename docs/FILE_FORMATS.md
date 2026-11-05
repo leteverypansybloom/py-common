@@ -178,3 +178,35 @@ The payload holds the file's values as described above:
   `JSON_VALUE_ARRAY(payload['Tags'])`.
 
 See [`DATAFORM.md`](DATAFORM.md) for the layers and checks.
+
+## Graph list exports
+
+`GraphJsonLinesContract` reads one list-item envelope per line and maps
+SharePoint internal field names and selected envelope metadata to the
+contract's columns. Configure `field_map`, `metadata_map` and
+`excluded_fields`; no list schema is guessed. An `any` column preserves
+lookup identifiers, arrays and nested values without turning them into
+text. Keep Graph's column definitions as `schema.json` beside each
+export. The original JSON Lines bytes remain the archived source.
+
+`site_time_zone` is the time zone in the SharePoint site's regional
+settings. Graph sends dates in UTC, and SharePoint stores a date-only
+value as local midnight, so a date column is converted back to this
+zone: `2026-05-31T23:00:00Z` loads as `2026-06-01T00:00:00` in
+`Europe/London`. A contract with a date column needs this setting.
+Check it against a real export: compare a summer date in the list with
+the same item in the file.
+
+`multi_value_separators` joins a multi-choice list into one text value,
+for a text column that a workbook export holds as separated text:
+`{"Topics": ";#"}` loads `["A", "B"]` as `A;#B`. A choice that isn't
+text, or that contains the separator, quarantines the file.
+
+## Limits in every format
+
+All source formats reject non-finite numeric values and unpaired Unicode
+surrogates. JSON containers are limited to 128 nested levels to bound
+conversion recursion. JSON integers must fit BigQuery JSON's signed INT64
+through unsigned UINT64 range. Payload object keys are canonicalised;
+source row numbers and source-byte checksums remain provenance, so row or
+byte permutations do not imply identical complete processed files.

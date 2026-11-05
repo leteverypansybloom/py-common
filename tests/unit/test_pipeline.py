@@ -1,10 +1,7 @@
 """Unit tests for Pipeline outcome handling and storage keys.
 
-Uses mocked Source/Warehouse/Contract and either a Mock or a small
-in-memory ObjectStore (the shared MemoryStore, which enforces the real put()
-conflict rule), not the local adapters (LocalObjectStore/LocalSource
-have a separate, already-tracked Windows path issue unrelated to
-what's being tested here).
+Uses mocked Source/Warehouse/Contract and either a Mock or the
+shared MemoryStore, which enforces the object store conflict rule.
 """
 
 import json
@@ -46,7 +43,11 @@ def item() -> SourceItem:
 
 @pytest.fixture
 def pipeline(item):
-    """Pipeline wired to mocks; contract.read() controlled per test."""
+    """Pipeline wired to mocks; contract.read() controlled per test.
+
+    Args:
+        item: Discovered synthetic source item.
+    """
     source = Mock()
     source.download.return_value = b"excel bytes"
     store = Mock()
@@ -67,7 +68,12 @@ class TestPipelineProcessQuarantineOutcomes:
     """
 
     def test_contract_error_is_quarantined(self, pipeline, item):
-        """A missing worksheet/column (ContractError) quarantines."""
+        """A missing worksheet/column (ContractError) quarantines.
+
+        Args:
+            pipeline: Pipeline configured with fake services.
+            item: Discovered synthetic source item.
+        """
         pipeline.contract.read.side_effect = ContractError(
             "Missing worksheet 'Events'"
         )
@@ -79,7 +85,12 @@ class TestPipelineProcessQuarantineOutcomes:
         pipeline.warehouse.load.assert_not_called()
 
     def test_validation_error_is_quarantined(self, pipeline, item):
-        """A bad data row (ValidationError) quarantines, unchanged."""
+        """A bad data row (ValidationError) quarantines, unchanged.
+
+        Args:
+            pipeline: Pipeline configured with fake services.
+            item: Discovered synthetic source item.
+        """
         pipeline.contract.read.side_effect = ValidationError(
             "Row 2: 'attendees' is required"
         )
@@ -95,6 +106,10 @@ class TestPipelineProcessQuarantineOutcomes:
         """ContractError stores raw and quarantine copies for triage.
 
         The same as any other quarantine outcome.
+
+        Args:
+            pipeline: Pipeline configured with fake services.
+            item: Discovered synthetic source item.
         """
         pipeline.contract.read.side_effect = ContractError(
             "Missing column 'attendees'"
@@ -197,7 +212,12 @@ class TestPipelineProcessWarehouseOutcomes:
 
     @pytest.fixture
     def pipeline(self, contract, workbook_bytes) -> Pipeline:
-        """Pipeline wired to mocks, with a real Contract + workbook."""
+        """Pipeline wired to mocks, with a real Contract + workbook.
+
+        Args:
+            contract: Source validation contract.
+            workbook_bytes: Synthetic workbook bytes.
+        """
         source = Mock()
         source.download.return_value = workbook_bytes
         store = Mock()
@@ -561,7 +581,7 @@ class TestPipelineRetryAfterWarehouseFailure:
         lines = _lines(_loaded(contract, _workbook([("a", 1)])))
 
         assert "ingested_at" not in lines[0]
-        assert list(lines[0]["payload"]) == ["name", "count"]
+        assert list(lines[0]["payload"]) == ["count", "name"]
 
     @pytest.mark.parametrize(
         ("error", "first_outcome"),
@@ -709,7 +729,11 @@ class TestPipelineProcessWarnings:
 
     @pytest.fixture
     def warn_pipeline(self, pipeline: Pipeline) -> Pipeline:
-        """Pipeline whose contract passes the file with one warning."""
+        """Pipeline whose contract passes the file with one warning.
+
+        Args:
+            pipeline: Pipeline configured with fake services.
+        """
         pipeline.contract.worksheets = [Worksheet("Events")]
         pipeline.contract.read.side_effect = self._warn
         return pipeline
@@ -1211,7 +1235,11 @@ class TestMarkerBeforeDownload:
     def test_unreachable_but_loaded_file_is_not_failed(
         self, setup: tuple[Pipeline, list[str]]
     ) -> None:
-        """A loaded file that can't be downloaded now isn't an alert."""
+        """A loaded file that can't be downloaded now isn't an alert.
+
+        Args:
+            setup: Fake client and operation fixtures.
+        """
         pipeline, _ = setup
         pipeline.run()
 
@@ -1286,6 +1314,11 @@ def _with_cell_value(data: bytes, old: bytes, new: bytes) -> bytes:
     Excel stores numbers as doubles, so openpyxl can't write an
     integer above 2**53 exactly; the XML is edited instead, as a file
     from another tool could hold it.
+
+    Args:
+        data: Synthetic source bytes.
+        old: Original synthetic value.
+        new: Replacement synthetic value.
     """
     import zipfile
 

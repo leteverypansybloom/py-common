@@ -32,12 +32,21 @@ ITEM = SourceItem("k.xlsx", "landing/k.xlsx", "1", 10)
 
 
 def _load(warehouse: Any, data: bytes) -> None:
-    """Load one row of `data` for ITEM."""
+    """Load one row of `data` for ITEM.
+
+    Args:
+        warehouse: Warehouse configured with a fake client.
+        data: Synthetic source bytes.
+    """
     warehouse.load("k.xlsx", "abc123", data, 1, ITEM)
 
 
 def _raw(client: MagicMock) -> Callable[[], None]:
-    """Build a RawJsonWarehouse on `client`; return a load call."""
+    """Build a RawJsonWarehouse on `client`; return a load call.
+
+    Args:
+        client: Fake service client.
+    """
     with patch("py_common.adapters.bigquery_raw.bigquery.Client") as cls:
         cls.return_value = client
         warehouse = RawJsonWarehouse("p", "d", {"S": "t"})
@@ -78,98 +87,130 @@ def setup() -> tuple[MagicMock, Mock, Callable[[], None]]:
     return client, commit, _raw(client)
 
 
-def test_job_reported_failed_raises_service_error_with_job_id(
-    setup: tuple[MagicMock, Mock, Callable[[], None]],
-) -> None:
-    """A failed script is a ServiceError naming the job."""
-    _, commit, load = setup
-    commit.result.side_effect = BadRequest("duplicate key")
-    commit.state = "DONE"
-    commit.error_result = {"reason": "invalidQuery"}
-
-    with pytest.raises(ServiceError, match="job-42"):
-        load()
-
-
-def test_timeout_then_done_without_error_is_success(
-    setup: tuple[MagicMock, Mock, Callable[[], None]],
-) -> None:
-    """A lost wait on a job that committed is not reported as failed."""
-    _, commit, load = setup
-    commit.result.side_effect = [
-        TimeoutError("wait timed out"),
-        [("LOADED",)],
-    ]
-    commit.state = "DONE"
-    commit.error_result = None
-
-    load()
-
-    commit.reload.assert_called_once()
-
-
-def test_transport_error_then_done_with_error_is_service_error(
-    setup: tuple[MagicMock, Mock, Callable[[], None]],
-) -> None:
-    """A job that re-reads as failed is a ServiceError (retryable)."""
-    _, commit, load = setup
-    commit.result.side_effect = ConnectionError("reset by peer")
-    commit.state = "DONE"
-    commit.error_result = {"reason": "backendError"}
-
-    with pytest.raises(ServiceError, match="job-42"):
-        load()
-
-
-def test_job_still_running_is_indeterminate(
-    setup: tuple[MagicMock, Mock, Callable[[], None]],
-) -> None:
-    """A job not yet DONE may still commit: state is unknown."""
-    _, commit, load = setup
-    commit.result.side_effect = TimeoutError("wait timed out")
-    commit.state = "RUNNING"
-    commit.error_result = None
-
-    with pytest.raises(IndeterminateCommitError, match="RUNNING"):
-        load()
-
-
-def test_reload_failure_is_indeterminate(
-    setup: tuple[MagicMock, Mock, Callable[[], None]],
-) -> None:
-    """If the job can't be re-read, nothing is claimed about it."""
-    _, commit, load = setup
-    commit.result.side_effect = ServiceUnavailable("503")
-    commit.reload.side_effect = ConnectionError("still down")
-
-    with pytest.raises(IndeterminateCommitError, match="job-42") as info:
-        load()
-    assert "rolled back" not in str(info.value)
-
-
-def test_staging_load_failure_is_service_error(
-    setup: tuple[MagicMock, Mock, Callable[[], None]],
-) -> None:
-    """A failed staging load (nothing committed) is ServiceError."""
-    client, _, load = setup
-    client.load_table_from_file.return_value.result.side_effect = BadRequest(
-        "bad json"
-    )
-
-    with pytest.raises(ServiceError, match="load-1"):
-        load()
-
-
 class TestStagingTableCreation:
     """Staging-table errors are ServiceErrors."""
 
     def test_create_failure_is_service_error(
         self, setup: tuple[MagicMock, Mock, Callable[[], None]]
     ) -> None:
-        """A 403 creating staging is reported, nothing is committed."""
+        """A 403 creating staging is reported, nothing is committed.
+
+        Args:
+            setup: Fake client and operation fixtures.
+        """
         client, commit, load = setup
         client.create_table.side_effect = Forbidden("no access")
 
-        with pytest.raises(ServiceError, match="no access"):
+        with pytest.raises(ServiceError, match="Forbidden 403"):
             load()
         commit.result.assert_not_called()
+
+
+class TestRunQuery:
+    """BigQuery job outcome confirmation."""
+
+    def test_job_reported_failed_raises_service_error_with_job_id(
+        self,
+        setup: tuple[MagicMock, Mock, Callable[[], None]],
+    ) -> None:
+        """A failed script is a ServiceError naming the job.
+
+        Args:
+            setup: Fake client and operation fixtures.
+        """
+        _, commit, load = setup
+        commit.result.side_effect = BadRequest("duplicate key")
+        commit.state = "DONE"
+        commit.error_result = {"reason": "invalidQuery"}
+
+        with pytest.raises(ServiceError, match="job-42"):
+            load()
+
+    def test_timeout_then_done_without_error_is_success(
+        self,
+        setup: tuple[MagicMock, Mock, Callable[[], None]],
+    ) -> None:
+        """A lost wait on a job that committed is not reported as failed.
+
+        Args:
+            setup: Fake client and operation fixtures.
+        """
+        _, commit, load = setup
+        commit.result.side_effect = [
+            TimeoutError("wait timed out"),
+            [("LOADED",)],
+        ]
+        commit.state = "DONE"
+        commit.error_result = None
+
+        load()
+
+        commit.reload.assert_called_once()
+
+    def test_transport_error_then_done_with_error_is_service_error(
+        self,
+        setup: tuple[MagicMock, Mock, Callable[[], None]],
+    ) -> None:
+        """A job that re-reads as failed is a ServiceError (retryable).
+
+        Args:
+            setup: Fake client and operation fixtures.
+        """
+        _, commit, load = setup
+        commit.result.side_effect = ConnectionError("reset by peer")
+        commit.state = "DONE"
+        commit.error_result = {"reason": "backendError"}
+
+        with pytest.raises(ServiceError, match="job-42"):
+            load()
+
+    def test_job_still_running_is_indeterminate(
+        self,
+        setup: tuple[MagicMock, Mock, Callable[[], None]],
+    ) -> None:
+        """A job not yet DONE may still commit: state is unknown.
+
+        Args:
+            setup: Fake client and operation fixtures.
+        """
+        _, commit, load = setup
+        commit.result.side_effect = TimeoutError("wait timed out")
+        commit.state = "RUNNING"
+        commit.error_result = None
+
+        with pytest.raises(IndeterminateCommitError, match="RUNNING"):
+            load()
+
+    def test_reload_failure_is_indeterminate(
+        self,
+        setup: tuple[MagicMock, Mock, Callable[[], None]],
+    ) -> None:
+        """If the job can't be re-read, nothing is claimed about it.
+
+        Args:
+            setup: Fake client and operation fixtures.
+        """
+        _, commit, load = setup
+        commit.result.side_effect = ServiceUnavailable("503")
+        commit.reload.side_effect = ConnectionError("still down")
+
+        with pytest.raises(IndeterminateCommitError, match="job-42") as info:
+            load()
+        assert "rolled back" not in str(info.value)
+
+    def test_staging_load_failure_is_service_error(
+        self,
+        setup: tuple[MagicMock, Mock, Callable[[], None]],
+    ) -> None:
+        """A failed staging load (nothing committed) is ServiceError.
+
+        Args:
+            setup: Fake client and operation fixtures.
+        """
+        client, _, load = setup
+        client.load_table_from_file.return_value.result.side_effect = (
+            BadRequest("bad json")
+        )
+
+        with pytest.raises(ServiceError, match="load-1"):
+            load()

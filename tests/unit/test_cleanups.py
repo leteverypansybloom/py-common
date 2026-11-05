@@ -124,7 +124,10 @@ class TestRawTableClustering:
         assert table.time_partitioning.field == "ingested_at"
 
 
-def test_outcome_is_a_str_enum() -> None:
-    """Outcome is a StrEnum, so it formats as its value."""
-    assert issubclass(Outcome, StrEnum)
-    assert f"{Outcome.LOADED}" == "loaded"
+class TestOutcome:
+    """Outcome values."""
+
+    def test_outcome_is_a_str_enum(self) -> None:
+        """Outcome is a StrEnum, so it formats as its value."""
+        assert issubclass(Outcome, StrEnum)
+        assert f"{Outcome.LOADED}" == "loaded"

@@ -97,13 +97,14 @@ class Column:
 
     Attributes:
         name: Column header (must match worksheet exactly).
-        data_type: Expected type: 'string', 'integer', 'float', 'date'.
+        data_type: Expected type: 'string', 'integer', 'float', 'date',
+            or 'any' for a mixed or nested value.
         nullable: Whether column may contain null/empty values.
         unique: Whether all values must be distinct (no duplicates).
     """
 
     name: str
-    data_type: Literal["string", "integer", "float", "date"]
+    data_type: Literal["string", "integer", "float", "date", "any"]
     nullable: bool = False
     unique: bool = False
 
@@ -550,7 +551,17 @@ class Contract:
                 or there are no rows and ws_def.allow_empty is False.
             ValidationError: (checking) Data violates ws_def's rules.
         """
+        selected = _select(names, rows, ws_def)
         if check:
+            for row_number, values in selected.rows:
+                for value in values:
+                    try:
+                        _check_value(value)
+                    except ValueError as error:
+                        raise ValidationError(
+                            f"{source_name} [{ws_def.name}]: "
+                            f"Row {row_number}: {error}"
+                        ) from None
             self._validate_worksheet(
                 names, rows, ws_def, source_name, warnings
             )
@@ -567,7 +578,7 @@ class Contract:
                     "valid for this source, set allow_empty=True on its "
                     "Worksheet."
                 )
-        return _select(names, rows, ws_def)
+        return selected
 
     @staticmethod
     def _check_formulas(
@@ -655,10 +666,10 @@ class Contract:
                 # object; nothing here needs merged-cell or style info.
                 read_only=True,
             )
-        except Exception as e:
+        except _PARSE_ERRORS as e:
             raise ContractError(
-                f"{source_name}: Cannot parse Excel: {e}"
-            ) from e
+                f"{source_name}: Cannot parse Excel " f"({type(e).__name__})"
+            ) from None
 
         # Check every configured worksheet exists before reading any
         # of them, so one missing sheet reports cleanly instead of a
@@ -748,7 +759,8 @@ class Contract:
             unexpected = set(headers) - expected - set(ws_def.excluded)
             if unexpected:
                 errors.append(
-                    f"Unexpected columns: {', '.join(sorted(unexpected))}"
+                    f"Unexpected columns: {len(unexpected)} unrecognised "
+                    "heading(s); check the heading row"
                 )
 
         if errors:
@@ -1065,14 +1077,50 @@ def _parse_json(text: str) -> Any:
             deep to parse.
     """
     try:
-        return json.loads(
+        value = json.loads(
             text,
             object_pairs_hook=_unique_keys,
             parse_constant=_no_constant,
             parse_float=_finite_float,
         )
+        _check_value(value)
+        return value
     except RecursionError:
         raise ValueError("nested too deeply") from None
+
+
+def _check_value(value: Any) -> None:
+    """Refuse values that cannot be preserved in a raw JSON payload.
+
+    The ingestion limit is 128 nested containers, below Python's
+    conversion recursion limit. Integers use BigQuery JSON's signed
+    INT64 through unsigned UINT64 range.
+
+    Args:
+        value: A parsed cell or JSON value.
+
+    Raises:
+        ValueError: A value is non-finite, outside the JSON integer
+            range, contains a surrogate, or is nested too deeply.
+    """
+    pending = [(value, 0)]
+    while pending:
+        current, depth = pending.pop()
+        if depth > 128:
+            raise ValueError("nested too deeply (maximum 128 levels)")
+        if isinstance(current, str):
+            if any(0xD800 <= ord(char) <= 0xDFFF for char in current):
+                raise ValueError("text contains an unpaired surrogate")
+        elif isinstance(current, float) and not math.isfinite(current):
+            raise ValueError("a number is not finite")
+        elif isinstance(current, int) and not isinstance(current, bool):
+            if not _INT64_MIN <= current <= 2**64 - 1:
+                raise ValueError("a number is outside the JSON integer range")
+        elif isinstance(current, dict):
+            pending.extend((key, depth + 1) for key in current)
+            pending.extend((item, depth + 1) for item in current.values())
+        elif isinstance(current, list):
+            pending.extend((item, depth + 1) for item in current)
 
 
 def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -1092,7 +1140,7 @@ def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     record: dict[str, Any] = {}
     for key, value in pairs:
         if key in record:
-            raise ValueError(f"an object repeats the key {key!r}")
+            raise ValueError("an object repeats a key")
         record[key] = value
     return record
 
@@ -1203,6 +1251,8 @@ def _type_problem(value: Any, data_type: str, file_format: str) -> str | None:
     Returns:
         The problem, e.g. "is str, expected integer", or None.
     """
+    if data_type == "any":
+        return None
     if file_format == "csv":
         if data_type == "string":
             return None
@@ -1214,10 +1264,13 @@ def _type_problem(value: Any, data_type: str, file_format: str) -> str | None:
         }[data_type]
         if not fits:
             return f"doesn't read as {_TEXT_LABELS[data_type]}"
-        if data_type == "integer" and not (
-            _INT64_MIN <= int(text) <= _INT64_MAX
-        ):
-            return _OUT_OF_RANGE
+        if data_type == "integer":
+            digits = text.lstrip("+-").lstrip("0") or "0"
+            if len(digits) > 19:
+                return _OUT_OF_RANGE
+            sign = "-" if text.startswith("-") else ""
+            if not _INT64_MIN <= int(sign + digits) <= _INT64_MAX:
+                return _OUT_OF_RANGE
         return None
     is_json = file_format in ("json", "jsonl")
     if is_json and data_type == "date":

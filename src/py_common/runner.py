@@ -23,8 +23,8 @@ has its own alert.
 An upload event runs Pipeline.run(), not Pipeline.process(). run()
 takes the warehouse lock and writes the audit record and the "already
 loaded" marker, so an event delivered twice loads the file once.
-process() does neither, and calling it alone would load the file
-again on every delivery.
+process() writes the loaded marker, but takes no lock and writes no
+attempt audit record. Use run() for jobs and events.
 
 No cloud SDK is imported here (see DECISIONS_en.md, "No cloud SDK
 imports in core pipeline"): the event arrives as a plain mapping, and
