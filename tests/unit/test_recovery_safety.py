@@ -1,5 +1,6 @@
 """Failure injection with repository stores and warehouse fakes."""
 
+import os
 from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from unittest.mock import Mock, patch
@@ -17,6 +18,8 @@ from py_common.contract import Column, Contract, Worksheet
 from py_common.errors import ServiceError
 from py_common.model import Outcome, SourceItem
 from py_common.pipeline import Pipeline
+
+WINDOWS_ONLY = pytest.mark.skipif(os.name != "nt", reason="Windows path")
 
 
 def setup():
@@ -279,7 +282,13 @@ class TestSecurityBoundaries:
         client.assert_not_called()
 
     @pytest.mark.parametrize(
-        "key", ["../outside", "../../outside", "C:/outside", "..\\outside"]
+        "key",
+        [
+            "../outside",
+            "../../outside",
+            pytest.param("C:/outside", marks=WINDOWS_ONLY),
+            pytest.param("..\\outside", marks=WINDOWS_ONLY),
+        ],
     )
     def test_object_store_traversal_is_refused(self, tmp_path, key):
         """An escaping object key cannot read or write outside the store.
