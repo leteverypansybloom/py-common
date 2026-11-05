@@ -260,7 +260,6 @@ See [`CONTRIBUTING.md`, Checks](CONTRIBUTING.md#checks).
 | `RawJsonWarehouse` | Warehouse | Built, unit-tested against mocks; one raw JSON table per sheet, not yet run live |
 | `SharePointSource` | Source | Built, unit-tested against mocked Graph; not yet run live (auth pending IT) |
 | `GraphJsonLinesContract` | Contract | Built, unit-tested on synthetic exports; not yet run on a real list export |
-| Secret Manager | SecretStore | Not started |
 
 Also built: contract validation for workbooks, CSV, JSON and JSON
 Lines files, the raw JSON conversion (`raw.py`),
@@ -312,12 +311,8 @@ library or the test suite:
   real cloud resources.
 - `scripts/check_gcp_auth.py`: checks your local GCP credentials can
   reach BigQuery and Cloud Storage.
-- `scripts/gcp_auth.py`: a Python port of the R `gcp_auth.R` helper.
-  Not part of the library: the adapters authenticate through Google's
-  client libraries (Application Default Credentials). Kept for code
-  ported from R; likely to be removed.
 
-The first two read their project settings from environment variables; see the
+Both read their project settings from environment variables; see the
 header of each file.
 
 ## Standards

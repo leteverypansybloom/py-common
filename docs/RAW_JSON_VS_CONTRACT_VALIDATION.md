@@ -34,7 +34,7 @@ Why this, and not typed tables loaded by py-common:
 - **One route to build, test, document and run.** Typing and merging
   rows in py-common as well as in Dataform would mean the same rules
   in two places, in two languages.
-- **It is the team's documented pattern** (`upcoming_work.md`).
+- **It is the team's documented pattern.**
 - **py-common still adds what a plain loader lacks:** Excel types
   kept (dates stay dates), checksums and every file version kept, an
   audit record per attempt, data minimisation (excluded columns), and

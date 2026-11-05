@@ -118,9 +118,7 @@ exact; where nothing exists, that's stated plainly rather than implied.
   `bigquery.Client()` (`adapters/gcs.py`, `adapters/bigquery_raw.py`),
   which find credentials through `google.auth.default()` (the
   `GOOGLE_APPLICATION_CREDENTIALS` variable, gcloud's ADC file, or
-  the Cloud Run metadata server). The older `gcp_auth.py` helper, a
-  port of the R `gcp_auth.R`, is not used by the library and now
-  lives in `scripts/`.
+  the Cloud Run metadata server).
 
 ### 2.2 Capture - getting the bytes in, once, safely
 
@@ -350,9 +348,8 @@ exact; where nothing exists, that's stated plainly rather than implied.
   it over. It isn't renewed or fenced, so it reduces, rather than
   rules out, overlapping writers. `LocalObjectStore.lock()` (`adapters/local.py`) is still
   a no-op, appropriately, for local testing.
-- **Secrets:** the `SecretStore` protocol exists (`ports.py`)
-  but **no adapter implements it** - there is no Secret Manager class
-  anywhere in `src/py_common/adapters/`. Application Default Credentials handle
+- **Secrets:** nothing fetches application secrets yet - there is no
+  Secret Manager class anywhere in `src/py_common/adapters/`. Application Default Credentials handle
   *GCP authentication* (which credential to run as) but that is a different
   problem from *fetching an application secret* (e.g. a SharePoint
   client secret) - the two should not be confused when
@@ -413,8 +410,8 @@ solution repo that depends on it?":
 ## 4. What py-common is today
 
 In one paragraph, for anyone who hasn't read Section 2: `py-common`
-defines four small interfaces (`Source`, `ObjectStore`, `Warehouse`,
-`SecretStore` - all in `ports.py`) so that the core pipeline
+defines three small interfaces (`Source`, `ObjectStore`, `Warehouse` -
+all in `ports.py`) so that the core pipeline
 (`pipeline.py`) never has to import a cloud SDK directly. A `Pipeline`
 discovers files from a `Source`, downloads and hashes each one, validates
 it against a `Contract`, lands the raw bytes, converts valid files to
@@ -435,8 +432,9 @@ mocked). `test_hww_fixtures.py` runs the pipeline end to end over
 the HWW-style fixtures with the local adapters. The integration tests
 (`test_end_to_end_gcs_bq.py`, `test_bigquery_live.py`,
 `test_bq_dry_run.py`, `test_live_services.py`) need real GCP credentials and skip
-themselves without them - so CI collects them but never actually
-exercises them.
+themselves without them. `.github/workflows/bigquery-live.yml` runs
+`test_bigquery_live.py` against real BigQuery every night once its
+repository variables are set (`docs/CI_SETUP.md`).
 
 ---
 
@@ -481,7 +479,7 @@ behaviour doesn't match the promise), **Missing** (nothing exists).
 | Lineage and audit trail | **Have** (file-level) | `model.py`, written by `pipeline.py`. Each record names the converted copy loaded, the contract (`contract_fingerprint`) and the py-common version used. No run-level record. |
 | Logging, metrics, alerts | Partial | Plain-text logging exists, with contract warnings at WARNING. `runner.run_job()`/`handle_upload()` turn FAILED files into a failed job or a retried event, and `runner.check_freshness()` logs overdue sources. Alerts are documented as manual steps (`GCP_SETUP.md`), not built as code. |
 | Run-status API/dashboard | Missing | Nothing queries the audit trail for a status view. |
-| Secrets and identity management | Partial | GCP identity comes from Application Default Credentials (the job's service account on Cloud Run); the `SecretStore` protocol (`ports.py`) has **no implementation** for application secrets (e.g. a SharePoint client secret). |
+| Secrets and identity management | Partial | GCP identity comes from Application Default Credentials (the job's service account on Cloud Run); nothing fetches application secrets (e.g. a SharePoint client secret) yet. |
 | Data classification / policy controls | Partial | Contracts can exclude columns (`Worksheet.excluded`) so personal data isn't loaded; no classification tags. The audit trail's "store checksum, not content" design (`pipeline.py`) is a reasonable privacy default to build on. |
 | Environment management | Partial | `config.py` supports named sections (e.g. `dev`/`prod`) with `${VAR}` interpolation; no enforced separation beyond that convention. |
 | Infrastructure as code | Missing | No Terraform; no deployment directory is maintained here. |
@@ -505,7 +503,7 @@ not a redesign.
 | Scheduling | Cloud Scheduler triggering the Cloud Run job directly, or via a Workflows definition if more than one step needs coordinating | Not yet built; belongs in the *solution* repo's `deploy/`, using Terraform, not in `py-common`. |
 | Operational state (locks, checkpoints) | GCS lock object for the run lock; Firestore or another approved store for checkpoints if needed | Built: `GCSObjectStore.lock()` (`adapters/gcs.py`) refuses overlapping runs. The lock is a lease: a run killed mid-flight blocks others until it expires, then the next run takes it over, provided `lease_seconds` exceeds the job timeout. Clearing a lock early is in `docs/RUNBOOK.md`. |
 | Warehouse | BigQuery raw JSON tables, one per worksheet | Built: `RawJsonWarehouse.load()` (`adapters/bigquery_raw.py`); the solution's `main.py` maps each worksheet to its raw table. |
-| Secrets | Secret Manager, referenced (never inlined) from configuration | Needs a new adapter implementing `SecretStore` (`ports.py`); none exists today. |
+| Secrets | Secret Manager, referenced (never inlined) from configuration | Needs a new Secret Manager adapter; none exists today. |
 | Quality | Reusable checks: schema, required fields, uniqueness, valid codes, record counts, freshness | `Contract.validate()` covers the first four; freshness is a per-source view read by `runner.check_freshness()` (`GCP_SETUP.md`); row-count checks are not built (see [Section 5](#5-feature-by-feature-status)). |
 | Monitoring | Cloud Logging (already reachable via Python `logging`) plus named Cloud Monitoring alerts on failure and on staleness | Not built; needs both a structured-logging change and alert policies defined as IaC. |
 | Deployment | Terraform modules, run through the existing CI/CD pattern | deployment configuration belongs in the consuming project. |
@@ -597,8 +595,7 @@ transaction with its audit record (see `DECISIONS_en.md`).
    `min_rows` field, default 1) so an empty export is caught rather than
    silently marked `LOADED` with zero rows.
 3. ~~Implement a real `ObjectStore.lock()` for GCP~~: done: `GCSObjectStore.lock()` (`adapters/gcs.py`) uses atomic create-if-absent, as a lease. Clearing a stale lock is in `docs/RUNBOOK.md`, with reloading and undoing uploads.
-4. **Add a `SecretStore` adapter for Secret Manager**, implementing the
-   existing protocol (`ports.py`), before any credential (a
+4. **Add a Secret Manager adapter** before any credential (a
    SharePoint client secret, in particular) is wired into configuration.
 5. **Write the Terraform for the pieces already designed**: the landing
    bucket (with a retention period, not a locked one, since this is

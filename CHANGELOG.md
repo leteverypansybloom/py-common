@@ -6,6 +6,23 @@ All notable changes to py-common. The supported API is what
 [semantic versioning](https://semver.org/): while the major version
 is 0, a minor release (0.x.0) may break that API, and says how below.
 
+## Unreleased
+
+### Removed
+
+- `ports.SecretStore`, a protocol with no implementation or caller. It
+  was outside the supported API.
+- `scripts/gcp_auth.py` and its tests. The adapters authenticate
+  through Application Default Credentials;
+  `scripts/check_gcp_auth.py` still checks local credentials.
+- `docs/upcoming_work.md` and its images, an archived design.
+  `docs/GCP_SETUP.md` is the maintained set-up.
+
+### Fixed
+
+- `docs/INGESTION_FRAMEWORK_GUIDE.md` now says the nightly workflow
+  runs the live BigQuery tests.
+
 ## 0.5.0 - 2026-11-04
 
 SharePoint list exports from Microsoft Graph load through an explicit

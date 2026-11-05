@@ -159,24 +159,3 @@ class Warehouse(Protocol):
             ValidationError: The data itself can't be loaded.
         """
         ...
-
-
-class SecretStore(Protocol):
-    """Retrieve secrets from a secure store.
-
-    Examples: Google Secret Manager, Azure Key Vault, HashiCorp Vault.
-    """
-
-    def get_secret(self, secret_name: str) -> str:
-        """Fetch secret value by name.
-
-        Args:
-            secret_name: Secret identifier (version handled by store).
-
-        Returns:
-            Secret string (e.g., OAuth token or API key).
-
-        Raises:
-            KeyError: Secret not found.
-        """
-        ...

@@ -431,8 +431,7 @@ object named in the error.
 The daily job is enough to load monthly files. Add this when an ad
 hoc upload should load within minutes rather than the next morning,
 or to follow the team's bucket → Pub/Sub → Eventarc → Cloud Run
-pattern (from the team's earlier guide, now archived as
-[`upcoming_work.md`](upcoming_work.md)).
+pattern.
 
 A new object in the landing bucket publishes a notification to
 Pub/Sub. Eventarc delivers it to the Cloud Run service, where
@@ -528,8 +527,8 @@ What happens when:
   folder has the same name: `handle_upload()` checks the event's
   bucket against the one the folder's `GCSSource` reads.
 
-The team's earlier guide (`upcoming_work.md`, archived) puts Pub/Sub
-and Cloud Run in an app project and the bucket in a data project. The same commands work across the two:
+A team may put Pub/Sub and Cloud Run in an app project and the bucket
+in a data project. The same commands work across the two:
 create the topic, service and trigger in the app project, and grant
 the service account its roles on the data project's buckets and
 dataset.
@@ -701,5 +700,3 @@ copies' paths can pass 260 characters.
   against GCP from your own machine.
 - [`SMOKE_TEST.md`](SMOKE_TEST.md): the end-to-end smoke test against
   real GCS and BigQuery.
-- [`upcoming_work.md`](upcoming_work.md): the team's Cloud Run guide
-  for data landing in a bucket.
