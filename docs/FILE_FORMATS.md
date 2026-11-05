@@ -189,6 +189,15 @@ lookup identifiers, arrays and nested values without turning them into
 text. Keep Graph's column definitions as `schema.json` beside each
 export. The original JSON Lines bytes remain the archived source.
 
+A list item's `fields` hold more than the list's columns: SharePoint
+adds system fields such as `LinkTitle`, `AuthorLookupId` and
+`_UIVersionString`, and a multi-choice column gains a
+`<name>@odata.type` entry. Each counts as a field, so `excluded_fields`
+lists them. `dummy_was_database.jsonl` in this folder is a complete
+example: `dummy_was_database.xlsx` written as Graph would send it, with
+`tests/unit/test_graph_export.py` holding its mapping. Its internal
+names follow SharePoint's naming rule, and are not from a real list.
+
 `site_time_zone` is the time zone in the SharePoint site's regional
 settings. Graph sends dates in UTC, and SharePoint stores a date-only
 value as local midnight, so a date column is converted back to this

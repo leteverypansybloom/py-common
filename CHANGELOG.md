@@ -8,6 +8,12 @@ is 0, a minor release (0.x.0) may break that API, and says how below.
 
 ## Unreleased
 
+### Added
+
+- `docs/dummy_was_database.jsonl`: the dummy WAS workbook as a Graph list
+  export, and `tests/unit/test_graph_export.py`, which reads it through
+  `GraphJsonLinesContract` and compares every column with the workbook.
+
 ### Removed
 
 - `ports.SecretStore`, a protocol with no implementation or caller. It
