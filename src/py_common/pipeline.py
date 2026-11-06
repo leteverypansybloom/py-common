@@ -256,6 +256,27 @@ class Pipeline:
                     item, Outcome.SKIPPED, checksum, 0, errors, start_time
                 )
 
+            # Before the download, which reads the whole file into
+            # memory. There are no bytes to keep in quarantine/.
+            if isinstance(self.contract, Contract):
+                try:
+                    self.contract.check_file_size(item.size_bytes, item.name)
+                except ValidationError as e:
+                    logger.warning(
+                        "Validation failed for %s: %s",
+                        item.name,
+                        e,
+                        extra=_fields(),
+                    )
+                    return self._make_result(
+                        item,
+                        Outcome.QUARANTINED,
+                        checksum,
+                        0,
+                        [str(e)],
+                        start_time,
+                    )
+
             data = self._download(item)
             if data is None:
                 return self._make_result(
@@ -334,7 +355,7 @@ class Pipeline:
                 marker_key = self._loaded_marker_key(item)
                 if not self.store.get(marker_key):
                     self.store.put(marker_key, receipt)
-            if outcome == Outcome.SKIPPED:
+            if outcome in (Outcome.SKIPPED, Outcome.QUARANTINED):
                 rows_processed = 0
 
         except Exception as e:
