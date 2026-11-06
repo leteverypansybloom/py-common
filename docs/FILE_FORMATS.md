@@ -86,7 +86,11 @@ pipeline = Pipeline(
   byte's position: export the file again as UTF-8.
 - Comma-separated, with double quotes around a field that holds a
   comma, a quote or a line break. Anything else, such as text after a
-  closing quote, is quarantined.
+  closing quote, is quarantined. So is a row with more fields than the
+  heading row, which usually means an unquoted comma has moved every
+  value after it into the next column.
+- A field holding an Excel error, such as `#REF!`, is quarantined or
+  warned about, as in a worksheet.
 - Headings are named as in a worksheet: used exactly as written, a
   blank heading over data becomes `col_B`, a repeat gets `_2`.
   `header_row` skips lines above the headings.

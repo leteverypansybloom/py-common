@@ -185,6 +185,7 @@ class RawJsonWarehouse:
         Raises:
             ValueError: A line is not valid JSON or names a sheet
                 with no table, or the staged row count is wrong.
+            ValidationError: BigQuery refused the file's rows.
             ServiceError: BigQuery reported a failure; nothing was
                 committed, so a retry is safe.
             IndeterminateCommitError: The transaction's outcome could

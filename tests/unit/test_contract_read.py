@@ -315,10 +315,10 @@ class TestWorkbookLimits:
         with pytest.raises(ValueError, match="must be positive"):
             _limited_contract(**limits)
 
-    def test_pipeline_quarantines_and_keeps_the_original(
+    def test_pipeline_quarantines_without_downloading(
         self, tmp_path: Path
     ) -> None:
-        """An oversized upload is quarantined with its original kept.
+        """An oversized upload is quarantined unread, left at the source.
 
         Args:
             tmp_path: Folder for the landing folder.
@@ -336,10 +336,7 @@ class TestWorkbookLimits:
         ).run()
 
         assert result.outcome == Outcome.QUARANTINED
-        assert any(
-            k.startswith("quarantine/") and k.endswith("/big.xlsx")
-            for k in store.objects
-        )
+        assert not any(k.startswith("quarantine/") for k in store.objects)
 
 
 class TestNoCellTextInErrors:

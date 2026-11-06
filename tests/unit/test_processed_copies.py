@@ -247,6 +247,8 @@ class TestContractFingerprint:
         [
             {"file_name": "events.xlsx"},
             {"max_file_bytes": 1024},
+            {"max_columns": 10},
+            {"max_cells": 1000},
         ],
     )
     def test_any_change_changes_it(self, change: dict[str, Any]) -> None:

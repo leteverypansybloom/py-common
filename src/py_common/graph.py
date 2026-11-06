@@ -33,7 +33,12 @@ def _site_time(value: Any, zone: tzinfo) -> Any:
         return value
     if moment.tzinfo is None:
         return value
-    return moment.astimezone(zone).replace(tzinfo=None).isoformat()
+    try:
+        return moment.astimezone(zone).replace(tzinfo=None).isoformat()
+    except OverflowError:
+        # A placeholder such as 0001-01-01: left for the type check,
+        # which refuses a date outside the accepted years.
+        return value
 
 
 def _joined(value: Any, separator: str) -> Any:
@@ -164,7 +169,11 @@ class GraphJsonLinesContract(Contract):
         self._check_file_name(source_name)
         self._check_size(excel_bytes, source_name)
         try:
-            names, rows = read_jsonl(excel_bytes)
+            names, rows = read_jsonl(
+                excel_bytes,
+                max_columns=self.max_columns,
+                max_cells=self.max_cells,
+            )
         except ValueError:
             raise ValidationError(
                 f"{source_name}: invalid Graph JSON Lines export"

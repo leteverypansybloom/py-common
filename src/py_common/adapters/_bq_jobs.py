@@ -1,6 +1,6 @@
 """Run BigQuery jobs and map their failures to py_common errors.
 
-Used by RawJsonWarehouse. The pipeline acts on two error types from
+Used by RawJsonWarehouse. The pipeline acts on three error types from
 a warehouse, and these helpers are where they come from:
 
 - ServiceError: BigQuery said the job failed, so a script
@@ -8,6 +8,8 @@ a warehouse, and these helpers are where they come from:
 - IndeterminateCommitError: waiting for the job failed (timeout,
   dropped connection) and its final state could not be confirmed.
   The transaction may or may not have committed.
+- ValidationError: a staging load refused the file's rows. Retrying
+  can't change the answer, so the file is quarantined.
 
 Waiting can fail after the server has committed, so an exception
 from job.result() alone proves nothing. The job is re-read by ID to
@@ -25,10 +27,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from google.api_core.exceptions import GoogleAPICallError
+from google.api_core.exceptions import BadRequest, GoogleAPICallError
 from google.cloud import bigquery
 
-from py_common.errors import IndeterminateCommitError, ServiceError
+from py_common.errors import (
+    IndeterminateCommitError,
+    ServiceError,
+    ValidationError,
+)
 from py_common.model import SourceItem
 
 logger = logging.getLogger("py_common.adapters.bigquery")
@@ -149,7 +155,9 @@ def wait_for_load(
         timeout: Seconds to wait.
 
     Raises:
-        ServiceError: The load failed, or didn't finish in time.
+        ValidationError: BigQuery refused the rows themselves.
+        ServiceError: The load failed for another reason, or didn't
+            finish in time.
     """
     logger.info(
         "Started BigQuery load job %s for %s",
@@ -160,6 +168,12 @@ def wait_for_load(
     try:
         job.result(timeout=timeout)
     except GoogleAPICallError as e:
+        if _refused_rows(e):
+            raise ValidationError(
+                f"BigQuery load job {job.job_id} refused the rows of "
+                f"{what}: {describe_error(e)}; details: "
+                f"bq show -j {job.job_id}"
+            ) from None
         raise ServiceError(
             f"BigQuery load job {job.job_id} failed for {what}: "
             f"{describe_error(e)}; details: bq show -j {job.job_id}"
@@ -179,6 +193,25 @@ def wait_for_load(
             f"({describe_error(e)}); cancelled. Details: "
             f"bq show -j {job.job_id}"
         ) from _cause(e)
+
+
+def _refused_rows(error: GoogleAPICallError) -> bool:
+    """Whether a staging load failed because of the rows it was given.
+
+    The staging schema and the rows' shape are this library's own, so a
+    400 with the reason "invalid" comes from the data. Other reasons,
+    such as quota or access, can pass with time.
+
+    Args:
+        error: What waiting for the load raised.
+
+    Returns:
+        True if retrying can't change the answer.
+    """
+    return isinstance(error, BadRequest) and any(
+        isinstance(detail, dict) and detail.get("reason") == "invalid"
+        for detail in (error.errors or [])
+    )
 
 
 def _confirm_after_wait_failed(job: Any, what: str, error: Exception) -> None:

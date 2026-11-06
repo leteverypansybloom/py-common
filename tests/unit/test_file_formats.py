@@ -235,14 +235,15 @@ class TestContractSettings:
         _contract("csv", header_row=3)
 
     def test_workbook_fingerprint_is_unchanged(self) -> None:
-        """An xlsx contract's fingerprint leaves file_format out.
+        """An xlsx contract's fingerprint leaves settings at default out.
 
-        So audit records written before file_format existed still
-        match the same contract.
+        So adding a setting doesn't change the fingerprint in the audit
+        records of contracts that don't use it.
         """
         contract = _contract("xlsx", Column("id", "integer"))
         settings = asdict(contract)
-        del settings["file_format"]
+        for name in ("file_format", "max_columns", "max_cells"):
+            del settings[name]
         before = sha256(
             json.dumps(
                 settings, sort_keys=True, separators=(",", ":")

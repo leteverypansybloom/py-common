@@ -102,7 +102,12 @@ described in
 - Names every column: blank headings become `col_B`, repeated ones
   `Other_2`
 - Refuses oversized files before parsing them (`max_file_bytes`,
-  `max_uncompressed_bytes`, which also stops "zip bombs")
+  checked from the listed size before a download, and
+  `max_uncompressed_bytes`, which also stops "zip bombs"), and tables
+  too large to hold as they are read (`max_columns`, `max_cells`)
+- Refuses Excel error values such as `#REF!` in a loaded column, rows
+  that a workbook stores out of order, and dates outside the years
+  1900 to 2100
 - Can require the agreed file name (`file_name`): an upload under any
   other name is quarantined, so it can't become a second "latest"
   upload of the same data

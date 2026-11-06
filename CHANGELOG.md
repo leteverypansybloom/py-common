@@ -24,10 +24,33 @@ is 0, a minor release (0.x.0) may break that API, and says how below.
 - `docs/upcoming_work.md` and its images, an archived design.
   `docs/GCP_SETUP.md` is the maintained set-up.
 
+### Changed
+
+- A file over `max_file_bytes` is quarantined from its listed size,
+  without being downloaded, so no copy of it reaches `raw/` or
+  `quarantine/`. It stays in the landing folder.
+- A "date" column accepts the years 1900 to 2100, in every file format.
+
 ### Fixed
 
 - `docs/INGESTION_FRAMEWORK_GUIDE.md` now says the nightly workflow
   runs the live BigQuery tests.
+- An Excel error value (`#REF!`, `#N/A`, ...) in a loaded column of a
+  workbook or CSV file follows `on_mismatch` instead of loading as text.
+- A workbook with rows out of order or repeated is quarantined. The
+  reader dropped those rows without a word.
+- A CSV row with more fields than the heading row is quarantined, so an
+  unquoted comma can't move an excluded column's value into a loaded one.
+- `Contract.max_columns` and `Contract.max_cells` limit the table a file
+  unpacks to, as it is read. A small file could otherwise take gigabytes
+  of memory, with one far-right cell per row or a new key per JSON line.
+- A workbook that can't be read because of its zip or package structure,
+  or a contract sheet that is a chart sheet, is quarantined instead of
+  failing on every run.
+- `GraphJsonLinesContract` quarantines a date too extreme to convert,
+  such as `0001-01-01T00:00:00Z`, instead of failing on every run.
+- `RawJsonWarehouse` quarantines a file whose rows BigQuery refuses (a
+  400 with the reason `invalid`) instead of retrying it on every run.
 
 ## 0.5.0 - 2026-11-04
 
