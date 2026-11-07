@@ -497,16 +497,39 @@ class TestJsonContract:
         assert sheets["items"].rows == []
 
     def test_nullable_key_no_record_uses_reads_as_none(self) -> None:
-        """A nullable key absent from every record loads as None."""
+        """A nullable key no record holds loads as None, with a warning."""
         contract = _contract(
             "jsonl",
             Column("id", "integer"),
             Column("note", "string", nullable=True),
         )
 
-        sheets = contract.read(_jsonl({"id": 1}, {"id": 2}), "items.jsonl")
+        warnings: list[str] = []
+
+        sheets = contract.read(
+            _jsonl({"id": 1}, {"id": 2}), "items.jsonl", warnings
+        )
 
         assert sheets["items"].rows == [(1, (1, None)), (2, (2, None))]
+        assert warnings == [
+            "items.jsonl [items]: column 'note' is in no record, so it "
+            "loads as empty in every row; check the export still includes it"
+        ]
+
+    def test_nullable_key_some_records_use_is_not_warned_of(self) -> None:
+        """A key only some records hold is an ordinary blank."""
+        contract = _contract(
+            "jsonl",
+            Column("id", "integer"),
+            Column("note", "string", nullable=True),
+        )
+        warnings: list[str] = []
+
+        contract.read(
+            _jsonl({"id": 1}, {"id": 2, "note": "x"}), "items.jsonl", warnings
+        )
+
+        assert warnings == []
 
     def test_required_key_no_record_uses_is_refused(self) -> None:
         """A required key absent from every record fails each row."""

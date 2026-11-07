@@ -78,6 +78,14 @@ is 0, a minor release (0.x.0) may break that API, and says how below.
   as well as its rows, and no longer says Dataform is unaffected.
 - `test_malformed_quarantines` has short test names, so it runs on
   Windows.
+- `LocalObjectStore.put()` writes its temporary file under
+  `.partial/` in the store folder, with a short name. Beside the file,
+  the temporary name took a key whose path was 220 to 239 characters
+  past the Windows path limit, and the write failed on every run.
+- A nullable listed column that no record of a JSON or JSON Lines file
+  holds, or a mapped SharePoint field that no item holds, gives a
+  contract warning naming the column. It loaded as `null` in every row
+  without a word, as a column deleted from the export would.
 
 ## 0.5.0 - 2026-11-04
 

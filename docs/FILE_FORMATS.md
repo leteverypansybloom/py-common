@@ -125,7 +125,9 @@ pipeline = Pipeline(
   the order they first appear. A key an object leaves out is `null`
   in that row, so a listed column that no object uses is never
   "missing": each row fails if the column is required, and loads
-  `null` if it is nullable.
+  `null` if it is nullable. A nullable listed column that no object
+  in the file uses also gives a warning, whatever `on_mismatch` is,
+  as the export may have dropped it.
 - Values keep their JSON types: text, numbers, `true` and `false`,
   `null`, and nested objects and arrays, which load into the payload
   unchanged.
@@ -207,6 +209,13 @@ lists them. `dummy_was_database.jsonl` in this folder is a complete
 example: `dummy_was_database.xlsx` written as Graph would send it, with
 `tests/unit/test_graph_export.py` holding its mapping. Its internal
 names follow SharePoint's naming rule, and are not from a real list.
+
+SharePoint leaves a blank field out of an item, so a nullable mapped
+field that only some items hold loads as `null` in the others. One
+that no item holds, such as a column deleted from the list, still
+loads, as `null` in every row, with a warning naming its column. The
+dummy export gives one for `Date of session 2`, which is empty in
+every row of the dummy workbook.
 
 `site_time_zone` is the time zone in the SharePoint site's regional
 settings. Graph sends dates in UTC, and SharePoint stores a date-only

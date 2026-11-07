@@ -5,7 +5,12 @@ from datetime import datetime, tzinfo
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from py_common.contract import Contract, SheetRows, read_jsonl
+from py_common.contract import (
+    Contract,
+    SheetRows,
+    _absent_everywhere,
+    read_jsonl,
+)
 from py_common.errors import ConfigError, ValidationError
 
 
@@ -184,6 +189,8 @@ class GraphJsonLinesContract(Contract):
         allowed = set(self.field_map.values()) | set(self.excluded_fields)
         dates = [c.name for c in worksheet.columns if c.data_type == "date"]
         zone = ZoneInfo(self.site_time_zone) if dates else None
+        seen_fields: set[str] = set()
+        seen_metadata: set[str] = set()
         for number, values in rows:
             record = dict(zip(names, values, strict=True))
             if (
@@ -220,6 +227,8 @@ class GraphJsonLinesContract(Contract):
                     f"{len(unexpected)} unrecognised field(s), "
                     f"{len(missing) + len(missing_metadata)} missing field(s)"
                 )
+            seen_fields.update(fields)
+            seen_metadata.update(record)
             mapped = {
                 **{
                     key: fields.get(name)
@@ -241,12 +250,27 @@ class GraphJsonLinesContract(Contract):
                         f"{source_name}: line {number}: '{key}' {error}"
                     ) from None
             selected.append((number, tuple(mapped[key] for key in columns)))
+        found = warnings if warnings is not None else []
+        # A field SharePoint leaves out of an item reads as None, so one
+        # dropped from the list would otherwise look like one nobody
+        # filled in. Said whatever on_mismatch is.
+        if selected:
+            header = f"{source_name} [{worksheet.name}]"
+            absent = [
+                canonical
+                for canonical, name in self.field_map.items()
+                if name not in seen_fields
+            ] + [
+                canonical
+                for canonical, name in self.metadata_map.items()
+                if name not in seen_metadata
+            ]
+            found.extend(
+                _absent_everywhere(header, canonical)
+                for canonical in columns
+                if canonical in absent
+            )
         checked = self._checked(
-            columns,
-            selected,
-            worksheet,
-            source_name,
-            warnings if warnings is not None else [],
-            True,
+            columns, selected, worksheet, source_name, found, True
         )
         return {worksheet.name: checked}

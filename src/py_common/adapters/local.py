@@ -248,10 +248,15 @@ class LocalObjectStore:
                 f"Key {key} exists with different content"
             )
 
-        # Written beside the file and then renamed into place, so a write
-        # cut off part-way, as on a full disk, leaves no partial file
-        # for every later put to conflict with.
-        partial = path.with_name(f".{path.name}.{uuid.uuid4().hex}.partial")
+        # Written to a short name in the store's own folder and then
+        # moved into place, so a write cut off part-way, as on a full
+        # disk, leaves no partial file for every later put to conflict
+        # with. A name beside the file would be longer than the file's
+        # own, and could pass the Windows path limit that the file's
+        # path stays under (_resolve_path).
+        partials = self.folder.resolve() / ".partial"
+        partials.mkdir(exist_ok=True)
+        partial = partials / uuid.uuid4().hex
         try:
             partial.write_bytes(data)
             os.replace(partial, path)
