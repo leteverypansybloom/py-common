@@ -321,9 +321,11 @@ def check_duplicate_loads(client: QueryClient, audit_table: str) -> list[str]:
     loaded <n> times into <table>", for a log-based alert. Run it
     from the daily job.
 
-    No harm is done meanwhile. The documented "latest upload" query
-    for raw tables reads one load per upload (docs/RAW_TABLE_LAYOUT.md);
-    to tidy up, delete the rows of the later load (its ingested_at).
+    The documented "latest upload" query for raw tables reads one load
+    per upload (docs/RAW_TABLE_LAYOUT.md), but a Dataform project that
+    checks for duplicate loads holds its tables until the later load's
+    rows and its audit row are deleted (docs/RUNBOOK.md, "An upload was
+    loaded twice").
 
     Args:
         client: BigQuery client.

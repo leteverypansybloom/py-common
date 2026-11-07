@@ -5,9 +5,11 @@ stateful fake client (_fake_bigquery.py), so the warehouse's own
 audit check is what decides, not a Mock's return value.
 """
 
+import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from io import BytesIO
+from typing import Any
 from unittest.mock import Mock, patch
 
 import pytest
@@ -148,6 +150,19 @@ class Harness:
         """
         return self.client.rows.get(self.table, 0)
 
+    @property
+    def records(self) -> list[dict[str, Any]]:
+        """Read the attempt records the pipeline stored.
+
+        Returns:
+            Each record under audit/records/, parsed.
+        """
+        return [
+            json.loads(data)
+            for key, data in self.store.objects.items()
+            if key.startswith("audit/records/")
+        ]
+
 
 @pytest.fixture
 def harness() -> Harness:
@@ -203,6 +218,43 @@ class TestCrashAfterCommit:
         assert second == Outcome.SKIPPED
         assert harness.rows == 2
         assert len(harness.client.audit) == 1
+
+    def test_lost_commit_wait_leaves_a_loaded_record(
+        self, harness: Harness
+    ) -> None:
+        """The store's records show the load the warehouse already held.
+
+        Args:
+            harness: Pipeline and fake-service harness.
+        """
+        harness.client.lose_next_commit_wait = ConnectionError("reset")
+
+        harness.upload(A, "1")
+        harness.upload(A, "1")
+
+        loaded = [r for r in harness.records if r["outcome"] == "loaded"]
+        assert [r["rows_processed"] for r in loaded] == [2]
+        assert "already held" in loaded[0]["warnings"][0]
+
+    def test_only_a_load_records_rows(self, harness: Harness) -> None:
+        """A failed or skipped attempt records no rows processed.
+
+        Args:
+            harness: Pipeline and fake-service harness.
+        """
+        harness.client.lose_next_commit_wait = ConnectionError("reset")
+
+        harness.upload(A, "1")
+        harness.upload(A, "1")
+        harness.upload(A, "1")
+
+        others = [r for r in harness.records if r["outcome"] != "loaded"]
+        assert sorted(r["outcome"] for r in others) == [
+            "failed",
+            "skipped",
+            "skipped",
+        ]
+        assert [r["rows_processed"] for r in others] == [0, 0, 0]
 
     def test_lost_store_markers_are_rebuilt_from_warehouse(
         self, harness: Harness

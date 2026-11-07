@@ -113,8 +113,9 @@ gh variable set GCP_WORKLOAD_IDENTITY_PROVIDER --repo "$REPO" \
   --body "projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/github/providers/py-common"
 ```
 
-Until `GCP_WORKLOAD_IDENTITY_PROVIDER` is set, the workflow is
-skipped rather than failing.
+Until all four are set, the nightly run is skipped rather than
+failing. A run from the **Run workflow** button fails at "Check
+live-test configuration", naming the variables to set.
 
 ## First run
 

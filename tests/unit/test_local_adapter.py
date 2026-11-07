@@ -4,10 +4,13 @@ Tests define the ObjectStore/Source protocol contracts using a real
 temp folder (no mocking needed for local filesystem operations).
 """
 
+from pathlib import Path
+from typing import IO, Any
+
 import pytest
 
 from py_common.adapters.local import LocalObjectStore, LocalSource
-from py_common.errors import ObjectStoreConflict
+from py_common.errors import ObjectStoreConflict, VersionMismatch
 
 
 class TestLocalObjectStorePut:
@@ -74,6 +77,40 @@ class TestLocalObjectStorePut:
             store.put("existing-key", b"new data")
 
         assert store.get("existing-key") == b"old data"
+
+    def test_write_cut_off_part_way_does_not_block_a_retry(
+        self, store: LocalObjectStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed write leaves nothing behind, so the retry succeeds.
+
+        Args:
+            store: LocalObjectStore fixture.
+            monkeypatch: Makes the first write stop half-way.
+        """
+        real_write = Path.write_bytes
+
+        def full_disk(path: Path, data: bytes) -> int:
+            """Write half the bytes, then fail as a full disk does.
+
+            Args:
+                path: The file written.
+                data: The bytes asked for.
+
+            Raises:
+                OSError: Always.
+            """
+            real_write(path, data[: len(data) // 2])
+            raise OSError("No space left on device")
+
+        monkeypatch.setattr(Path, "write_bytes", full_disk)
+        with pytest.raises(OSError, match="No space"):
+            store.put("dir/key", b"complete data")
+        monkeypatch.undo()
+
+        assert store.get("dir/key") is None
+        assert list((store.folder / "dir").iterdir()) == []
+        store.put("dir/key", b"complete data")
+        assert store.get("dir/key") == b"complete data"
 
 
 class TestLocalObjectStoreKeyResolution:
@@ -206,3 +243,42 @@ class TestLocalSourceItems:
         names = [item.name for item in source.items()]
 
         assert names == ["events.xlsx"]
+
+
+class TestLocalSourceDownload:
+    """LocalSource.download() returns the version discovery found."""
+
+    def test_file_replaced_while_read_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A file replaced during the read isn't returned as the old one.
+
+        Args:
+            tmp_path: pytest temp directory fixture.
+            monkeypatch: Replaces the file as it is read.
+        """
+        path = tmp_path / "events.xlsx"
+        path.write_bytes(b"first upload")
+        source = LocalSource(tmp_path)
+        item = next(iter(source.items()))
+
+        def open_then_replace(*args: Any, **kwargs: Any) -> IO[bytes]:
+            """Open the file, then replace it with a longer one.
+
+            Args:
+                *args: As open().
+                **kwargs: As open().
+
+            Returns:
+                The opened file.
+            """
+            opened: IO[bytes] = open(*args, **kwargs)
+            path.write_bytes(b"second, longer upload")
+            return opened
+
+        monkeypatch.setattr(
+            "py_common.adapters.local.open", open_then_replace, raising=False
+        )
+
+        with pytest.raises(VersionMismatch, match="modified since"):
+            source.download(item)

@@ -35,6 +35,11 @@ from py_common.raw import to_ndjson
 
 logger = logging.getLogger("py_common.pipeline")
 
+_ALREADY_HELD = (
+    "The warehouse already held this file version: a run committed it "
+    "but lost the confirmation, so it was not loaded again"
+)
+
 
 def _fields(**more: Any) -> dict[str, Any]:
     """`extra=` for a pipeline log call: the run and file fields.
@@ -332,10 +337,17 @@ class Pipeline:
                     checksum[:8],
                     extra=_fields(),
                 )
+            if outcome == Outcome.SKIPPED:
+                # Only reached when the warehouse already holds this
+                # version: an earlier run committed it but lost the
+                # confirmation, so no record of that run says "loaded".
+                warnings.append(_ALREADY_HELD)
             if outcome in (Outcome.LOADED, Outcome.SKIPPED):
+                # The receipt records the load itself, which the
+                # warehouse holds either way, so it says "loaded".
                 receipt_result = self._make_result(
                     item,
-                    outcome,
+                    Outcome.LOADED,
                     checksum,
                     rows_processed,
                     errors,
@@ -355,8 +367,6 @@ class Pipeline:
                 marker_key = self._loaded_marker_key(item)
                 if not self.store.get(marker_key):
                     self.store.put(marker_key, receipt)
-            if outcome in (Outcome.SKIPPED, Outcome.QUARANTINED):
-                rows_processed = 0
 
         except Exception as e:
             if outcome != Outcome.QUARANTINED:
@@ -366,6 +376,11 @@ class Pipeline:
             logger.exception(
                 "Processing error for %s: %s", item.name, e, extra=_fields()
             )
+
+        # Only a load counts rows: a skip, a quarantine or a failure
+        # loaded nothing in this attempt.
+        if outcome != Outcome.LOADED:
+            rows_processed = 0
 
         return self._make_result(
             item,
