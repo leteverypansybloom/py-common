@@ -24,8 +24,19 @@ is 0, a minor release (0.x.0) may break that API, and says how below.
 - `docs/upcoming_work.md` and its images, an archived design.
   `docs/GCP_SETUP.md` is the maintained set-up.
 
+- `docs/RUNBOOK.md`, "An upload was loaded twice": how to remove the
+  later load, rows and audit row together.
+
 ### Changed
 
+- The store's audit records count rows only for a load: a skipped,
+  quarantined or failed attempt records 0 rows. When the warehouse
+  already holds the file version, because a run committed it and lost
+  the confirmation, the receipt records it as loaded, with a warning
+  saying so.
+- The nightly live BigQuery workflow is skipped, not failed, until its
+  four repository variables are set. A manual run still fails, naming
+  them.
 - A file over `max_file_bytes` is quarantined from its listed size,
   without being downloaded, so no copy of it reaches `raw/` or
   `quarantine/`. It stays in the landing folder.
@@ -51,6 +62,22 @@ is 0, a minor release (0.x.0) may break that API, and says how below.
   such as `0001-01-01T00:00:00Z`, instead of failing on every run.
 - `RawJsonWarehouse` quarantines a file whose rows BigQuery refuses (a
   400 with the reason `invalid`) instead of retrying it on every run.
+- A JSON or JSON Lines file with listed columns and no records loads
+  when `allow_empty` is set, and a nullable key that no record uses
+  reads as None. Both were reported as a missing column.
+- A CSV file holding NUL characters, as UTF-16 does, or whose heading
+  row is one heading holding a semicolon or a tab, is quarantined. Under
+  `all_except` it loaded as one column of garbled text.
+- `LocalObjectStore.put()` writes beside the file and renames it into
+  place, so a write cut off part-way no longer blocks every retry.
+- `LocalSource.download()` checks the file's version again after
+  reading it, so a file replaced during the read isn't stored under the
+  version it replaced.
+- The duplicate-load guidance in `docs/GCP_SETUP.md` and
+  `runner.check_duplicate_loads()` deletes the later load's audit row
+  as well as its rows, and no longer says Dataform is unaffected.
+- `test_malformed_quarantines` has short test names, so it runs on
+  Windows.
 
 ## 0.5.0 - 2026-11-04
 

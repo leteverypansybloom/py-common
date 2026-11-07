@@ -113,6 +113,29 @@ class TestReadCsv:
         with pytest.raises(ValueError, match="invalid CSV at line 2"):
             read_csv(b'id\n"1"x\n')
 
+    def test_utf16_without_a_byte_order_mark_is_refused(self) -> None:
+        """UTF-16 read as UTF-8 holds NULs, and is refused for them."""
+        with pytest.raises(ValueError, match="NUL characters"):
+            read_csv("id,name\n1,Ann\n".encode("utf-16-le"))
+
+    @pytest.mark.parametrize("separator", [";", "\t"])
+    def test_other_separators_are_refused(self, separator: str) -> None:
+        """A semicolon or tab file isn't read as one wide column.
+
+        Args:
+            separator: The character the file's fields are split by.
+        """
+        data = f"id{separator}name\n1{separator}Ann\n".encode()
+
+        with pytest.raises(ValueError, match="save the file comma-sep"):
+            read_csv(data)
+
+    def test_a_separator_in_one_of_several_headings_is_kept(self) -> None:
+        """A semicolon is fine in a heading of a comma-separated file."""
+        names, _ = read_csv(b"id,Notes; comments\n1,x\n")
+
+        assert names == ["id", "Notes; comments"]
+
 
 class TestReadJson:
     """read_json() reads an array of objects."""
@@ -451,6 +474,48 @@ class TestJsonContract:
 
         sheets = _contract("json", allow_empty=True).read(b"[]", "items.json")
         assert sheets["items"].rows == []
+
+    @pytest.mark.parametrize(
+        ("file_format", "data"), [("json", b"[]"), ("jsonl", b"")]
+    )
+    def test_allow_empty_loads_listed_columns_with_no_records(
+        self, file_format: str, data: bytes
+    ) -> None:
+        """With no records, no listed column is reported missing.
+
+        Args:
+            file_format: "json" or "jsonl".
+            data: A file with no records.
+        """
+        contract = _contract(
+            file_format, Column("id", "integer"), allow_empty=True
+        )
+
+        sheets = contract.read(data, f"items.{file_format}")
+
+        assert sheets["items"].columns == ["id"]
+        assert sheets["items"].rows == []
+
+    def test_nullable_key_no_record_uses_reads_as_none(self) -> None:
+        """A nullable key absent from every record loads as None."""
+        contract = _contract(
+            "jsonl",
+            Column("id", "integer"),
+            Column("note", "string", nullable=True),
+        )
+
+        sheets = contract.read(_jsonl({"id": 1}, {"id": 2}), "items.jsonl")
+
+        assert sheets["items"].rows == [(1, (1, None)), (2, (2, None))]
+
+    def test_required_key_no_record_uses_is_refused(self) -> None:
+        """A required key absent from every record fails each row."""
+        contract = _contract(
+            "jsonl", Column("id", "integer"), Column("name", "string")
+        )
+
+        with pytest.raises(ValidationError, match="Row 1: 'name' is required"):
+            contract.read(_jsonl({"id": 1}), "items.jsonl")
 
     def test_wrong_file_name_is_refused_first(self) -> None:
         """file_name is checked before the file is read."""

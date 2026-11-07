@@ -170,6 +170,18 @@ class TestPipelineProcess:
             ("json", b""),
             ("jsonl", b""),
         ],
+        # Short names: a test's name goes into an environment variable,
+        # which Windows limits to 32,767 characters.
+        ids=[
+            "xlsx-not-a-zip",
+            "csv-unterminated-quote",
+            "csv-not-utf8",
+            "csv-field-too-long",
+            "json-repeated-key",
+            "json-too-deep",
+            "json-empty",
+            "jsonl-empty",
+        ],
     )
     def test_malformed_quarantines(self, fmt, data):
         """Unsupported or malformed files are acknowledged as invalid.

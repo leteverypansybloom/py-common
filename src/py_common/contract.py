@@ -899,9 +899,13 @@ class Contract:
         """
         errors: list[str] = []
         header = f"{source_name} [{ws_def.name}]"
+        # A JSON record that leaves a key out holds None for it, so a
+        # key no record uses is a column of None values, checked row by
+        # row like any other, and a file with no records has no columns.
+        keyed = self.file_format in ("json", "jsonl")
 
         for col_def in ws_def.columns:
-            if col_def.name not in headers:
+            if col_def.name not in headers and not keyed:
                 errors.append(f"Missing column '{col_def.name}'")
 
         if ws_def.column_selection == "listed":
@@ -934,11 +938,13 @@ class Contract:
 
         # A missing column has already been reported once above (only
         # possible in "warn" mode); don't report it again on every row.
-        present = [c for c in ws_def.columns if c.name in header_index]
+        present = [
+            c for c in ws_def.columns if c.name in header_index or keyed
+        ]
 
         for row_idx, row in rows:
             for col_def in present:
-                col_idx = header_index[col_def.name]
+                col_idx = header_index.get(col_def.name, len(row))
                 value = row[col_idx] if col_idx < len(row) else None
 
                 # Whitespace-only text counts as empty, as it does for
@@ -1165,6 +1171,12 @@ def read_csv(
     column, which could carry an excluded column's text into a loaded
     one.
 
+    Two files saved the wrong way are refused too, as they would
+    otherwise load as one column of garbled text: text holding NUL
+    characters, as UTF-16 does when read as UTF-8, and a heading row
+    that is one heading holding a semicolon or a tab, as a file
+    separated by those is.
+
     Args:
         data: The file's bytes.
         header_row: Row holding the headings (1 = first row).
@@ -1176,11 +1188,18 @@ def read_csv(
         shows them, so a quoted field's line breaks don't shift them.
 
     Raises:
-        ValueError: The file isn't UTF-8 text or isn't valid CSV, a row
-            has more fields than the heading row, or the file is over a
-            limit.
+        ValueError: The file isn't UTF-8 text or isn't valid CSV, it
+            holds a NUL character, its headings are separated by
+            semicolons or tabs, a row has more fields than the heading
+            row, or the file is over a limit.
     """
-    reader = csv.reader(StringIO(_decode(data), newline=""), strict=True)
+    text = _decode(data)
+    if "\x00" in text:
+        raise ValueError(
+            "the file holds NUL characters, as a UTF-16 file does; save "
+            "it as CSV UTF-8"
+        )
+    reader = csv.reader(StringIO(text, newline=""), strict=True)
     try:
         records = list(_bounded(reader, max_columns, max_cells))
     except csv.Error as e:
@@ -1188,7 +1207,13 @@ def read_csv(
             f"invalid CSV at line {reader.line_num} ({e})"
         ) from None
     if len(records) >= header_row:
-        width = len(records[header_row - 1])
+        headings = records[header_row - 1]
+        if len(headings) == 1 and any(c in headings[0] for c in ";\t"):
+            raise ValueError(
+                f"row {header_row} is one heading holding a semicolon or "
+                "a tab; save the file comma-separated"
+            )
+        width = len(headings)
         for number, record in enumerate(
             records[header_row:], start=header_row + 1
         ):

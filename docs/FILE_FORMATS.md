@@ -83,12 +83,16 @@ pipeline = Pipeline(
 
 - UTF-8, with or without a byte order mark (Excel's "CSV UTF-8"
   writes one). Any other encoding is quarantined, naming the first bad
-  byte's position: export the file again as UTF-8.
+  byte's position: export the file again as UTF-8. Text holding a
+  NUL character, as a UTF-16 file without a byte order mark does, is
+  quarantined too.
 - Comma-separated, with double quotes around a field that holds a
   comma, a quote or a line break. Anything else, such as text after a
   closing quote, is quarantined. So is a row with more fields than the
   heading row, which usually means an unquoted comma has moved every
-  value after it into the next column.
+  value after it into the next column, and a heading row that is one
+  heading holding a semicolon or a tab, which a file separated by
+  those has.
 - A field holding an Excel error, such as `#REF!`, is quarantined or
   warned about, as in a worksheet.
 - Headings are named as in a worksheet: used exactly as written, a
@@ -119,7 +123,9 @@ pipeline = Pipeline(
   has one object per line, and blank lines are skipped.
 - The columns are every key the objects use, exactly as written, in
   the order they first appear. A key an object leaves out is `null`
-  in that row.
+  in that row, so a listed column that no object uses is never
+  "missing": each row fails if the column is required, and loads
+  `null` if it is nullable.
 - Values keep their JSON types: text, numbers, `true` and `false`,
   `null`, and nested objects and arrays, which load into the payload
   unchanged.

@@ -102,6 +102,51 @@ Deleted data isn't gone at once: BigQuery keeps it for time travel
 delete keeps deleted objects (7 days by default). Check what the
 DPIA needs.
 
+## An upload was loaded twice
+
+The duplicate-load alert (`Duplicate load: <load key> version
+<generation> loaded <n> times into <table>`) names the upload. The
+"latest upload" query in [`RAW_TABLE_LAYOUT.md`](RAW_TABLE_LAYOUT.md)
+still reads one load, but a Dataform project that checks for
+duplicate loads holds its tables until this is tidied up, and the
+alert repeats daily.
+
+Remove the later load: both its rows and its audit row. Deleting only
+the rows leaves an audit row that no rows match, and readers that
+compare the two then stop with a row count error.
+
+1. **Find the loads' times.** Each load's audit `timestamp` is the
+   `ingested_at` of its rows:
+
+   ```sql
+   SELECT timestamp, row_count
+   FROM `$PROJECT.$RAW_DATASET.audit`
+   WHERE destination = '<table>' AND source_version = '<generation>'
+     AND outcome = 'LOADED'
+   ORDER BY timestamp
+   ```
+
+   Keep the first; the others are the later loads.
+2. **Delete each later load** at its time `<T>`, in one transaction,
+   as someone with delete access (the pipeline's service account
+   can't):
+
+   ```sql
+   BEGIN TRANSACTION;
+   DELETE FROM `<table>`
+   WHERE source_generation = '<generation>'
+     AND ingested_at = TIMESTAMP '<T>';
+   DELETE FROM `$PROJECT.$RAW_DATASET.audit`
+   WHERE destination = '<table>' AND source_version = '<generation>'
+     AND outcome = 'LOADED' AND timestamp = TIMESTAMP '<T>';
+   COMMIT TRANSACTION;
+   ```
+
+   The first `DELETE` should remove the `row_count` the step 1 query
+   showed for that load.
+3. **Check:** step 1's query now returns one row, and the next daily
+   run logs no `Duplicate load:` line.
+
 ## A workbook is renamed on purpose
 
 Change the contract's `file_name`, deploy, then upload under the new

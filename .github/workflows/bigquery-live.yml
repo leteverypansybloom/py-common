@@ -22,6 +22,14 @@ concurrency:
 
 jobs:
   bigquery:
+    # Until the repository variables are set, the nightly run is
+    # skipped rather than failed, so a red run means the SQL failed.
+    # A run from the button always starts, and says what is missing.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (vars.GCP_WORKLOAD_IDENTITY_PROVIDER != '' &&
+       vars.GCP_SERVICE_ACCOUNT != '' &&
+       vars.GCP_PROJECT_ID != '' && vars.BQ_TEST_DATASET != '')
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -46,8 +54,10 @@ jobs:
           PROJECT: ${{ vars.GCP_PROJECT_ID }}
           DATASET: ${{ vars.BQ_TEST_DATASET }}
         run: |
-          test -n "$PROVIDER" && test -n "$ACCOUNT"
-          test -n "$PROJECT" && test -n "$DATASET"
+          if [ -z "$PROVIDER" ] || [ -z "$ACCOUNT" ] || [ -z "$PROJECT" ] || [ -z "$DATASET" ]; then
+            echo "Set the GCP_WORKLOAD_IDENTITY_PROVIDER, GCP_SERVICE_ACCOUNT, GCP_PROJECT_ID and BQ_TEST_DATASET repository variables (docs/CI_SETUP.md)."
+            exit 1
+          fi
 
       - name: Sign in to Google Cloud
         uses: google-github-actions/auth@v3
