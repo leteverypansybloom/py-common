@@ -115,6 +115,59 @@ class TestGraphJsonLinesContractRead:
         rows = contract.read(b'{"id":"42","fields":{}}', "items.jsonl")
         assert rows["items"].rows == [(1, ("42", None))]
 
+    def test_field_in_no_item_is_warned_of(self) -> None:
+        """A mapped field no item holds loads as None, with a warning."""
+        contract = GraphJsonLinesContract(
+            worksheets=[
+                Worksheet(
+                    "items",
+                    [
+                        Column("id", "string"),
+                        Column("optional", "any", nullable=True),
+                    ],
+                )
+            ],
+            file_format="jsonl",
+            field_map={"optional": "SyntheticOptional"},
+            metadata_map={"id": "id"},
+        )
+        data = b'{"id":"1","fields":{}}\n{"id":"2","fields":{}}\n'
+        warnings: list[str] = []
+
+        rows = contract.read(data, "items.jsonl", warnings)
+
+        assert rows["items"].rows == [(1, ("1", None)), (2, ("2", None))]
+        assert warnings == [
+            "items.jsonl [items]: column 'optional' is in no record, so it "
+            "loads as empty in every row; check the export still includes it"
+        ]
+
+    def test_field_in_some_items_is_not_warned_of(self) -> None:
+        """A field that only some items hold is an ordinary blank."""
+        contract = GraphJsonLinesContract(
+            worksheets=[
+                Worksheet(
+                    "items",
+                    [
+                        Column("id", "string"),
+                        Column("optional", "any", nullable=True),
+                    ],
+                )
+            ],
+            file_format="jsonl",
+            field_map={"optional": "SyntheticOptional"},
+            metadata_map={"id": "id"},
+        )
+        data = (
+            b'{"id":"1","fields":{}}\n'
+            b'{"id":"2","fields":{"SyntheticOptional":"x"}}\n'
+        )
+        warnings: list[str] = []
+
+        contract.read(data, "items.jsonl", warnings)
+
+        assert warnings == []
+
 
 def dated_contract(**settings: Any) -> GraphJsonLinesContract:
     """Build a contract with a date and a multi-choice column.

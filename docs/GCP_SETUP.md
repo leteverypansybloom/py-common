@@ -550,7 +550,7 @@ whatever path led there). Match on those fields:
 |---|---|---|
 | Failed file | `jsonPayload.outcome="failed"` | Any file FAILED, from any cause (service error, unknown commit, audit write, ...) |
 | Failed run | `severity>=ERROR AND (jsonPayload.message:"Pipeline run failed" OR jsonPayload.message:"Freshness check failed" OR jsonPayload.message:"Duplicate-load check failed" OR jsonPayload.message:"Could not release lock")` | A run failed or was refused by the lock, a daily check couldn't run, or a run couldn't release its lock (the next runs would be refused until its lease expires) |
-| Header or data warning | `jsonPayload.message:"Contract warning:"` | A `"warn"` worksheet loaded with a mismatch, or a value loaded as NULL |
+| Header or data warning | `jsonPayload.message:"Contract warning:"` | A `"warn"` worksheet loaded with a mismatch, a value loaded as NULL, or a JSON or SharePoint column that no record of a file holds |
 | Quarantined file | `jsonPayload.outcome="quarantined"` | A file was rejected, by the contract or the warehouse |
 | Missing monthly file | `jsonPayload.message:"Missing monthly file:"` | From the 8th of the month, a monthly source with nothing loaded since the 1st; repeats daily until it loads |
 | Duplicate load | `jsonPayload.message:"Duplicate load:"` | An upload was loaded into a table twice. Very unlikely: it takes two commits of the same upload at once (one still running after the pipeline stopped waiting, ten minutes, plus its retry). The raw "latest upload" query reads one load per upload, but a Dataform project that checks for duplicate loads holds its tables until it's tidied up: remove the later load's rows and its audit row ([`RUNBOOK.md`](RUNBOOK.md), "An upload was loaded twice"). Repeats daily |

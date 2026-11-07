@@ -905,8 +905,15 @@ class Contract:
         keyed = self.file_format in ("json", "jsonl")
 
         for col_def in ws_def.columns:
-            if col_def.name not in headers and not keyed:
+            if col_def.name in headers:
+                continue
+            if not keyed:
                 errors.append(f"Missing column '{col_def.name}'")
+            elif rows and col_def.nullable:
+                # Loaded as None, but said, whatever on_mismatch is: a
+                # column dropped from the export would otherwise look
+                # like one nobody filled in.
+                warnings.append(_absent_everywhere(header, col_def.name))
 
         if ws_def.column_selection == "listed":
             # read_sheet() has already turned every heading into text
@@ -986,6 +993,22 @@ class Contract:
             warnings.append(message)
 
         return len(rows)
+
+
+def _absent_everywhere(header: str, column: str) -> str:
+    """Describe a listed column that no record of a file holds.
+
+    Args:
+        header: "file [table]", for the message.
+        column: The column's name.
+
+    Returns:
+        The warning.
+    """
+    return (
+        f"{header}: column '{column}' is in no record, so it loads as "
+        "empty in every row; check the export still includes it"
+    )
 
 
 def _bounded(

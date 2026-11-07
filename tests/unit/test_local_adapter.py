@@ -109,8 +109,30 @@ class TestLocalObjectStorePut:
 
         assert store.get("dir/key") is None
         assert list((store.folder / "dir").iterdir()) == []
+        assert list((store.folder / ".partial").iterdir()) == []
         store.put("dir/key", b"complete data")
         assert store.get("dir/key") == b"complete data"
+
+    @pytest.mark.parametrize("length", [200, 220, 230, 238, 245])
+    def test_long_key_can_be_written(
+        self, store: LocalObjectStore, length: int
+    ) -> None:
+        """A key with a path near the Windows limit writes and reads back.
+
+        Paths of 240 characters or more are shortened by the store; the
+        file written on the way must fit under the limit too.
+
+        Args:
+            store: LocalObjectStore fixture.
+            length: Characters in the key's resolved path.
+        """
+        prefix = "processed/"
+        used = len(str(store.folder.resolve())) + 1 + len(prefix)
+        key = prefix + "k" * (length - used - len(".ndjson")) + ".ndjson"
+
+        store.put(key, b"rows")
+
+        assert store.get(key) == b"rows"
 
 
 class TestLocalObjectStoreKeyResolution:
